@@ -1,0 +1,19 @@
+{
+  "name": "@sunpilot/integration-tests",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "echo integration-tests",
+    "pretest": "pnpm -r build",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@sunpilot/daemon": "workspace:*",
+    "ws": "^8.18.2"
+  },
+  "devDependencies": {
+    "@types/ws": "^8.18.1",
+    "vitest": "^3.2.1"
+  }
+}

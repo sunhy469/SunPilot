@@ -1,0 +1,16 @@
+{
+  "type": "object",
+  "required": ["message", "echoedAt", "artifactId"],
+  "properties": {
+    "message": {
+      "type": "string"
+    },
+    "echoedAt": {
+      "type": "string"
+    },
+    "artifactId": {
+      "type": "string"
+    }
+  },
+  "additionalProperties": false
+}

@@ -1,0 +1,10 @@
+node_modules/
+dist/
+packages/*/dist/
+packages/skills/fixtures/*/dist/
+.sunpilot/
+*.log
+*.db
+*.db-shm
+*.db-wal
+developer_docs/dev_docs/

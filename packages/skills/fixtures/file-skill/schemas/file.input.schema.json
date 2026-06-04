@@ -1,0 +1,13 @@
+{
+  "type": "object",
+  "required": ["path", "content"],
+  "properties": {
+    "path": {
+      "type": "string"
+    },
+    "content": {
+      "type": "string"
+    }
+  },
+  "additionalProperties": false
+}

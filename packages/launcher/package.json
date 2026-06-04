@@ -1,0 +1,28 @@
+{
+  "name": "@sunpilot/launcher",
+  "version": "0.1.0",
+  "type": "module",
+  "bin": {
+    "sun": "./dist/index.js",
+    "sunpilot": "./dist/index.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsx src/index.ts",
+    "test": "vitest run --passWithNoTests",
+    "lint": "eslint ."
+  },
+  "dependencies": {
+    "@sunpilot/daemon": "workspace:*",
+    "@sunpilot/storage": "workspace:*",
+    "open": "^10.1.2"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.4",
+    "typescript": "^5.8.3",
+    "vitest": "^3.2.1"
+  }
+}

@@ -1,0 +1,40 @@
+{
+  "schemaVersion": "sunpilot.skill/v1",
+  "id": "fixture.shell-skill",
+  "name": "Fixture Shell Skill",
+  "version": "0.1.0",
+  "description": "Development fixture that declares shell permission and must be denied by the MVP runner.",
+  "entry": "dist/index.js",
+  "readme": "README.md",
+  "author": {
+    "name": "SunPilot"
+  },
+  "runtime": {
+    "node": ">=22.22.2 <23",
+    "module": "esm"
+  },
+  "capabilities": [
+    {
+      "name": "shell.noop",
+      "title": "Shell noop",
+      "description": "A denied fixture capability.",
+      "inputSchema": "schemas/shell.input.schema.json",
+      "outputSchema": "schemas/shell.output.schema.json",
+      "risk": "critical",
+      "permissions": ["shell"]
+    }
+  ],
+  "permissions": {
+    "filesystem": {
+      "read": [],
+      "write": []
+    },
+    "network": {
+      "allow": []
+    },
+    "env": {
+      "allow": []
+    },
+    "shell": true
+  }
+}

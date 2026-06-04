@@ -1,0 +1,31 @@
+{
+  "name": "sunpilot",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Daemon-first local business agent runtime.",
+  "type": "module",
+  "packageManager": "pnpm@11.5.1",
+  "engines": {
+    "node": ">=22.22.2 <23",
+    "pnpm": ">=11.5.1 <12"
+  },
+  "scripts": {
+    "postinstall": "node scripts/link-sun-bin.mjs",
+    "build": "pnpm -r build",
+    "test": "pnpm -r test",
+    "lint": "pnpm -r lint",
+    "dev:daemon": "pnpm --filter @sunpilot/daemon dev",
+    "dev:console": "pnpm --filter @sunpilot/console dev"
+  },
+  "dependencies": {
+    "@sunpilot/launcher": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.29",
+    "eslint": "^9.28.0",
+    "prettier": "^3.5.3",
+    "typescript": "^5.8.3",
+    "typescript-eslint": "^8.33.1",
+    "vitest": "^3.2.1"
+  }
+}

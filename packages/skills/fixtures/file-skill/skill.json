@@ -1,0 +1,40 @@
+{
+  "schemaVersion": "sunpilot.skill/v1",
+  "id": "fixture.file-skill",
+  "name": "Fixture File Skill",
+  "version": "0.1.0",
+  "description": "Development fixture that attempts a file write without declaring permission.",
+  "entry": "dist/index.js",
+  "readme": "README.md",
+  "author": {
+    "name": "SunPilot"
+  },
+  "runtime": {
+    "node": ">=22.22.2 <23",
+    "module": "esm"
+  },
+  "capabilities": [
+    {
+      "name": "files.writeOutside",
+      "title": "Write outside allowed paths",
+      "description": "Attempt a write that should be denied.",
+      "inputSchema": "schemas/file.input.schema.json",
+      "outputSchema": "schemas/file.output.schema.json",
+      "risk": "high",
+      "permissions": []
+    }
+  ],
+  "permissions": {
+    "filesystem": {
+      "read": [],
+      "write": []
+    },
+    "network": {
+      "allow": []
+    },
+    "env": {
+      "allow": []
+    },
+    "shell": false
+  }
+}
