@@ -16,7 +16,7 @@ async function createTestDaemon(options: Omit<Parameters<typeof createDaemon>[0]
 }
 
 function auth() {
-  return { authorization: `Bearer ${daemon!.token}` };
+  return {};
 }
 
 async function createRun(text: string) {
@@ -61,7 +61,7 @@ afterEach(async () => {
 });
 
 describe("SunPilot daemon first-phase flow", () => {
-  test("protects writes with local token and reports readiness", async () => {
+  test("serves local APIs without token and reports readiness", async () => {
     const health = await daemon!.app.inject({ method: "GET", url: "/healthz" });
     expect(health.statusCode).toBe(200);
     expect(health.json()).toMatchObject({ ok: true, daemon: "alive" });
@@ -73,7 +73,7 @@ describe("SunPilot daemon first-phase flow", () => {
       database: true,
       config: {
         server: { host: "127.0.0.1", port: 3737 },
-        security: { requireLocalToken: true, allowLan: false }
+        security: { requireLocalToken: false, allowLan: false }
       },
       skills: 3,
       workflows: 4,
@@ -85,18 +85,15 @@ describe("SunPilot daemon first-phase flow", () => {
     expect(existsSync(join(home, "analytics"))).toBe(true);
     expect(existsSync(join(home, "vectors", "lance"))).toBe(true);
 
-    const denied = await daemon!.app.inject({
+    const allowedWrite = await daemon!.app.inject({
       method: "POST",
       url: "/v1/runs",
       payload: { input: { text: "no token" }, workflowId: "fixture.echo" }
     });
-    expect(denied.statusCode).toBe(401);
+    expect(allowedWrite.statusCode).toBe(200);
 
-    const deniedRead = await daemon!.app.inject({ method: "GET", url: "/v1/runs" });
-    expect(deniedRead.statusCode).toBe(401);
-
-    const deniedQueryTokenRead = await daemon!.app.inject({ method: "GET", url: `/v1/runs?token=${daemon!.token}` });
-    expect(deniedQueryTokenRead.statusCode).toBe(401);
+    const allowedRead = await daemon!.app.inject({ method: "GET", url: "/v1/runs" });
+    expect(allowedRead.statusCode).toBe(200);
 
     const rejectedOrigin = await daemon!.app.inject({
       method: "POST",
@@ -229,17 +226,9 @@ describe("SunPilot daemon first-phase flow", () => {
       }
     });
 
-    const denied = await daemon.app.inject({
-      method: "POST",
-      url: "/v1/chat",
-      payload: { message: "hello agent" }
-    });
-    expect(denied.statusCode).toBe(401);
-
     const response = await daemon.app.inject({
       method: "POST",
       url: "/v1/chat",
-      headers: auth(),
       payload: { message: "hello agent" }
     });
 
@@ -283,13 +272,9 @@ describe("SunPilot daemon first-phase flow", () => {
   });
 
   test("updates managed config through daemon API with local safety constraints and audit log", async () => {
-    const denied = await daemon!.app.inject({ method: "PATCH", url: "/v1/config", payload: { server: { port: 4111 } } });
-    expect(denied.statusCode).toBe(401);
-
     const updated = await daemon!.app.inject({
       method: "PATCH",
       url: "/v1/config",
-      headers: auth(),
       payload: {
         server: { host: "0.0.0.0", port: 4111 },
         security: { requireLocalToken: false, allowLan: true },
@@ -348,22 +333,16 @@ describe("SunPilot daemon first-phase flow", () => {
 
     const artifact = await daemon!.app.inject({
       method: "GET",
-      url: `/v1/artifacts/${body.artifacts[0]!.id}/content?token=${daemon!.token}`
+      url: `/v1/artifacts/${body.artifacts[0]!.id}/content`
     });
     expect(artifact.statusCode).toBe(200);
     expect(artifact.body).toContain("run fixture echo workflow");
-
-    const deniedArtifact = await daemon!.app.inject({
-      method: "GET",
-      url: `/v1/artifacts/${body.artifacts[0]!.id}/content`
-    });
-    expect(deniedArtifact.statusCode).toBe(401);
 
     const artifactMeta = await daemon!.app.inject({ method: "GET", url: `/v1/artifacts/${body.artifacts[0]!.id}`, headers: auth() });
     unlinkSync(artifactMeta.json().path);
     const missingArtifact = await daemon!.app.inject({
       method: "GET",
-      url: `/v1/artifacts/${body.artifacts[0]!.id}/content?token=${daemon!.token}`
+      url: `/v1/artifacts/${body.artifacts[0]!.id}/content`
     });
     expect(missingArtifact.statusCode).toBe(404);
     expect(missingArtifact.json()).toEqual({ error: "artifact_content_missing" });
@@ -577,7 +556,7 @@ describe("SunPilot daemon first-phase flow", () => {
     expect(completed.json()).toMatchObject({ status: "completed" });
   });
 
-  test("accepts WebSocket JSON-RPC run.create with local token", async () => {
+  test("accepts WebSocket JSON-RPC run.create without token", async () => {
     const port = 39200 + Math.floor(Math.random() * 1000);
     await daemon!.stop();
     daemon = await createTestDaemon({ port });
@@ -588,7 +567,7 @@ describe("SunPilot daemon first-phase flow", () => {
     expect(audit.json()).toEqual(expect.arrayContaining([expect.objectContaining({ action: "daemon.start", target: `127.0.0.1:${port}` })]));
 
     const response = await new Promise<any>((resolve, reject) => {
-      const ws = new WebSocket(`ws://127.0.0.1:${port}/v1/ws?token=${daemon!.token}`);
+      const ws = new WebSocket(`ws://127.0.0.1:${port}/v1/ws`);
       ws.once("error", reject);
       ws.once("open", () => {
         ws.send(
@@ -644,7 +623,7 @@ describe("SunPilot daemon first-phase flow", () => {
 
     const messages = await new Promise<any[]>((resolve, reject) => {
       const received: any[] = [];
-      const ws = new WebSocket(`ws://127.0.0.1:${port}/v1/ws?token=${daemon!.token}`);
+      const ws = new WebSocket(`ws://127.0.0.1:${port}/v1/ws`);
       ws.once("error", reject);
       ws.once("open", () => {
         ws.send(JSON.stringify({ jsonrpc: "2.0", id: "chat_1", method: "chat.send", params: { message: "hello over ws" } }));
@@ -682,7 +661,7 @@ describe("SunPilot daemon first-phase flow", () => {
 
     const messages = await new Promise<any[]>((resolve, reject) => {
       const received: any[] = [];
-      const ws = new WebSocket(`ws://127.0.0.1:${port}/v1/ws?token=${daemon!.token}`);
+      const ws = new WebSocket(`ws://127.0.0.1:${port}/v1/ws`);
       ws.once("error", reject);
       ws.once("open", () => {
         ws.send(JSON.stringify({ jsonrpc: "2.0", id: "subscribe_all", method: "run.subscribe", params: {} }));
@@ -704,7 +683,7 @@ describe("SunPilot daemon first-phase flow", () => {
 
     const runId = messages.find((message) => message.id === "create_run")!.result.id as string;
     const history = await new Promise<any>((resolve, reject) => {
-      const ws = new WebSocket(`ws://127.0.0.1:${port}/v1/ws?token=${daemon!.token}`);
+      const ws = new WebSocket(`ws://127.0.0.1:${port}/v1/ws`);
       ws.once("error", reject);
       ws.once("open", () => ws.send(JSON.stringify({ jsonrpc: "2.0", id: "history", method: "run.subscribe", params: { runId } })));
       ws.once("message", (raw) => {
@@ -723,7 +702,7 @@ describe("SunPilot daemon first-phase flow", () => {
 
     const responses = await new Promise<any[]>((resolve, reject) => {
       const received: any[] = [];
-      const ws = new WebSocket(`ws://127.0.0.1:${port}/v1/ws?token=${daemon!.token}`);
+      const ws = new WebSocket(`ws://127.0.0.1:${port}/v1/ws`);
       ws.once("error", reject);
       ws.once("open", () => ws.send("{"));
       ws.on("message", (raw) => {
@@ -749,7 +728,7 @@ describe("SunPilot daemon first-phase flow", () => {
 
     const responses = await new Promise<any[]>((resolve, reject) => {
       const received: any[] = [];
-      const ws = new WebSocket(`ws://127.0.0.1:${port}/v1/ws?token=${daemon!.token}`);
+      const ws = new WebSocket(`ws://127.0.0.1:${port}/v1/ws`);
       ws.once("error", reject);
       ws.once("open", () => {
         ws.send(JSON.stringify({ jsonrpc: "2.0", id: "bad_workflow", method: "run.create", params: { input: {}, workflowId: "missing.workflow" } }));
@@ -777,7 +756,7 @@ describe("SunPilot daemon first-phase flow", () => {
     await daemon.start();
 
     const closeOrError = await new Promise<string>((resolve) => {
-      const ws = new WebSocket(`ws://127.0.0.1:${port}/v1/ws?token=${daemon!.token}`, {
+      const ws = new WebSocket(`ws://127.0.0.1:${port}/v1/ws`, {
         headers: { origin: "https://example.com" }
       });
       ws.once("open", () => resolve("open"));

@@ -3,7 +3,7 @@
 SunPilot is a daemon-first local business agent runtime. The current implementation follows the first-phase daemon/API/web/launcher architecture:
 
 - Local daemon on `127.0.0.1:3737`
-- Token-protected REST API and WebSocket JSON-RPC
+- Local REST API and WebSocket JSON-RPC, currently without token auth during the test phase
 - PostgreSQL state store, normally provided by the project Docker Compose service
 - Workflow/Skill runtime with fixture echo workflow
 - Approval flow, audit log, append-only events, and artifact storage
@@ -49,10 +49,8 @@ export SUNPILOT_WEB_URL=http://127.0.0.1:3737
 API smoke:
 
 ```bash
-TOKEN=$(cat ~/.sunpilot/runtime/auth-token)
 curl http://127.0.0.1:3737/healthz
 curl -X POST http://127.0.0.1:3737/v1/runs \
-  -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"input":{"text":"run fixture echo workflow"},"workflowId":"fixture.echo"}'
 ```

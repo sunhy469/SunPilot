@@ -1,8 +1,8 @@
-import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
-import { ensureLocalToken, ensureSunPilotHome, getSunPilotPaths, readSunPilotConfig, updateSunPilotConfig } from "./paths.js";
+import { ensureSunPilotHome, getSunPilotPaths, readSunPilotConfig, updateSunPilotConfig } from "./paths.js";
 
 let home: string;
 
@@ -14,16 +14,12 @@ afterEach(() => {
   rmSync(home, { recursive: true, force: true });
 });
 
-describe("local token file permissions", () => {
-  test("creates and preserves local token files with owner-only permissions", () => {
+describe("local runtime paths", () => {
+  test("creates runtime directories without auth token files", () => {
     const paths = getSunPilotPaths(home);
-    const token = ensureLocalToken(paths);
-    expect(token).toMatch(/^sun_/);
-    expect(statSync(paths.tokenFile).mode & 0o777).toBe(0o600);
-
-    writeFileSync(paths.tokenFile, token, { mode: 0o644 });
-    expect(ensureLocalToken(paths)).toBe(token);
-    expect(statSync(paths.tokenFile).mode & 0o777).toBe(0o600);
+    ensureSunPilotHome(paths);
+    expect(existsSync(paths.runtime)).toBe(true);
+    expect(paths.pidFile).toBe(join(home, "runtime", "daemon.pid"));
   });
 });
 
@@ -35,7 +31,7 @@ describe("SunPilot config file", () => {
     expect(readSunPilotConfig(paths)).toMatchObject({
       version: 1,
       server: { host: "127.0.0.1", port: 3737 },
-      security: { requireLocalToken: true, allowLan: false },
+      security: { requireLocalToken: false, allowLan: false },
       storage: { home }
     });
 

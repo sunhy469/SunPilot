@@ -1,3 +1,5 @@
+import type { RichCardView } from "../../rich-cards";
+
 export interface Conversation {
   id: string;
   title?: string;
@@ -12,4 +14,5 @@ export interface ChatMessage {
   role: "system" | "user" | "assistant";
   content: string;
   createdAt: string;
+  cards?: RichCardView[];
 }

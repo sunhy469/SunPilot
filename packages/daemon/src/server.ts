@@ -9,7 +9,7 @@ import { ZodError } from "zod";
 import { approvalDecisionSchema, createRunSchema } from "@sunpilot/protocol";
 import { AgentService, createDefaultLlmProvider, McpProviderStub, RepositoryAgentConversationStore, RepositoryRuntimeStore, RuntimeError, SkillProvider, SunPilotRuntime } from "@sunpilot/core";
 import { SkillRegistry, SkillRunner } from "@sunpilot/skill-runner";
-import { createDatabaseContext, type DatabaseContext, DuckDbAdapterStub, ensureLocalToken, ensureSunPilotHome, getSunPilotPaths, LanceDbAdapterStub, readSunPilotConfig, updateSunPilotConfig } from "@sunpilot/storage";
+import { createDatabaseContext, type DatabaseContext, DuckDbAdapterStub, ensureSunPilotHome, getSunPilotPaths, LanceDbAdapterStub, readSunPilotConfig, updateSunPilotConfig } from "@sunpilot/storage";
 import { fixtureApprovalWorkflow, fixtureEchoWorkflow, fixtureFilePermissionWorkflow, fixtureShellPermissionWorkflow, WorkflowRegistry } from "@sunpilot/workflow";
 
 export interface DaemonOptions {
@@ -21,11 +21,6 @@ export interface DaemonOptions {
 
 const require = createRequire(import.meta.url);
 const DEFAULT_EXTERNAL_ORIGINS = ["https://tradeagent.asia", "https://www.tradeagent.asia"];
-
-function bearerToken(header: string | undefined): string | undefined {
-  const [type, token] = (header ?? "").split(" ");
-  return type === "Bearer" ? token : undefined;
-}
 
 function allowedExternalOrigins(): Set<string> {
   return new Set(
@@ -50,16 +45,6 @@ function isAllowedLocalOrigin(origin: string | undefined, port: number, external
   } catch {
     return false;
   }
-}
-
-function isPublicGetPath(url: string, host: string, port: number): boolean {
-  const path = new URL(url, `http://${host}:${port}`).pathname;
-  return path === "/healthz" || path === "/readyz" || path === "/" || path.startsWith("/assets/");
-}
-
-function allowsQueryToken(url: string, host: string, port: number): boolean {
-  const path = new URL(url, `http://${host}:${port}`).pathname;
-  return /^\/v1\/artifacts\/[^/]+\/content$/.test(path);
 }
 
 function rpcError(error: unknown): { code: number; message: string; data?: unknown } {
@@ -119,7 +104,6 @@ export async function createDaemon(options: DaemonOptions = {}) {
   const port = options.port ?? 3737;
   const paths = ensureSunPilotHome(getSunPilotPaths());
   const config = readSunPilotConfig(paths);
-  const token = ensureLocalToken(paths);
   const database = options.database ?? await createDatabaseContext();
   const shouldCloseDatabase = !options.database;
   const runtimeStore = new RepositoryRuntimeStore(database);
@@ -186,15 +170,6 @@ export async function createDaemon(options: DaemonOptions = {}) {
   app.addHook("onRequest", async (request, reply) => {
     if (!isAllowedLocalOrigin(request.headers.origin, port)) {
       await reply.code(403).send({ error: "origin_not_allowed" });
-      return;
-    }
-    if (request.method === "GET" && isPublicGetPath(request.url, host, port)) return;
-    const queryToken = allowsQueryToken(request.url, host, port)
-      ? new URL(request.url, `http://${host}:${port}`).searchParams.get("token") ?? undefined
-      : undefined;
-    if (bearerToken(request.headers.authorization) !== token && queryToken !== token) {
-      await reply.code(401).send({ error: "missing_or_invalid_local_token" });
-      return;
     }
   });
 
@@ -336,10 +311,6 @@ export async function createDaemon(options: DaemonOptions = {}) {
     }
   });
   wsServer.on("connection", (socket, request) => {
-    if (bearerToken(request.headers.authorization) !== token && new URL(request.url ?? "/", `http://${host}:${port}`).searchParams.get("token") !== token) {
-      socket.close(1008, "invalid token");
-      return;
-    }
     subscriptions.set(socket, new Set());
     const markActivity = bindIdleTimeout(socket);
     socket.once("close", () => subscriptions.delete(socket));
@@ -414,7 +385,6 @@ export async function createDaemon(options: DaemonOptions = {}) {
   return {
     app,
     paths,
-    token,
     async start() {
       await app.listen({ host, port });
       writeFileSync(paths.pidFile, String(process.pid), { mode: 0o600 });

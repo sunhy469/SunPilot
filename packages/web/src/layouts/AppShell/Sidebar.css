@@ -1,0 +1,59 @@
+.sidebar {
+  width: var(--sidebar-width, 168px);
+  background: rgba(255, 255, 255, 0.92);
+  border-right: 1px solid var(--sp-border);
+  padding: clamp(14px, 2vw, 24px);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.logo-row {
+  min-height: 42px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-weight: 800;
+  color: var(--sp-ink);
+}
+
+.logo-mark {
+  width: var(--sp-control-sm);
+  height: var(--sp-control-sm);
+  border: 1px solid #fde68a;
+  border-radius: 12px;
+  background: var(--sp-yellow);
+  color: var(--sp-ink);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  font-weight: 800;
+  flex-shrink: 0;
+  box-shadow: 0 8px 16px rgba(250, 204, 21, 0.24);
+}
+
+.logo-text {
+  font-size: 18px;
+}
+
+.new-chat-button {
+  margin: 24px 0 22px;
+}
+
+@media (max-width: 900px) {
+  .sidebar {
+    padding: 14px 10px;
+  }
+
+  .logo-text,
+  .new-chat-button {
+    font-size: 0;
+  }
+
+  .new-chat-button::before {
+    content: "+";
+    font-size: 24px;
+    line-height: 1;
+  }
+}

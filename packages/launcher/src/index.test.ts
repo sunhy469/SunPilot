@@ -11,8 +11,7 @@ const paths = {
   logs: "/tmp/sunpilot/logs",
   cache: "/tmp/sunpilot/cache",
   runtime: "/tmp/sunpilot/runtime",
-  pidFile: "/tmp/sunpilot/runtime/daemon.pid",
-  tokenFile: "/tmp/sunpilot/runtime/auth-token"
+  pidFile: "/tmp/sunpilot/runtime/daemon.pid"
 };
 
 describe("launcher", () => {
@@ -113,7 +112,7 @@ describe("launcher", () => {
     );
   });
 
-  test("open injects a local token into the default domain web URL", async () => {
+  test("open launches the default domain web URL without a token", async () => {
     const openImpl = vi.fn(async () => undefined);
     const messages: string[] = [];
     const code = await runLauncher({
@@ -121,12 +120,11 @@ describe("launcher", () => {
       env: { SUNPILOT_PORT: "3737" },
       paths,
       log: (message) => messages.push(message),
-      ensureTokenImpl: () => "sun local/token",
       openImpl
     });
     expect(code).toBe(0);
-    expect(openImpl).toHaveBeenCalledWith("https://tradeagent.asia/?token=sun%20local%2Ftoken");
-    expect(messages).toEqual(["Opened https://tradeagent.asia/?token=sun%20local%2Ftoken"]);
+    expect(openImpl).toHaveBeenCalledWith("https://tradeagent.asia/");
+    expect(messages).toEqual(["Opened https://tradeagent.asia/"]);
   });
 
   test("open allows overriding the public web URL", async () => {
@@ -136,12 +134,11 @@ describe("launcher", () => {
       env: { SUNPILOT_WEB_URL: "http://127.0.0.1:3737/" },
       paths,
       log: () => {},
-      ensureTokenImpl: () => "sun local/token",
       openImpl
     });
 
     expect(code).toBe(0);
-    expect(openImpl).toHaveBeenCalledWith("http://127.0.0.1:3737/?token=sun%20local%2Ftoken");
+    expect(openImpl).toHaveBeenCalledWith("http://127.0.0.1:3737/");
   });
 
   test("open still prints the URL when no local browser is available", async () => {
@@ -151,7 +148,6 @@ describe("launcher", () => {
       env: {},
       paths,
       log: (message) => messages.push(message),
-      ensureTokenImpl: () => "sun local/token",
       openImpl: vi.fn(async () => {
         throw new Error("no browser");
       })
@@ -160,7 +156,7 @@ describe("launcher", () => {
     expect(code).toBe(0);
     expect(messages).toEqual([
       "Browser open is not available on this machine.",
-      "Opened https://tradeagent.asia/?token=sun%20local%2Ftoken"
+      "Opened https://tradeagent.asia/"
     ]);
   });
 

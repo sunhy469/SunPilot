@@ -10,4 +10,9 @@ export type ChatSocketEvent =
   | { method: "chat.assistant.started"; params: { conversationId: string; messageId: string } }
   | { method: "chat.assistant.delta"; params: { conversationId: string; messageId: string; delta: string } }
   | { method: "chat.assistant.completed"; params: { conversationId: string; message: ChatMessage } }
-  | { method: "chat.error"; params: { conversationId?: string; error: { message: string } } };
+  | { method: "chat.error"; params: { conversationId?: string; error: { message: string } } }
+  | { method: "pong"; params: Record<string, never> };
+
+export interface ChatSocketErrorResponse {
+  error: { message: string };
+}

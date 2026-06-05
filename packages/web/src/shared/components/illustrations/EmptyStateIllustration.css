@@ -1,0 +1,5 @@
+.empty-illustration {
+  width: min(360px, 78vw);
+  height: auto;
+  display: block;
+}

@@ -145,7 +145,7 @@ packages/storage/src/paths.ts
     "port": 3737
   },
   "security": {
-    "requireLocalToken": true,
+    "requireLocalToken": false,
     "allowLan": false
   },
   "skills": {
@@ -178,9 +178,9 @@ packages/storage/src/paths.ts
 作用：
 
 - 保存 daemon 运行期文件。
-- 当前主要包含 token 和 pid。
+- 当前主要包含 pid；历史版本可能遗留 `auth-token`。
 
-### 3.4 `~/.sunpilot/runtime/auth-token`
+### 3.4 历史遗留 `~/.sunpilot/runtime/auth-token`
 
 完整路径：
 
@@ -190,31 +190,19 @@ packages/storage/src/paths.ts
 
 作用：
 
-- 本地 API 访问 token。
-- Web 控制台和 REST API 请求需要它。
-- `sun open` 会读取这个 token，然后生成：
+- 历史版本用于本地 API/Web 访问 token。
+- 当前测试阶段已关闭 token 验证，代码不再创建或读取该文件。
 
-```text
-https://tradeagent.asia/?token=...
-```
-
-生成方式：
-
-- daemon 或 launcher 调用 `ensureLocalToken()`。
-- 如果文件不存在，自动生成 `sun_` 开头的随机 token。
-- 文件权限会设置为 `0600`。
-
-查看方式：
+如需确认旧文件是否存在：
 
 ```bash
-cat ~/.sunpilot/runtime/auth-token
+ls ~/.sunpilot/runtime/auth-token
 ```
 
 是否可以删除：
 
 - 可以删除。
-- 删除后下次启动或 `sun open` 会生成新 token。
-- 旧浏览器 localStorage 中保存的旧 token 会失效，需要重新用 `sun open` 获取新 URL。
+- 当前 Web/daemon 访问不依赖它。
 
 ### 3.5 `~/.sunpilot/runtime/daemon.pid`
 
@@ -666,17 +654,16 @@ cat ~/.sunpilot/runtime/daemon.pid
 ps -p "$(cat ~/.sunpilot/runtime/daemon.pid)" -o pid,cmd
 ```
 
-### 7.4 检查 token
+### 7.4 检查 daemon pid
 
 ```bash
-cat ~/.sunpilot/runtime/auth-token
+cat ~/.sunpilot/runtime/daemon.pid
 ```
 
-### 7.5 生成网页登录 URL
+### 7.5 打开网页登录 URL
 
 ```bash
-TOKEN=$(cat ~/.sunpilot/runtime/auth-token)
-echo "https://tradeagent.asia/?token=$TOKEN"
+sun open
 ```
 
 ### 7.6 检查本地数据目录
@@ -697,7 +684,6 @@ git status --short --ignored
 
 ```text
 ~/.local/bin/sun
-~/.sunpilot/runtime/auth-token
 ~/.sunpilot/runtime/daemon.pid
 Docker volume: sunpilot_pg_data
 ~/.sunpilot/artifacts
@@ -708,7 +694,6 @@ Docker volume: sunpilot_pg_data
 
 其中：
 
-- `auth-token` 影响网页登录和 API 调用。
 - `daemon.pid` 影响 `sun stop`。
 - `sunpilot_pg_data` 保存 PostgreSQL 历史和状态。
 - `artifacts` 保存运行产物。

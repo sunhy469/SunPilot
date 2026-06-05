@@ -1,0 +1,21 @@
+.message-list {
+  flex: 1;
+  overflow-y: auto;
+  min-height: 0;
+  padding: 30px clamp(16px, 3vw, 34px) 28px;
+  position: relative;
+  z-index: 1;
+}
+
+.message-inner {
+  max-width: var(--chat-content-width, 760px);
+  margin: 0 auto;
+  padding-bottom: 10px;
+}
+
+.message-list__loading {
+  text-align: center;
+  color: var(--sp-muted);
+  font-size: 13px;
+  padding: 24px 0;
+}

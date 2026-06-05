@@ -115,18 +115,17 @@ sun open
 
 行为：
 
-- 读取或生成本地访问 token。
-- 默认生成公网控制台地址：
+- 默认打开公网控制台地址：
 
 ```text
-https://tradeagent.asia/?token=...
+https://tradeagent.asia/
 ```
 
 - 如果服务器没有图形界面，无法自动打开浏览器，会输出：
 
 ```text
 Browser open is not available on this machine.
-Opened https://tradeagent.asia/?token=...
+Opened https://tradeagent.asia/
 ```
 
 此时复制完整 URL 到本地浏览器即可。
@@ -201,36 +200,15 @@ sun open
 
 兼容旧环境变量 `SUNPILOT_CONSOLE_URL`，但新配置优先使用 `SUNPILOT_WEB_URL`。
 
-## 5. Token 与网页登录
+## 5. Web 登录与本地访问
 
-daemon 的 API 默认需要本地 token。
-
-token 文件位置：
-
-```bash
-~/.sunpilot/runtime/auth-token
-```
-
-查看 token：
-
-```bash
-cat ~/.sunpilot/runtime/auth-token
-```
-
-手动生成网页登录 URL：
-
-```bash
-TOKEN=$(cat ~/.sunpilot/runtime/auth-token)
-echo "https://tradeagent.asia/?token=$TOKEN"
-```
-
-网页第一次带 token 打开后，会把 token 保存到浏览器 localStorage。之后可以直接访问：
+当前测试阶段已关闭本地 token 验证，`sun open` 不再生成或拼接 token。直接访问：
 
 ```text
 https://tradeagent.asia
 ```
 
-如果浏览器清理了 localStorage，重新用带 token 的 URL 打开即可。
+如果 URL 中仍带有历史遗留的 `?token=...`，新版 Web 前端会自动从地址栏移除。
 
 ## 6. DeepSeek / OpenAI-compatible 模型环境变量
 
@@ -313,19 +291,16 @@ curl http://127.0.0.1:3737/healthz
 curl http://127.0.0.1:3737/readyz
 ```
 
-### 8.3 带 token 调用 API
+### 8.3 调用本地 API
 
 ```bash
-TOKEN=$(cat ~/.sunpilot/runtime/auth-token)
-curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:3737/v1/workflows
+curl http://127.0.0.1:3737/v1/workflows
 ```
 
 ### 8.4 创建 fixture workflow 运行
 
 ```bash
-TOKEN=$(cat ~/.sunpilot/runtime/auth-token)
 curl -X POST http://127.0.0.1:3737/v1/runs \
-  -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"input":{"text":"run fixture echo workflow"},"workflowId":"fixture.echo"}'
 ```

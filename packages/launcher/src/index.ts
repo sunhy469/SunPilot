@@ -4,7 +4,7 @@ import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
 import open from "open";
-import { ensureLocalToken, getSunPilotPaths, type SunPilotPaths } from "@sunpilot/storage";
+import { getSunPilotPaths, type SunPilotPaths } from "@sunpilot/storage";
 
 type SpawnLike = typeof spawn;
 const require = createRequire(import.meta.url);
@@ -40,7 +40,6 @@ export interface LauncherDeps {
   readFileImpl?: (path: string, encoding: BufferEncoding) => string;
   rmImpl?: (path: string, options: { force: boolean }) => void;
   killImpl?: (pid: number, signal: NodeJS.Signals) => boolean;
-  ensureTokenImpl?: (paths: SunPilotPaths) => string;
   log?: (message: string) => void;
 }
 
@@ -108,8 +107,7 @@ export async function runLauncher(deps: LauncherDeps = {}): Promise<number> {
     case "status":
       return (await status()) ? 0 : 1;
     case "open": {
-      const token = (deps.ensureTokenImpl ?? ensureLocalToken)(paths);
-      const target = `${webUrl}/?token=${encodeURIComponent(token)}`;
+      const target = `${webUrl}/`;
       try {
         await (deps.openImpl ?? open)(target);
       } catch {

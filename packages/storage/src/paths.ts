@@ -1,7 +1,6 @@
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { randomBytes } from "node:crypto";
 
 export interface SunPilotPaths {
   home: string;
@@ -14,7 +13,6 @@ export interface SunPilotPaths {
   cache: string;
   runtime: string;
   pidFile: string;
-  tokenFile: string;
 }
 
 export interface SunPilotConfig {
@@ -55,8 +53,7 @@ export function getSunPilotPaths(home = getSunPilotHome()): SunPilotPaths {
     logs: join(home, "logs"),
     cache: join(home, "cache"),
     runtime: join(home, "runtime"),
-    pidFile: join(home, "runtime", "daemon.pid"),
-    tokenFile: join(home, "runtime", "auth-token")
+    pidFile: join(home, "runtime", "daemon.pid")
   };
 }
 
@@ -64,7 +61,7 @@ export function defaultSunPilotConfig(paths = getSunPilotPaths()): SunPilotConfi
   return {
     version: 1,
     server: { host: "127.0.0.1", port: 3737 },
-    security: { requireLocalToken: true, allowLan: false },
+    security: { requireLocalToken: false, allowLan: false },
     skills: { directories: [paths.skills], autoReload: true },
     workflows: { directories: [join(paths.home, "workflows")], autoReload: true },
     storage: { home: paths.home }
@@ -166,16 +163,4 @@ function positiveInteger(value: number | undefined, fallback: number): number {
 
 function stringArray(value: string[] | undefined, fallback: string[]): string[] {
   return Array.isArray(value) && value.every((item) => typeof item === "string" && item.length > 0) ? value : fallback;
-}
-
-export function ensureLocalToken(paths = getSunPilotPaths()): string {
-  ensureSunPilotHome(paths);
-  if (existsSync(paths.tokenFile)) {
-    chmodSync(paths.tokenFile, 0o600);
-    return readFileSync(paths.tokenFile, "utf8").trim();
-  }
-  const token = `sun_${randomBytes(32).toString("hex")}`;
-  writeFileSync(paths.tokenFile, token, { mode: 0o600 });
-  chmodSync(paths.tokenFile, 0o600);
-  return token;
 }

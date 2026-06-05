@@ -18,7 +18,16 @@ export default defineConfig({
     proxy: {
       "/v1": {
         target: "http://127.0.0.1:3737",
-        ws: true
+        changeOrigin: true,
+        ws: true,
+        configure(proxy) {
+          proxy.on("proxyReq", (proxyReq) => {
+            proxyReq.setHeader("Origin", "http://127.0.0.1:3737");
+          });
+          proxy.on("proxyReqWs", (proxyReq) => {
+            proxyReq.setHeader("Origin", "http://127.0.0.1:3737");
+          });
+        }
       },
       "/healthz": "http://127.0.0.1:3737",
       "/readyz": "http://127.0.0.1:3737"

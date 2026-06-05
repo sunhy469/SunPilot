@@ -96,7 +96,7 @@ packages/storage/src/paths.ts
 作用：
 
 - 指定 SunPilot 的本地状态目录。
-- 影响数据库、日志、产物、token、pid 文件位置。
+- 影响数据库、日志、产物、pid 文件位置。
 
 默认目录结构：
 
@@ -108,7 +108,6 @@ packages/storage/src/paths.ts
 ├── logs/
 ├── cache/
 └── runtime/
-    ├── auth-token
     └── daemon.pid
 ```
 
@@ -185,7 +184,7 @@ sun open
 输出会变成：
 
 ```text
-http://127.0.0.1:3737/?token=...
+http://127.0.0.1:3737/
 ```
 
 兼容说明：
@@ -585,7 +584,7 @@ curl http://127.0.0.1:3737/healthz
 sun open
 ```
 
-服务器无图形界面时，复制输出的 `https://tradeagent.asia/?token=...` 到本地浏览器打开。
+服务器无图形界面时，复制输出的 `https://tradeagent.asia/` 到本地浏览器打开。
 
 ## 9. `.env` 文件说明
 

@@ -13,15 +13,15 @@ function route(element: ReactNode) {
   return <Suspense fallback={<LoadingState />}>{element}</Suspense>;
 }
 
-export function AppRouter({ token }: { token: string }) {
+export function AppRouter() {
   const router = createBrowserRouter([
-    { path: "/", element: <ChatPage initialToken={token} /> },
-    { path: "/chat", element: <ChatPage initialToken={token} /> },
+    { path: "/", element: <ChatPage /> },
+    { path: "/chat", element: <ChatPage /> },
     { path: "/runs", element: route(<RunsPage />) },
     { path: "/artifacts", element: route(<ArtifactsPage />) },
     { path: "/memory", element: route(<MemoryPage />) },
     { path: "/settings", element: route(<SettingsPage />) },
-    { path: "*", element: <ChatPage initialToken={token} /> }
+    { path: "*", element: <ChatPage /> }
   ]);
 
   return <RouterProvider router={router} />;

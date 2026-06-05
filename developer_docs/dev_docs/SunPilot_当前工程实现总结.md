@@ -144,14 +144,10 @@ daemon 使用 Fastify，主要能力：
 WebSocket 入口：
 
 ```text
-/v1/ws?token=<runtime token>
+/v1/ws
 ```
 
-鉴权 token 来自：
-
-```bash
-~/.sunpilot/runtime/auth-token
-```
+当前测试阶段已关闭本地 token 验证，WS 连接不再拼接 query token。
 
 当前支持的主要 method：
 
@@ -381,14 +377,7 @@ curl http://127.0.0.1:3737/healthz
 WS ping 示例：
 
 ```bash
-TOKEN=$(cat ~/.sunpilot/runtime/auth-token)
-node --input-type=module -e 'const ws=new WebSocket(`ws://127.0.0.1:3737/v1/ws?token=${process.env.TOKEN}`); ws.addEventListener("open",()=>ws.send(JSON.stringify({jsonrpc:"2.0",id:"ping_1",method:"ping",params:{}}))); ws.addEventListener("message",(event)=>{ console.log(String(event.data)); ws.close(); });'
-```
-
-运行时注意：上面的示例需要把 `TOKEN` 传给 node 进程环境，例如：
-
-```bash
-TOKEN=$(cat ~/.sunpilot/runtime/auth-token) node --input-type=module -e '...'
+node --input-type=module -e 'const ws=new WebSocket("ws://127.0.0.1:3737/v1/ws"); ws.addEventListener("open",()=>ws.send(JSON.stringify({jsonrpc:"2.0",id:"ping_1",method:"ping",params:{}}))); ws.addEventListener("message",(event)=>{ console.log(String(event.data)); ws.close(); });'
 ```
 
 ## 12. 常见故障判断
