@@ -18,19 +18,12 @@
 }
 
 .logo-mark {
-  width: var(--sp-control-sm);
-  height: var(--sp-control-sm);
-  border: 1px solid #fde68a;
-  border-radius: 12px;
-  background: var(--sp-yellow);
-  color: var(--sp-ink);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 12px;
-  font-weight: 800;
+  width: 38px;
+  height: 38px;
+  border-radius: 50%;
+  object-fit: cover;
   flex-shrink: 0;
-  box-shadow: 0 8px 16px rgba(250, 204, 21, 0.24);
+  box-shadow: 0 8px 18px rgba(37, 99, 235, 0.18);
 }
 
 .logo-text {
@@ -46,6 +39,10 @@
     padding: 14px 10px;
   }
 
+  .logo-row {
+    justify-content: center;
+  }
+
   .logo-text,
   .new-chat-button {
     font-size: 0;
@@ -55,5 +52,16 @@
     content: "+";
     font-size: 24px;
     line-height: 1;
+  }
+}
+
+@media (max-width: 420px) {
+  .sidebar {
+    padding: 12px 8px;
+  }
+
+  .logo-mark {
+    width: 34px;
+    height: 34px;
   }
 }

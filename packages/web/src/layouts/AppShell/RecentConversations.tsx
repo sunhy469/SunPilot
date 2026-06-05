@@ -4,11 +4,13 @@ import "./RecentConversations.css";
 export function RecentConversations({
   conversations,
   activeConversationId,
+  active,
   onSelect,
   conversationTitle,
 }: {
   conversations: Conversation[];
   activeConversationId: string;
+  active: boolean;
   onSelect: (id: string) => void;
   conversationTitle: (title: string | undefined) => string;
 }) {
@@ -21,7 +23,7 @@ export function RecentConversations({
         <button
           key={conv.id}
           type="button"
-          className={`recent-item${conv.id === activeConversationId ? " is-active" : ""}`}
+          className={`recent-item${active && conv.id === activeConversationId ? " is-active" : ""}`}
           title={conversationTitle(conv.title)}
           onClick={() => onSelect(conv.id)}
         >

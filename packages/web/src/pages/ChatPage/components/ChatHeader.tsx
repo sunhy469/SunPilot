@@ -11,7 +11,8 @@ export function ChatHeader({ title }: { title: string }) {
       <button
         type="button"
         className="chat-header-more sp-icon-button sp-icon-button--md sp-icon-button--warm"
-        aria-label="更多操作"
+        aria-label="设置"
+        title="设置"
       >
         <MoreOutlined />
       </button>

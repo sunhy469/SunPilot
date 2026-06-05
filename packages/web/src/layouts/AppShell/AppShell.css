@@ -3,7 +3,11 @@
   height: 100vh;
   overflow: hidden;
   background:
-    linear-gradient(180deg, rgba(239, 246, 255, 0.78), rgba(248, 250, 252, 0.95)),
+    linear-gradient(
+      180deg,
+      rgba(239, 246, 255, 0.78),
+      rgba(248, 250, 252, 0.95)
+    ),
     var(--sp-page);
 }
 
@@ -32,5 +36,11 @@
   .recent-section,
   .user-name {
     display: none;
+  }
+}
+
+@media (max-width: 420px) {
+  .app-frame {
+    grid-template-columns: 64px minmax(0, 1fr);
   }
 }

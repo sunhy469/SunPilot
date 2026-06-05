@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { createRequest } from "../../shared/api/client";
 import { AppShell } from "../../layouts/AppShell/AppShell";
 import { Sidebar } from "../../layouts/AppShell/Sidebar";
@@ -10,10 +10,12 @@ import { MessageList } from "./components/MessageList";
 import { ChatComposer } from "./components/ChatComposer";
 import { OfflineBanner } from "./components/OfflineBanner";
 import { ErrorMessageCard } from "./components/ErrorMessageCard";
+import { PluginsEmptyView } from "./components/PluginsEmptyView";
 import { conversationTitle } from "../../features/conversations/model";
 import "./ChatPage.scss";
 
 export function ChatPage() {
+  const [activePanel, setActivePanel] = useState<"chat" | "plugins">("chat");
   const request = useMemo(() => createRequest(), []);
   const conversations = useConversations(request, true);
   const chat = useChat(
@@ -37,55 +39,75 @@ export function ChatPage() {
         <Sidebar
           conversations={conversations.conversations}
           activeConversationId={conversations.activeConversationId}
-          onNewChat={() => void conversations.newChat()}
-          onSelect={(id) => void conversations.selectConversation(id)}
+          activePanel={activePanel}
+          onNewChat={() => {
+            setActivePanel("chat");
+            void conversations.newChat();
+          }}
+          onSelect={(id) => {
+            setActivePanel("chat");
+            void conversations.selectConversation(id);
+          }}
+          onOpenPlugins={() => setActivePanel("plugins")}
         />
       }
     >
       <div className="chat-page">
         <ChatHeader
-          title={active ? conversationTitle(active.title) : "新对话"}
+          title={
+            activePanel === "plugins"
+              ? "插件"
+              : active
+                ? conversationTitle(active.title)
+                : "新对话"
+          }
         />
 
-        {isOffline && !hasMessages && <OfflineBanner />}
-
-        {chat.error && isWelcome && (
-          <div className="chat-page__error-wrap">
-            <ErrorMessageCard
-              message={chat.error}
-              onRetry={() => {
-                chat.setError("");
-              }}
-            />
-          </div>
-        )}
-
-        {isWelcome ? (
-          <WelcomeView onSend={chat.send} disabled={chat.pending} />
+        {activePanel === "plugins" ? (
+          <PluginsEmptyView />
         ) : (
           <>
-            <MessageList
-              messages={conversations.messages}
-              status={chat.chatViewState}
-            />
-            <div className="chat-composer-wrap">
-              {isOffline && <OfflineBanner />}
-              {chat.error && (
-                <div className="chat-page__error-wrap">
-                  <ErrorMessageCard
-                    message={chat.error}
-                    onRetry={() => chat.setError("")}
+            {isOffline && !hasMessages && <OfflineBanner />}
+
+            {chat.error && isWelcome && (
+              <div className="chat-page__error-wrap">
+                <ErrorMessageCard
+                  message={chat.error}
+                  onRetry={() => {
+                    chat.setError("");
+                  }}
+                />
+              </div>
+            )}
+
+            {isWelcome ? (
+              <WelcomeView onSend={chat.send} disabled={chat.pending} />
+            ) : (
+              <>
+                <MessageList
+                  messages={conversations.messages}
+                  status={chat.chatViewState}
+                />
+                <div className="chat-composer-wrap">
+                  {isOffline && <OfflineBanner />}
+                  {chat.error && (
+                    <div className="chat-page__error-wrap">
+                      <ErrorMessageCard
+                        message={chat.error}
+                        onRetry={() => chat.setError("")}
+                      />
+                    </div>
+                  )}
+                  <ChatComposer
+                    placeholder="向 SunPilot 继续提问..."
+                    disabled={false}
+                    streaming={chat.chatViewState === "streaming"}
+                    onSend={chat.send}
+                    onStop={chat.stop}
                   />
                 </div>
-              )}
-              <ChatComposer
-                placeholder="向 SunPilot 继续提问..."
-                disabled={false}
-                streaming={chat.chatViewState === "streaming"}
-                onSend={chat.send}
-                onStop={chat.stop}
-              />
-            </div>
+              </>
+            )}
           </>
         )}
       </div>

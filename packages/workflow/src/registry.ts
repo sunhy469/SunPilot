@@ -5,7 +5,10 @@ export interface BusinessWorkflow {
   title: string;
   version: string;
   description: string;
-  match(input: unknown, context: Record<string, unknown>): Promise<{ score: number; reason: string }>;
+  match(
+    input: unknown,
+    context: Record<string, unknown>,
+  ): Promise<{ score: number; reason: string }>;
   plan(input: unknown, context: Record<string, unknown>): Promise<WorkflowPlan>;
 }
 
@@ -30,11 +33,11 @@ export class WorkflowRegistry {
       id: workflow.id,
       title: workflow.title,
       version: workflow.version,
-      source: "fixture",
+      source: "local",
       enabled: true,
       definition: { description: workflow.description },
       createdAt: now,
-      updatedAt: now
+      updatedAt: now,
     }));
   }
 }

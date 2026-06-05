@@ -19,7 +19,7 @@ export function AssistantMessage({
 
   return (
     <div className="message-row assistant">
-      <div className="assistant-avatar">SP</div>
+      <img className="assistant-avatar" src="/logo.png" alt="SunPilot logo" />
 
       <div className="assistant-content">
         <div className="assistant-meta">

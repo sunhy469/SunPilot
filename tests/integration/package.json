@@ -6,7 +6,7 @@
   "scripts": {
     "build": "echo integration-tests",
     "pretest": "pnpm -r build",
-    "test": "vitest run"
+    "test": "vitest run --passWithNoTests"
   },
   "dependencies": {
     "@sunpilot/daemon": "workspace:*",

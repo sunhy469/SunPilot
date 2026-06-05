@@ -8,18 +8,22 @@ import "./Sidebar.css";
 export function Sidebar({
   conversations,
   activeConversationId,
+  activePanel,
   onNewChat,
   onSelect,
+  onOpenPlugins,
 }: {
   conversations: Conversation[];
   activeConversationId: string;
+  activePanel: "chat" | "plugins";
   onNewChat: () => void;
   onSelect: (id: string) => void;
+  onOpenPlugins: () => void;
 }) {
   return (
     <aside className="sidebar">
       <div className="logo-row">
-        <div className="logo-mark">SP</div>
+        <img className="logo-mark" src="/logo.png" alt="SunPilot logo" />
         <span className="logo-text">SunPilot</span>
       </div>
 
@@ -31,11 +35,15 @@ export function Sidebar({
         + 新建对话
       </button>
 
-      <SidebarNav activeConversationId={activeConversationId} />
+      <SidebarNav
+        active={activePanel === "plugins"}
+        onOpenPlugins={onOpenPlugins}
+      />
 
       <RecentConversations
         conversations={conversations}
         activeConversationId={activeConversationId}
+        active={activePanel === "chat"}
         onSelect={onSelect}
         conversationTitle={conversationTitle}
       />

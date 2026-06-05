@@ -18,7 +18,9 @@ class FakeWebSocket extends EventTarget {
     setTimeout(() => {
       if (FakeWebSocket.closeBeforeOpen) {
         this.readyState = 3;
-        this.dispatchEvent(new CloseEvent("close", { code: 1011, reason: "network lost" }));
+        this.dispatchEvent(
+          new CloseEvent("close", { code: 1011, reason: "network lost" }),
+        );
         return;
       }
       this.readyState = FakeWebSocket.OPEN;
@@ -27,16 +29,47 @@ class FakeWebSocket extends EventTarget {
   }
 
   send(value: string) {
-    const request = JSON.parse(value) as { method: string; params: { message: string } };
+    const request = JSON.parse(value) as {
+      method: string;
+      params: { message: string };
+    };
     this.sent.push(request);
     if (request.method !== "chat.send") return;
-    const user = { id: "msg_user", conversationId: "conv_1", role: "user", content: request.params.message, createdAt: "2026-06-05T00:00:00.000Z" };
-    const assistant = { id: "msg_assistant", conversationId: "conv_1", role: "assistant", content: "assistant reply", createdAt: "2026-06-05T00:00:01.000Z" };
-    this.emit({ method: "chat.message.created", params: { conversationId: "conv_1", message: user } });
-    this.emit({ method: "chat.assistant.started", params: { conversationId: "conv_1", messageId: assistant.id } });
-    this.emit({ method: "chat.assistant.delta", params: { conversationId: "conv_1", messageId: assistant.id, delta: assistant.content } });
+    const user = {
+      id: "msg_user",
+      conversationId: "conv_1",
+      role: "user",
+      content: request.params.message,
+      createdAt: "2026-06-05T00:00:00.000Z",
+    };
+    const assistant = {
+      id: "msg_assistant",
+      conversationId: "conv_1",
+      role: "assistant",
+      content: "assistant reply",
+      createdAt: "2026-06-05T00:00:01.000Z",
+    };
+    this.emit({
+      method: "chat.message.created",
+      params: { conversationId: "conv_1", message: user },
+    });
+    this.emit({
+      method: "chat.assistant.started",
+      params: { conversationId: "conv_1", messageId: assistant.id },
+    });
+    this.emit({
+      method: "chat.assistant.delta",
+      params: {
+        conversationId: "conv_1",
+        messageId: assistant.id,
+        delta: assistant.content,
+      },
+    });
     if (FakeWebSocket.holdCompletion) return;
-    this.emit({ method: "chat.assistant.completed", params: { conversationId: "conv_1", message: assistant } });
+    this.emit({
+      method: "chat.assistant.completed",
+      params: { conversationId: "conv_1", message: assistant },
+    });
   }
 
   close() {
@@ -45,7 +78,9 @@ class FakeWebSocket extends EventTarget {
   }
 
   private emit(payload: unknown) {
-    this.dispatchEvent(new MessageEvent("message", { data: JSON.stringify(payload) }));
+    this.dispatchEvent(
+      new MessageEvent("message", { data: JSON.stringify(payload) }),
+    );
   }
 }
 
@@ -55,15 +90,28 @@ describe("Web ChatPage", () => {
     FakeWebSocket.holdCompletion = false;
     FakeWebSocket.closeBeforeOpen = false;
     vi.stubGlobal("WebSocket", FakeWebSocket);
-    vi.stubGlobal("fetch", vi.fn(async (path: string) => {
-      if (path === "/v1/conversations") {
-        return Response.json({ items: [{ id: "conv_1", title: "Existing Chat", status: "active", createdAt: "2026-06-05T00:00:00.000Z", updatedAt: "2026-06-05T00:00:00.000Z" }] });
-      }
-      if (path === "/v1/conversations/conv_1/messages") {
-        return Response.json({ conversationId: "conv_1", items: [] });
-      }
-      return Response.json({ ok: true });
-    }));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (path: string) => {
+        if (path === "/v1/conversations") {
+          return Response.json({
+            items: [
+              {
+                id: "conv_1",
+                title: "Existing Chat",
+                status: "active",
+                createdAt: "2026-06-05T00:00:00.000Z",
+                updatedAt: "2026-06-05T00:00:00.000Z",
+              },
+            ],
+          });
+        }
+        if (path === "/v1/conversations/conv_1/messages") {
+          return Response.json({ conversationId: "conv_1", items: [] });
+        }
+        return Response.json({ ok: true });
+      }),
+    );
   });
 
   afterEach(() => {
@@ -75,24 +123,42 @@ describe("Web ChatPage", () => {
   test("loads conversations and sends chat over WebSocket", async () => {
     render(<App />);
 
-    await waitFor(() => expect(screen.getAllByText("Existing Chat").length).toBeGreaterThan(0));
+    await waitFor(() =>
+      expect(screen.getAllByText("Existing Chat").length).toBeGreaterThan(0),
+    );
     const textbox = await screen.findByRole("textbox", { name: "Message" });
     await userEvent.type(textbox, "hello");
     await userEvent.click(screen.getByRole("button", { name: "Send" }));
 
-    await waitFor(() => expect(screen.getByText("assistant reply")).toBeInTheDocument());
+    await waitFor(() =>
+      expect(screen.getByText("assistant reply")).toBeInTheDocument(),
+    );
     expect(screen.getByText("hello")).toBeInTheDocument();
   });
 
-  test("fills a welcome quick action without sending immediately", async () => {
+  test("renders a clean welcome state without opening a socket", async () => {
     render(<App />);
 
     await screen.findByText("你好，我是 SunPilot");
-    expect(screen.queryByText("SunPilot daemon 暂时不可用")).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("SunPilot daemon 暂时不可用"),
+    ).not.toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "Message" })).toHaveValue("");
+    expect(FakeWebSocket.instances).toHaveLength(0);
+  });
 
-    await userEvent.click(screen.getByRole("button", { name: /分析项目/ }));
+  test("shows the plugin panel in the chat workspace", async () => {
+    render(<App />);
 
-    expect(screen.getByRole("textbox", { name: "Message" })).toHaveValue("请帮我分析这个项目的整体架构，并指出可以优化的地方。");
+    await screen.findByText("你好，我是 SunPilot");
+    await userEvent.click(screen.getByRole("button", { name: "插件" }));
+
+    expect(
+      screen.getByRole("heading", { name: "插件空间暂时为空" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("textbox", { name: "Message" }),
+    ).not.toBeInTheDocument();
     expect(FakeWebSocket.instances).toHaveLength(0);
   });
 
@@ -107,7 +173,11 @@ describe("Web ChatPage", () => {
     const stopButton = await screen.findByRole("button", { name: "Stop" });
     await userEvent.click(stopButton);
 
-    expect(FakeWebSocket.instances[0]?.sent.some((message) => message.method === "chat.stop")).toBe(true);
+    expect(
+      FakeWebSocket.instances[0]?.sent.some(
+        (message) => message.method === "chat.stop",
+      ),
+    ).toBe(true);
   });
 
   test("shows an error when WebSocket closes before streaming starts", async () => {
@@ -118,6 +188,8 @@ describe("Web ChatPage", () => {
     await userEvent.type(textbox, "will fail");
     await userEvent.click(screen.getByRole("button", { name: "Send" }));
 
-    await waitFor(() => expect(screen.getByText("network lost")).toBeInTheDocument());
+    await waitFor(() =>
+      expect(screen.getByText("network lost")).toBeInTheDocument(),
+    );
   });
 });

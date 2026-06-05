@@ -1,36 +1,24 @@
-import { NavLink } from "react-router-dom";
-import {
-  MessageOutlined,
-  FolderOutlined,
-  DatabaseOutlined,
-  HistoryOutlined,
-  SettingOutlined,
-} from "@ant-design/icons";
+import { AppstoreOutlined } from "@ant-design/icons";
 import "./SidebarNav.css";
 
-const navItems = [
-  { to: "/chat", label: "对话", icon: <MessageOutlined /> },
-  { to: "/runs", label: "项目", icon: <FolderOutlined /> },
-  { to: "/artifacts", label: "知识库", icon: <DatabaseOutlined /> },
-  { to: "/memory", label: "记忆", icon: <HistoryOutlined /> },
-  { to: "/settings", label: "设置", icon: <SettingOutlined /> },
-];
-
-export function SidebarNav({ activeConversationId: _activeConversationId }: { activeConversationId: string }) {
+export function SidebarNav({
+  active,
+  onOpenPlugins,
+}: {
+  active: boolean;
+  onOpenPlugins: () => void;
+}) {
   return (
     <nav className="sidebar-nav" aria-label="主导航">
-      {navItems.map((item) => (
-        <NavLink
-          key={item.to}
-          to={item.to}
-          className={({ isActive }) =>
-            `nav-item${isActive ? " active" : ""}`
-          }
-        >
-          {item.icon}
-          <span className="sidebar-label">{item.label}</span>
-        </NavLink>
-      ))}
+      <button
+        type="button"
+        aria-label="插件"
+        className={`nav-item${active ? " active" : ""}`}
+        onClick={onOpenPlugins}
+      >
+        <AppstoreOutlined />
+        <span className="sidebar-label">插件</span>
+      </button>
     </nav>
   );
 }

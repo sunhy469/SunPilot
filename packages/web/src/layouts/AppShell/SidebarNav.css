@@ -5,6 +5,7 @@
 }
 
 .nav-item {
+  width: 100%;
   min-height: var(--sp-control-md);
   padding: 0 12px;
   border: 1px solid transparent;
@@ -16,7 +17,13 @@
   font-size: 14px;
   text-decoration: none;
   font-weight: 650;
-  transition: transform 120ms ease, background 120ms ease, box-shadow 120ms ease;
+  font-family: inherit;
+  background: transparent;
+  cursor: pointer;
+  transition:
+    transform 120ms ease,
+    background 120ms ease,
+    box-shadow 120ms ease;
 }
 
 .nav-item:hover {
