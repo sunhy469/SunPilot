@@ -8,19 +8,59 @@ export function useChat(token: string, conversationId: string, setConversationId
   const [status, setStatus] = useState<"online" | "offline" | "thinking">("offline");
   const [error, setError] = useState("");
   const socketRef = useRef<WebSocket | null>(null);
+  const responseTimerRef = useRef<number | null>(null);
+
+  const clearResponseTimer = useCallback(() => {
+    if (responseTimerRef.current === null) return;
+    window.clearTimeout(responseTimerRef.current);
+    responseTimerRef.current = null;
+  }, []);
+
+  const startResponseTimer = useCallback(() => {
+    clearResponseTimer();
+    responseTimerRef.current = window.setTimeout(() => {
+      setPending(false);
+      setStatus(socketRef.current?.readyState === WebSocket.OPEN ? "online" : "offline");
+      setError("Chat request timed out before the daemon returned a response.");
+    }, 90_000);
+  }, [clearResponseTimer]);
 
   const ensureSocket = useCallback(() => {
     if (socketRef.current && socketRef.current.readyState <= WebSocket.OPEN) return socketRef.current;
     const socket = createChatSocket(token);
     socketRef.current = socket;
-    socket.addEventListener("open", () => setStatus("online"));
-    socket.addEventListener("close", (event) => {
+    const openTimer = window.setTimeout(() => {
+      if (socket.readyState !== WebSocket.OPEN) {
+        socket.close();
+        setPending(false);
+        setStatus("offline");
+        setError("WebSocket connection to the daemon timed out.");
+      }
+    }, 10_000);
+    socket.addEventListener("open", () => {
+      window.clearTimeout(openTimer);
+      setStatus((current) => current === "thinking" ? "thinking" : "online");
+    });
+    socket.addEventListener("error", () => {
+      window.clearTimeout(openTimer);
+      clearResponseTimer();
+      setPending(false);
       setStatus("offline");
-      if (event.code !== 4000) setPending(false);
+      setError("WebSocket connection to the daemon failed.");
+    });
+    socket.addEventListener("close", (event) => {
+      window.clearTimeout(openTimer);
+      clearResponseTimer();
+      setStatus("offline");
+      setPending(false);
+      if (event.code !== 1000 && event.code !== 4000) {
+        setError(event.reason || "WebSocket connection to the daemon closed unexpectedly.");
+      }
     });
     socket.addEventListener("message", (raw) => {
       const payload = JSON.parse(String(raw.data)) as any;
       if (payload.error) {
+        clearResponseTimer();
         setError(payload.error.message);
         setPending(false);
         setStatus("online");
@@ -38,29 +78,36 @@ export function useChat(token: string, conversationId: string, setConversationId
         ]);
       }
       if (payload.method === "chat.assistant.delta") {
+        startResponseTimer();
         setMessages((items) => items.map((item) => item.id === payload.params.messageId ? { ...item, content: item.content + payload.params.delta } : item));
       }
       if (payload.method === "chat.assistant.completed") {
+        clearResponseTimer();
         setStatus("online");
         setPending(false);
         setMessages((items) => items.map((item) => item.id === payload.params.message.id ? payload.params.message : item));
       }
     });
     return socket;
-  }, [setConversationId, setMessages, token]);
+  }, [clearResponseTimer, setConversationId, setMessages, startResponseTimer, token]);
 
   const send = useCallback((message: string) => {
     const text = message.trim();
     if (!text || pending) return;
     setPending(true);
+    setStatus("thinking");
     setError("");
+    startResponseTimer();
     const socket = ensureSocket();
     const transmit = () => sendChatMessage(socket, { ...(conversationId ? { conversationId } : {}), message: text });
     if (socket.readyState === WebSocket.OPEN) transmit();
     else socket.addEventListener("open", transmit, { once: true });
-  }, [conversationId, ensureSocket, pending]);
+  }, [conversationId, ensureSocket, pending, startResponseTimer]);
 
-  useEffect(() => () => socketRef.current?.close(), []);
+  useEffect(() => () => {
+    clearResponseTimer();
+    socketRef.current?.close();
+  }, [clearResponseTimer]);
 
   return { send, pending, status, error, setError };
 }

@@ -6,23 +6,19 @@ import {
   LLM_BASE_URL_ENV,
   LLM_MODEL_ENV
 } from "./llm.config.js";
-import type { ChatCompletionRequest, ChatCompletionResult, ChatRole, FetchLike, LlmProvider, OpenAICompatibleChatProviderConfig } from "./llm.types.js";
+import type { ChatCompletionDelta, ChatCompletionRequest, FetchLike, LlmProvider, OpenAICompatibleChatProviderConfig } from "./llm.types.js";
 
-interface OpenAIChatResponse {
+interface OpenAIChatStreamChunk {
   id?: string;
   model?: string;
   choices?: Array<{
-    message?: {
+    delta?: {
       role?: string;
       content?: string | null;
       name?: string;
     };
+    finish_reason?: string | null;
   }>;
-  usage?: {
-    prompt_tokens?: number;
-    completion_tokens?: number;
-    total_tokens?: number;
-  };
 }
 
 export class OpenAICompatibleChatProvider implements LlmProvider {
@@ -42,7 +38,7 @@ export class OpenAICompatibleChatProvider implements LlmProvider {
     this.fetchImpl = fetchImpl;
   }
 
-  async chat(request: ChatCompletionRequest): Promise<ChatCompletionResult> {
+  async *streamChat(request: ChatCompletionRequest): AsyncIterable<ChatCompletionDelta> {
     if (request.messages.length === 0) {
       throw new Error("At least one chat message is required.");
     }
@@ -58,7 +54,7 @@ export class OpenAICompatibleChatProvider implements LlmProvider {
         messages: request.messages,
         temperature: request.temperature,
         max_tokens: request.maxTokens,
-        stream: false
+        stream: true
       }),
       signal: request.signal
     });
@@ -68,34 +64,21 @@ export class OpenAICompatibleChatProvider implements LlmProvider {
       throw new Error(`LLM request failed with HTTP ${response.status}${body ? `: ${body}` : ""}`);
     }
 
-    const raw: unknown = await response.json();
-    const data = raw as OpenAIChatResponse;
-    const firstMessage = data.choices?.[0]?.message;
-    if (!firstMessage) {
-      throw new Error("LLM response did not include an assistant message.");
-    }
-    const content = firstMessage.content;
-    if (typeof content !== "string") {
-      throw new Error("LLM response did not include assistant content.");
+    if (!response.body) {
+      throw new Error("LLM streaming response did not include a response body.");
     }
 
-    return {
-      id: data.id,
-      model: data.model ?? this.model,
-      message: {
-        role: normalizeRole(firstMessage.role),
-        content,
-        name: firstMessage.name
-      },
-      usage: data.usage
-        ? {
-            promptTokens: data.usage.prompt_tokens,
-            completionTokens: data.usage.completion_tokens,
-            totalTokens: data.usage.total_tokens
-          }
-        : undefined,
-      raw
-    };
+    for await (const data of parseOpenAIStream(response.body)) {
+      if (data === "[DONE]") return;
+      const raw: unknown = JSON.parse(data);
+      const chunk = raw as OpenAIChatStreamChunk;
+      for (const choice of chunk.choices ?? []) {
+        const delta = choice.delta?.content;
+        if (typeof delta === "string" && delta.length > 0) {
+          yield { delta, raw };
+        }
+      }
+    }
   }
 }
 
@@ -120,15 +103,42 @@ function normalizeBaseUrl(baseUrl: string): string {
   return trimmed.endsWith("/") ? trimmed : `${trimmed}/`;
 }
 
-function normalizeRole(role: string | undefined): ChatRole {
-  if (role === "system" || role === "user" || role === "assistant" || role === "tool") return role;
-  return "assistant";
-}
-
 async function safeResponseText(response: Response): Promise<string> {
   try {
     return await response.text();
   } catch {
     return "";
   }
+}
+
+async function* parseOpenAIStream(body: ReadableStream<Uint8Array>): AsyncIterable<string> {
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const events = buffer.split(/\r?\n\r?\n/);
+      buffer = events.pop() ?? "";
+      for (const event of events) {
+        for (const data of dataLines(event)) yield data;
+      }
+    }
+    buffer += decoder.decode();
+    for (const data of dataLines(buffer)) yield data;
+  } finally {
+    reader.releaseLock();
+  }
+}
+
+function dataLines(event: string): string[] {
+  return event
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.startsWith("data:"))
+    .map((line) => line.slice("data:".length).trim())
+    .filter(Boolean);
 }

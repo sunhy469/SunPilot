@@ -392,6 +392,20 @@ export async function createDaemon(options: DaemonOptions = {}) {
         }
         sendJson(socket, { jsonrpc: "2.0", id: message.id, error: { code: -32601, message: "Method not found" } }, markActivity);
       } catch (error) {
+        if (message.method === "chat.send") {
+          sendJson(
+            socket,
+            {
+              jsonrpc: "2.0",
+              method: "chat.error",
+              params: {
+                conversationId: typeof message.params?.conversationId === "string" ? message.params.conversationId : undefined,
+                error: rpcError(error)
+              }
+            },
+            markActivity
+          );
+        }
         sendJson(socket, { jsonrpc: "2.0", id: message.id, error: rpcError(error) }, markActivity);
       }
     });

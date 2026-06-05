@@ -3,6 +3,10 @@ import type { LlmProvider } from "../llm/index.js";
 import { AgentService } from "./agent.service.js";
 import { InMemoryAgentConversationStore } from "./conversation.service.js";
 
+async function* streamText(...parts: string[]) {
+  for (const delta of parts) yield { delta, raw: {} };
+}
+
 describe("AgentService", () => {
   test("creates a conversation, stores messages, and returns the assistant reply", async () => {
     const conversations = new InMemoryAgentConversationStore();
@@ -10,13 +14,9 @@ describe("AgentService", () => {
     const llm: LlmProvider = {
       id: "test.llm",
       model: "test-model",
-      async chat(request) {
+      streamChat(request) {
         calls.push(request);
-        return {
-          model: "test-model",
-          message: { role: "assistant", content: "hello from assistant" },
-          raw: {}
-        };
+        return streamText("hello ", "from ", "assistant");
       }
     };
     const agent = new AgentService({ llm, conversations, systemPrompt: "Be concise." });
@@ -50,12 +50,8 @@ describe("AgentService", () => {
       llm: {
         id: "test.llm",
         model: "test-model",
-        async chat() {
-          return {
-            model: "test-model",
-            message: { role: "assistant", content: "hook reply" },
-            raw: {}
-          };
+        streamChat() {
+          return streamText("hook ", "reply");
         }
       }
     });
@@ -79,7 +75,8 @@ describe("AgentService", () => {
     expect(events).toEqual([
       "user:hook hello",
       `started:${response.message.id}`,
-      "delta:hook reply",
+      "delta:hook ",
+      "delta:reply",
       `assistant:${response.message.id}:hook reply`
     ]);
   });
@@ -90,7 +87,7 @@ describe("AgentService", () => {
       llm: {
         id: "test.llm",
         model: "test-model",
-        async chat() {
+        async *streamChat() {
           throw new Error("should not call llm");
         }
       }

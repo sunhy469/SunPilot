@@ -13,22 +13,15 @@ export interface ChatCompletionRequest {
   signal?: AbortSignal;
 }
 
-export interface ChatCompletionResult {
-  id?: string;
-  model: string;
-  message: ChatMessage;
-  usage?: {
-    promptTokens?: number;
-    completionTokens?: number;
-    totalTokens?: number;
-  };
+export interface ChatCompletionDelta {
+  delta: string;
   raw: unknown;
 }
 
 export interface LlmProvider {
   id: string;
   model: string;
-  chat(request: ChatCompletionRequest): Promise<ChatCompletionResult>;
+  streamChat(request: ChatCompletionRequest): AsyncIterable<ChatCompletionDelta>;
 }
 
 export interface OpenAICompatibleChatProviderConfig {

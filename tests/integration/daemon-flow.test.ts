@@ -633,7 +633,8 @@ describe("SunPilot daemon first-phase flow", () => {
           };
           await hooks?.onUserMessage?.(user);
           await hooks?.onAssistantStarted?.({ conversationId: "conv_ws", messageId: assistant.id });
-          await hooks?.onAssistantDelta?.({ conversationId: "conv_ws", messageId: assistant.id, delta: assistant.content });
+          await hooks?.onAssistantDelta?.({ conversationId: "conv_ws", messageId: assistant.id, delta: "hello " });
+          await hooks?.onAssistantDelta?.({ conversationId: "conv_ws", messageId: assistant.id, delta: "from websocket" });
           await hooks?.onAssistantMessage?.(assistant);
           return { conversationId: "conv_ws", message: assistant };
         }
@@ -661,12 +662,14 @@ describe("SunPilot daemon first-phase flow", () => {
       "chat.message.created",
       "chat.assistant.started",
       "chat.assistant.delta",
+      "chat.assistant.delta",
       "chat.assistant.completed",
       "response:chat_1"
     ]);
     expect(messages).toEqual(expect.arrayContaining([
       expect.objectContaining({ method: "chat.message.created", params: expect.objectContaining({ message: expect.objectContaining({ role: "user" }) }) }),
-      expect.objectContaining({ method: "chat.assistant.delta", params: expect.objectContaining({ delta: "hello from websocket" }) }),
+      expect.objectContaining({ method: "chat.assistant.delta", params: expect.objectContaining({ delta: "hello " }) }),
+      expect.objectContaining({ method: "chat.assistant.delta", params: expect.objectContaining({ delta: "from websocket" }) }),
       expect.objectContaining({ id: "chat_1", result: expect.objectContaining({ conversationId: "conv_ws", message: expect.objectContaining({ content: "hello from websocket" }) }) })
     ]));
   });

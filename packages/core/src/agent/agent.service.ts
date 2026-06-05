@@ -26,14 +26,16 @@ export class AgentService {
       }))
     ];
 
-    const completion = await this.config.llm.chat({ messages });
     const assistantMessageId = `msg_${crypto.randomUUID()}`;
     await hooks.onAssistantStarted?.({ conversationId: conversation.id, messageId: assistantMessageId });
-    if (completion.message.content) {
+
+    let assistantContent = "";
+    for await (const chunk of this.config.llm.streamChat({ messages })) {
+      assistantContent += chunk.delta;
       await hooks.onAssistantDelta?.({
         conversationId: conversation.id,
         messageId: assistantMessageId,
-        delta: completion.message.content
+        delta: chunk.delta
       });
     }
 
@@ -41,7 +43,7 @@ export class AgentService {
       id: assistantMessageId,
       conversationId: conversation.id,
       role: "assistant",
-      content: completion.message.content
+      content: assistantContent
     });
     await hooks.onAssistantMessage?.(assistant);
 

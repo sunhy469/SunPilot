@@ -1,6 +1,6 @@
 export type {
+  ChatCompletionDelta,
   ChatCompletionRequest,
-  ChatCompletionResult,
   ChatMessage,
   ChatRole,
   FetchLike,
