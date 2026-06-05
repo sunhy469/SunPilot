@@ -10,6 +10,8 @@
   },
   "dependencies": {
     "@sunpilot/daemon": "workspace:*",
+    "@sunpilot/protocol": "workspace:*",
+    "@sunpilot/storage": "workspace:*",
     "ws": "^8.18.2"
   },
   "devDependencies": {

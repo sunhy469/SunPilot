@@ -4,11 +4,16 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import WebSocket from "ws";
 import { createDaemon } from "@sunpilot/daemon";
+import { InMemoryDatabaseContext } from "@sunpilot/storage";
 
 type Daemon = Awaited<ReturnType<typeof createDaemon>>;
 
 let daemon: Daemon | undefined;
 let home: string;
+let database: InMemoryDatabaseContext;
+async function createTestDaemon(options: Omit<Parameters<typeof createDaemon>[0], "database"> = {}) {
+  return createDaemon({ ...options, database });
+}
 
 function auth() {
   return { authorization: `Bearer ${daemon!.token}` };
@@ -40,14 +45,16 @@ async function approvePending() {
 
 beforeEach(async () => {
   home = mkdtempSync(join(tmpdir(), "sunpilot-test-"));
+  database = new InMemoryDatabaseContext();
   process.env.SUNPILOT_HOME = home;
   process.env.SUNPILOT_LOG_LEVEL = "silent";
-  daemon = await createDaemon({ port: 0 });
+  daemon = await createTestDaemon({ port: 0 });
 });
 
 afterEach(async () => {
   await daemon?.stop();
   daemon = undefined;
+  database.reset();
   delete process.env.SUNPILOT_HOME;
   rmSync(home, { recursive: true, force: true });
   delete process.env.SUNPILOT_ALLOWED_ORIGINS;
@@ -199,6 +206,80 @@ describe("SunPilot daemon first-phase flow", () => {
 
     const jobs = await daemon!.app.inject({ method: "GET", url: "/v1/jobs", headers: auth() });
     expect(jobs.statusCode).toBe(200);
+  });
+
+  test("exposes daemon chat API through the AgentService boundary", async () => {
+    await daemon?.stop();
+    daemon = await createTestDaemon({
+      port: 0,
+      chatAgent: {
+        async chat(input) {
+          expect(input).toEqual({ message: "hello agent" });
+          return {
+            conversationId: "conv_test",
+            message: {
+              id: "msg_test",
+              conversationId: "conv_test",
+              role: "assistant",
+              content: "hello from daemon chat",
+              createdAt: "2026-06-05T00:00:00.000Z"
+            }
+          };
+        }
+      }
+    });
+
+    const denied = await daemon.app.inject({
+      method: "POST",
+      url: "/v1/chat",
+      payload: { message: "hello agent" }
+    });
+    expect(denied.statusCode).toBe(401);
+
+    const response = await daemon.app.inject({
+      method: "POST",
+      url: "/v1/chat",
+      headers: auth(),
+      payload: { message: "hello agent" }
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({
+      conversationId: "conv_test",
+      message: {
+        id: "msg_test",
+        conversationId: "conv_test",
+        role: "assistant",
+        content: "hello from daemon chat",
+        createdAt: "2026-06-05T00:00:00.000Z"
+      }
+    });
+  });
+
+  test("exposes conversation REST resources through daemon storage", async () => {
+    const created = await daemon!.app.inject({
+      method: "POST",
+      url: "/v1/conversations",
+      headers: auth(),
+      payload: { title: "REST conversation" }
+    });
+    expect(created.statusCode).toBe(200);
+    expect(created.json()).toMatchObject({ id: expect.stringMatching(/^conv_/), title: "REST conversation", status: "active" });
+
+    const list = await daemon!.app.inject({ method: "GET", url: "/v1/conversations", headers: auth() });
+    expect(list.statusCode).toBe(200);
+    expect(list.json()).toEqual({ items: expect.arrayContaining([expect.objectContaining({ id: created.json().id, title: "REST conversation" })]) });
+
+    const emptyMessages = await daemon!.app.inject({ method: "GET", url: `/v1/conversations/${created.json().id}/messages`, headers: auth() });
+    expect(emptyMessages.statusCode).toBe(200);
+    expect(emptyMessages.json()).toEqual({ conversationId: created.json().id, items: [] });
+
+    const deleted = await daemon!.app.inject({ method: "DELETE", url: `/v1/conversations/${created.json().id}`, headers: auth() });
+    expect(deleted.statusCode).toBe(200);
+    expect(deleted.json()).toEqual({ ok: true });
+
+    const missingMessages = await daemon!.app.inject({ method: "GET", url: `/v1/conversations/${created.json().id}/messages`, headers: auth() });
+    expect(missingMessages.statusCode).toBe(404);
   });
 
   test("updates managed config through daemon API with local safety constraints and audit log", async () => {
@@ -480,7 +561,7 @@ describe("SunPilot daemon first-phase flow", () => {
   test("recovers a waiting approval run across daemon restart and continues after approval", async () => {
     const run = await createRun("restart recovery");
     await daemon!.stop();
-    daemon = await createDaemon({ port: 0 });
+    daemon = await createTestDaemon({ port: 0 });
 
     const detail = await daemon!.app.inject({ method: "GET", url: `/v1/runs/${run.id}`, headers: auth() });
     expect(detail.statusCode).toBe(200);
@@ -499,7 +580,7 @@ describe("SunPilot daemon first-phase flow", () => {
   test("accepts WebSocket JSON-RPC run.create with local token", async () => {
     const port = 39200 + Math.floor(Math.random() * 1000);
     await daemon!.stop();
-    daemon = await createDaemon({ port });
+    daemon = await createTestDaemon({ port });
     await daemon.start();
 
     const audit = await daemon!.app.inject({ method: "GET", url: "/v1/audit-logs", headers: auth() });
@@ -528,10 +609,72 @@ describe("SunPilot daemon first-phase flow", () => {
     expect(response).toMatchObject({ jsonrpc: "2.0", id: "req_1", result: { status: "waiting_approval", input: { text: "websocket fixture" } } });
   });
 
+  test("streams chat lifecycle events over WebSocket chat.send", async () => {
+    const port = 39400 + Math.floor(Math.random() * 500);
+    await daemon!.stop();
+    daemon = await createTestDaemon({
+      port,
+      chatAgent: {
+        async chat(input, hooks) {
+          expect(input).toEqual({ message: "hello over ws" });
+          const user = {
+            id: "msg_user_ws",
+            conversationId: "conv_ws",
+            role: "user" as const,
+            content: "hello over ws",
+            createdAt: "2026-06-05T00:00:00.000Z"
+          };
+          const assistant = {
+            id: "msg_assistant_ws",
+            conversationId: "conv_ws",
+            role: "assistant" as const,
+            content: "hello from websocket",
+            createdAt: "2026-06-05T00:00:01.000Z"
+          };
+          await hooks?.onUserMessage?.(user);
+          await hooks?.onAssistantStarted?.({ conversationId: "conv_ws", messageId: assistant.id });
+          await hooks?.onAssistantDelta?.({ conversationId: "conv_ws", messageId: assistant.id, delta: assistant.content });
+          await hooks?.onAssistantMessage?.(assistant);
+          return { conversationId: "conv_ws", message: assistant };
+        }
+      }
+    });
+    await daemon.start();
+
+    const messages = await new Promise<any[]>((resolve, reject) => {
+      const received: any[] = [];
+      const ws = new WebSocket(`ws://127.0.0.1:${port}/v1/ws?token=${daemon!.token}`);
+      ws.once("error", reject);
+      ws.once("open", () => {
+        ws.send(JSON.stringify({ jsonrpc: "2.0", id: "chat_1", method: "chat.send", params: { message: "hello over ws" } }));
+      });
+      ws.on("message", (raw) => {
+        received.push(JSON.parse(String(raw)));
+        if (received.some((message) => message.id === "chat_1")) {
+          ws.close();
+          resolve(received);
+        }
+      });
+    });
+
+    expect(messages.map((message) => message.method ?? `response:${message.id}`)).toEqual([
+      "chat.message.created",
+      "chat.assistant.started",
+      "chat.assistant.delta",
+      "chat.assistant.completed",
+      "response:chat_1"
+    ]);
+    expect(messages).toEqual(expect.arrayContaining([
+      expect.objectContaining({ method: "chat.message.created", params: expect.objectContaining({ message: expect.objectContaining({ role: "user" }) }) }),
+      expect.objectContaining({ method: "chat.assistant.delta", params: expect.objectContaining({ delta: "hello from websocket" }) }),
+      expect.objectContaining({ id: "chat_1", result: expect.objectContaining({ conversationId: "conv_ws", message: expect.objectContaining({ content: "hello from websocket" }) }) })
+    ]));
+  });
+
   test("subscribes to run events over WebSocket with history replay", async () => {
     const port = 39800 + Math.floor(Math.random() * 500);
     await daemon!.stop();
-    daemon = await createDaemon({ port });
+    daemon = await createTestDaemon({ port });
     await daemon.start();
 
     const messages = await new Promise<any[]>((resolve, reject) => {
@@ -572,7 +715,7 @@ describe("SunPilot daemon first-phase flow", () => {
   test("returns a JSON-RPC error for malformed WebSocket messages and keeps the connection usable", async () => {
     const port = 40300 + Math.floor(Math.random() * 500);
     await daemon!.stop();
-    daemon = await createDaemon({ port });
+    daemon = await createTestDaemon({ port });
     await daemon.start();
 
     const responses = await new Promise<any[]>((resolve, reject) => {
@@ -598,7 +741,7 @@ describe("SunPilot daemon first-phase flow", () => {
   test("maps WebSocket JSON-RPC client errors without collapsing them into internal errors", async () => {
     const port = 40800 + Math.floor(Math.random() * 500);
     await daemon!.stop();
-    daemon = await createDaemon({ port });
+    daemon = await createTestDaemon({ port });
     await daemon.start();
 
     const responses = await new Promise<any[]>((resolve, reject) => {
@@ -627,7 +770,7 @@ describe("SunPilot daemon first-phase flow", () => {
   test("rejects WebSocket upgrade from non-local origin", async () => {
     const port = 40400 + Math.floor(Math.random() * 1000);
     await daemon!.stop();
-    daemon = await createDaemon({ port });
+    daemon = await createTestDaemon({ port });
     await daemon.start();
 
     const closeOrError = await new Promise<string>((resolve) => {

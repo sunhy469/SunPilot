@@ -1,14 +1,23 @@
 import { appendFileSync } from "node:fs";
 import { readFile, writeFile } from "node:fs/promises";
 import { isAbsolute, join, resolve, sep } from "node:path";
-import type { StepRecord, SunPilotEvent } from "@sunpilot/protocol";
-import { redactSensitive, writeArtifact, type SunPilotDatabase } from "@sunpilot/storage";
+import type { ArtifactRecord, MemoryRecord, RunRecord, StepRecord, SunPilotEvent, SunPilotEventType } from "@sunpilot/protocol";
+import { redactSensitive, writeArtifact, type SunPilotPaths } from "@sunpilot/storage";
 import type { SkillDefinition } from "@sunpilot/skill-sdk";
 import type { SkillRegistry } from "./registry.js";
 
 export interface SkillRunnerOptions {
   timeoutMs?: number;
   maxConcurrency?: number;
+}
+
+export interface SkillRunnerStore {
+  paths: SunPilotPaths;
+  getRun(id: string): Promise<RunRecord | undefined> | RunRecord | undefined;
+  appendEvent(event: SunPilotEvent): Promise<void> | void;
+  insertArtifact(artifact: ArtifactRecord): Promise<void> | void;
+  insertMemory(memory: MemoryRecord): Promise<void> | void;
+  audit(record: { runId?: string; stepId?: string; actor: string; action: string; target: string; risk?: string; payload: unknown }): Promise<void> | void;
 }
 
 function positiveNumber(value: number | undefined, fallback: number): number {
@@ -24,6 +33,40 @@ function isPathAllowed(path: string, allowedPaths: string[] | undefined, skillRo
   });
 }
 
+const sunPilotEventTypes = new Set<string>([
+  "run.created",
+  "run.planning",
+  "run.started",
+  "run.completed",
+  "run.failed",
+  "run.canceled",
+  "run.interrupted",
+  "workflow.selected",
+  "workflow.planned",
+  "step.created",
+  "step.started",
+  "step.progress",
+  "step.completed",
+  "step.failed",
+  "step.interrupted",
+  "skill.loaded",
+  "skill.execution.started",
+  "skill.execution.completed",
+  "skill.execution.failed",
+  "approval.requested",
+  "approval.approved",
+  "approval.rejected",
+  "artifact.created",
+  "memory.written",
+  "audit.written"
+]);
+
+function normalizeSkillEvent(type: string, payload: unknown): { type: SunPilotEventType; payload: unknown } {
+  if (type === "skill.progress") return { type: "step.progress", payload };
+  if (sunPilotEventTypes.has(type)) return { type: type as SunPilotEventType, payload };
+  return { type: "step.progress", payload: { type, payload } };
+}
+
 export class SkillRunner {
   private activeExecutions = 0;
   private readonly waiters: Array<() => void> = [];
@@ -32,7 +75,7 @@ export class SkillRunner {
   private readonly maxConcurrency: number;
 
   constructor(
-    private readonly db: SunPilotDatabase,
+    private readonly db: SkillRunnerStore,
     private readonly registry: SkillRegistry,
     options: SkillRunnerOptions = {}
   ) {
@@ -43,7 +86,7 @@ export class SkillRunner {
   async execute(step: StepRecord): Promise<unknown> {
     await this.acquireSlot();
     try {
-      if (this.db.getRun(step.runId)?.status === "interrupted") {
+      if ((await this.db.getRun(step.runId))?.status === "interrupted") {
         throw new Error(`Run interrupted: ${step.runId}`);
       }
       return await this.executeWithSlot(step);
@@ -62,7 +105,7 @@ export class SkillRunner {
     if (!step.skillId || !step.capability) {
       throw new Error("Skill step is missing skillId or capability.");
     }
-    const installed = this.registry.get(step.skillId);
+    const installed = await this.registry.get(step.skillId);
     if (!installed || !installed.enabled) {
       throw new Error(`Skill is not installed or enabled: ${step.skillId}`);
     }
@@ -88,7 +131,7 @@ export class SkillRunner {
       throw new Error(`Skill definition does not export capability: ${step.capability}`);
     }
 
-    this.db.audit({ runId: step.runId, stepId: step.id, actor: "daemon", action: "skill.execute", target: `${step.skillId}:${step.capability}`, risk: capability.risk, payload: { input: step.input } });
+    await this.db.audit({ runId: step.runId, stepId: step.id, actor: "daemon", action: "skill.execute", target: `${step.skillId}:${step.capability}`, risk: capability.risk, payload: { input: step.input } });
     const parsedInput = capability.input.parse(step.input);
     const skillLog = (level: string, message: string, payload?: unknown) => {
       const entry = redactSensitive(
@@ -111,22 +154,23 @@ export class SkillRunner {
       signal: controller.signal,
       events: {
         emit: (type, payload) => {
+          const normalized = normalizeSkillEvent(type, payload);
           const event: SunPilotEvent = {
             id: `evt_${crypto.randomUUID()}`,
             runId: step.runId,
             stepId: step.id,
-            type: type === "skill.progress" ? "step.progress" : "step.progress",
-            payload,
+            type: normalized.type,
+            payload: normalized.payload,
             createdAt: new Date().toISOString()
           };
-          this.db.appendEvent(event);
+          void this.db.appendEvent(event);
         }
       },
       artifacts: {
         write: async (input) => {
           const artifact = writeArtifact(this.db.paths, { runId: step.runId, stepId: step.id, ...input });
-          this.db.insertArtifact(artifact);
-          this.db.appendEvent({
+          await this.db.insertArtifact(artifact);
+          await this.db.appendEvent({
             id: `evt_${crypto.randomUUID()}`,
             runId: step.runId,
             stepId: step.id,
@@ -142,20 +186,20 @@ export class SkillRunner {
           if (!isPathAllowed(path, installed.manifest.permissions.filesystem?.read, installed.path)) {
             throw new Error(`Permission denied: file read is not allowed for ${path}`);
           }
-          this.db.audit({ runId: step.runId, stepId: step.id, actor: "daemon", action: "file.read", target: path, payload: { skillId: step.skillId } });
+          await this.db.audit({ runId: step.runId, stepId: step.id, actor: "daemon", action: "file.read", target: path, payload: { skillId: step.skillId } });
           return readFile(path, "utf8");
         },
         writeText: async (path, content) => {
           if (!isPathAllowed(path, installed.manifest.permissions.filesystem?.write, installed.path)) {
             throw new Error(`Permission denied: file write is not allowed for ${path}`);
           }
-          this.db.audit({ runId: step.runId, stepId: step.id, actor: "daemon", action: "file.write", target: path, payload: { skillId: step.skillId, bytes: Buffer.byteLength(content) } });
+          await this.db.audit({ runId: step.runId, stepId: step.id, actor: "daemon", action: "file.write", target: path, payload: { skillId: step.skillId, bytes: Buffer.byteLength(content) } });
           return writeFile(path, content, "utf8");
         }
       },
       memory: {
         async write(key, value) {
-          const memory = {
+          const memory: MemoryRecord = {
             id: `memory_${crypto.randomUUID()}`,
             runId: step.runId,
             stepId: step.id,
@@ -164,9 +208,9 @@ export class SkillRunner {
             metadata: { skillId: step.skillId, capability: step.capability },
             createdAt: new Date().toISOString()
           };
-          db.insertMemory(memory);
-          db.audit({ runId: step.runId, stepId: step.id, actor: "daemon", action: "memory.write", target: key, risk: capability.risk, payload: { skillId: step.skillId, capability: step.capability } });
-          db.appendEvent({
+          await db.insertMemory(memory);
+          await db.audit({ runId: step.runId, stepId: step.id, actor: "daemon", action: "memory.write", target: key, risk: capability.risk, payload: { skillId: step.skillId, capability: step.capability } });
+          await db.appendEvent({
             id: `evt_${crypto.randomUUID()}`,
             runId: step.runId,
             stepId: step.id,
@@ -181,7 +225,7 @@ export class SkillRunner {
           if (!(installed.manifest.permissions.env?.allow ?? []).includes(name)) {
             throw new Error(`Permission denied: secret ${name} is not allowed`);
           }
-          db.audit({ runId: step.runId, stepId: step.id, actor: "daemon", action: "secret.read", target: name, risk: capability.risk, payload: { skillId: step.skillId } });
+          await db.audit({ runId: step.runId, stepId: step.id, actor: "daemon", action: "secret.read", target: "[REDACTED_NAME]", risk: capability.risk, payload: { skillId: step.skillId } });
           return process.env[name];
         }
       },
@@ -194,7 +238,7 @@ export class SkillRunner {
     const timeout = new Promise<never>((_resolve, reject) => {
       timer = setTimeout(() => {
         controller.abort(new Error(`Skill execution timed out after ${this.timeoutMs}ms.`));
-        this.db.audit({
+        void this.db.audit({
           runId: step.runId,
           stepId: step.id,
           actor: "daemon",

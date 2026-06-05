@@ -15,7 +15,7 @@
     "test": "pnpm -r test",
     "lint": "pnpm -r lint",
     "dev:daemon": "pnpm --filter @sunpilot/daemon dev",
-    "dev:console": "pnpm --filter @sunpilot/console dev"
+    "dev:web": "pnpm --filter @sunpilot/web dev"
   },
   "dependencies": {
     "@sunpilot/launcher": "workspace:*"

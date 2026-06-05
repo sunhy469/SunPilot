@@ -113,7 +113,7 @@ describe("launcher", () => {
     );
   });
 
-  test("open injects a local token into the default domain console URL", async () => {
+  test("open injects a local token into the default domain web URL", async () => {
     const openImpl = vi.fn(async () => undefined);
     const messages: string[] = [];
     const code = await runLauncher({
@@ -129,11 +129,11 @@ describe("launcher", () => {
     expect(messages).toEqual(["Opened https://tradeagent.asia/?token=sun%20local%2Ftoken"]);
   });
 
-  test("open allows overriding the public console URL", async () => {
+  test("open allows overriding the public web URL", async () => {
     const openImpl = vi.fn(async () => undefined);
     const code = await runLauncher({
       argv: ["open"],
-      env: { SUNPILOT_CONSOLE_URL: "http://127.0.0.1:3737/" },
+      env: { SUNPILOT_WEB_URL: "http://127.0.0.1:3737/" },
       paths,
       log: () => {},
       ensureTokenImpl: () => "sun local/token",
@@ -181,5 +181,27 @@ describe("launcher", () => {
     expect(killImpl).toHaveBeenCalledWith(123, "SIGTERM");
     expect(rmImpl).toHaveBeenCalledWith(paths.pidFile, { force: true });
     expect(messages).toEqual(["SunPilot daemon stop signal sent."]);
+  });
+
+  test("stop removes a stale pid file when the daemon process is gone", async () => {
+    const killImpl = vi.fn(() => {
+      throw new Error("missing process");
+    });
+    const rmImpl = vi.fn();
+    const messages: string[] = [];
+    const code = await runLauncher({
+      argv: ["stop"],
+      paths,
+      log: (message) => messages.push(message),
+      existsImpl: () => true,
+      readFileImpl: () => "123",
+      killImpl,
+      rmImpl
+    });
+
+    expect(code).toBe(0);
+    expect(killImpl).toHaveBeenCalledWith(123, "SIGTERM");
+    expect(rmImpl).toHaveBeenCalledWith(paths.pidFile, { force: true });
+    expect(messages).toEqual(["SunPilot daemon pid file exists, but the process is not running."]);
   });
 });

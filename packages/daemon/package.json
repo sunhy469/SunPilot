@@ -22,7 +22,7 @@
   "dependencies": {
     "@fastify/cors": "^10.1.0",
     "@fastify/static": "^8.2.0",
-    "@sunpilot/console": "workspace:*",
+    "@sunpilot/web": "workspace:*",
     "@sunpilot/core": "workspace:*",
     "@sunpilot/fixture-echo-skill": "workspace:*",
     "@sunpilot/protocol": "workspace:*",

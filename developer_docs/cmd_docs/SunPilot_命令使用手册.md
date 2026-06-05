@@ -10,6 +10,7 @@
 
 - Node.js：`>=22.22.2 <23`
 - pnpm：`>=11.5.1 <12`
+- Docker / Docker Compose：用于本地 PostgreSQL
 - 默认服务端口：`3737`
 - 默认本地数据目录：`~/.sunpilot`
 
@@ -19,7 +20,21 @@
 
 ```bash
 pnpm install
+docker compose up -d postgres
 pnpm build
+```
+
+默认数据库连接为：
+
+```bash
+postgresql://sunpilot:sunpilot_dev_password@localhost:5432/sunpilot
+```
+
+如果宿主机已有服务占用 `5432`，可以改用其他映射端口：
+
+```bash
+SUNPILOT_POSTGRES_PORT=55432 docker compose up -d postgres
+export SUNPILOT_DATABASE_URL=postgresql://sunpilot:sunpilot_dev_password@localhost:55432/sunpilot
 ```
 
 `pnpm install` 会自动执行根目录 `postinstall` 脚本：
@@ -169,7 +184,7 @@ sun start --foreground
 - 观察启动失败原因。
 - 让进程跟随当前终端退出。
 
-### 4.3 覆盖控制台访问域名
+### 4.3 覆盖 Web 访问域名
 
 `sun open` 默认使用：
 
@@ -180,9 +195,11 @@ https://tradeagent.asia
 如需临时改成本地地址：
 
 ```bash
-export SUNPILOT_CONSOLE_URL=http://127.0.0.1:3737
+export SUNPILOT_WEB_URL=http://127.0.0.1:3737
 sun open
 ```
+
+兼容旧环境变量 `SUNPILOT_CONSOLE_URL`，但新配置优先使用 `SUNPILOT_WEB_URL`。
 
 ## 5. Token 与网页登录
 
@@ -367,7 +384,7 @@ pnpm lint
 ```bash
 pnpm --filter @sunpilot/core test
 pnpm --filter @sunpilot/daemon build
-pnpm --filter @sunpilot/console test
+pnpm --filter @sunpilot/web test
 pnpm --filter @sunpilot/launcher test
 pnpm --filter @sunpilot/integration-tests test
 ```
@@ -376,7 +393,7 @@ pnpm --filter @sunpilot/integration-tests test
 
 ```bash
 pnpm dev:daemon
-pnpm dev:console
+pnpm dev:web
 ```
 
 ## 11. 当前尚未实现的命令
@@ -394,4 +411,3 @@ sun ask "帮我分析这个客户是否值得跟进"
 ```
 
 目前网页控制台是“运行监控台”，可以创建 fixture 工作流、审批、查看事件、产物、技能、任务和配置；还不是 ChatGPT 式对话界面。
-

@@ -2,7 +2,18 @@ import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { isAbsolute, join, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 import { skillManifestSchema, type InstalledSkillRecord, type SkillManifest } from "@sunpilot/protocol";
-import type { SunPilotDatabase } from "@sunpilot/storage";
+
+export interface SkillRegistryStore {
+  skills: {
+    upsert(input: InstalledSkillRecord): Promise<InstalledSkillRecord>;
+    list(): Promise<InstalledSkillRecord[]>;
+    findById(id: string): Promise<InstalledSkillRecord | null>;
+    setEnabled(id: string, enabled: boolean): Promise<InstalledSkillRecord | null>;
+  };
+  audit: {
+    create(input: { actor: string; action: string; target: string; risk?: string; payload: unknown }): Promise<unknown>;
+  };
+}
 
 function resolveSkillPath(skillRoot: string, relativePath: string, label: string): string {
   if (isAbsolute(relativePath)) {
@@ -37,7 +48,7 @@ export class SkillRegistry {
   private readonly skills = new Map<string, InstalledSkillRecord>();
 
   constructor(
-    private readonly db: SunPilotDatabase,
+    private readonly db: SkillRegistryStore,
     private readonly directories: string[],
     private readonly fixtureDirectories: string[] = []
   ) {}
@@ -62,7 +73,7 @@ export class SkillRegistry {
           const readmePath = requireSkillFile(skillRoot, manifest.readme, "readme");
           const readmeSummary = readFileSync(readmePath, "utf8").split("\n").slice(0, 20).join("\n");
           const now = new Date().toISOString();
-          const existing = this.db.getSkill(manifest.id);
+          const existing = await this.db.skills.findById(manifest.id);
           const record: InstalledSkillRecord = {
             id: manifest.id,
             name: manifest.name,
@@ -75,10 +86,10 @@ export class SkillRegistry {
             updatedAt: now
           };
           this.skills.set(record.id, record);
-          this.db.upsertSkill(record);
-          this.db.audit({ actor: "daemon", action: "skill.load", target: record.id, payload: { path: record.path, version: record.version } });
+          await this.db.skills.upsert(record);
+          await this.db.audit.create({ actor: "daemon", action: "skill.load", target: record.id, payload: { path: record.path, version: record.version } });
         } catch (error) {
-          this.db.audit({
+          await this.db.audit.create({
             actor: "daemon",
             action: "skill.load.failed",
             target: resolve(candidate),
@@ -95,15 +106,15 @@ export class SkillRegistry {
     return [...this.skills.values()];
   }
 
-  get(id: string): InstalledSkillRecord | undefined {
-    return this.skills.get(id) ?? this.db.listSkills().find((skill) => skill.id === id);
+  async get(id: string): Promise<InstalledSkillRecord | undefined> {
+    return this.skills.get(id) ?? (await this.db.skills.findById(id)) ?? undefined;
   }
 
-  setEnabled(id: string, enabled: boolean): InstalledSkillRecord | undefined {
-    const updated = this.db.setSkillEnabled(id, enabled);
+  async setEnabled(id: string, enabled: boolean): Promise<InstalledSkillRecord | undefined> {
+    const updated = await this.db.skills.setEnabled(id, enabled);
     if (!updated) return undefined;
     this.skills.set(id, updated);
-    this.db.audit({ actor: "daemon", action: enabled ? "skill.enable" : "skill.disable", target: id, payload: { enabled } });
+    await this.db.audit.create({ actor: "daemon", action: enabled ? "skill.enable" : "skill.disable", target: id, payload: { enabled } });
     return updated;
   }
 

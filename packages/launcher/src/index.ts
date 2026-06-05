@@ -50,7 +50,7 @@ export async function runLauncher(deps: LauncherDeps = {}): Promise<number> {
   const env = deps.env ?? process.env;
   const port = parsed.port ?? Number(env.SUNPILOT_PORT ?? "3737");
   const baseUrl = `http://127.0.0.1:${port}`;
-  const consoleUrl = (env.SUNPILOT_CONSOLE_URL ?? "https://tradeagent.asia").replace(/\/+$/, "");
+  const webUrl = (env.SUNPILOT_WEB_URL ?? env.SUNPILOT_CONSOLE_URL ?? "https://tradeagent.asia").replace(/\/+$/, "");
   const paths = deps.paths ?? getSunPilotPaths();
   const fetchImpl = deps.fetchImpl ?? fetch;
   const log = deps.log ?? console.log;
@@ -97,6 +97,7 @@ export async function runLauncher(deps: LauncherDeps = {}): Promise<number> {
           (deps.rmImpl ?? rmSync)(paths.pidFile, { force: true });
           log("SunPilot daemon stop signal sent.");
         } catch {
+          (deps.rmImpl ?? rmSync)(paths.pidFile, { force: true });
           log("SunPilot daemon pid file exists, but the process is not running.");
         }
       } else {
@@ -108,7 +109,7 @@ export async function runLauncher(deps: LauncherDeps = {}): Promise<number> {
       return (await status()) ? 0 : 1;
     case "open": {
       const token = (deps.ensureTokenImpl ?? ensureLocalToken)(paths);
-      const target = `${consoleUrl}/?token=${encodeURIComponent(token)}`;
+      const target = `${webUrl}/?token=${encodeURIComponent(token)}`;
       try {
         await (deps.openImpl ?? open)(target);
       } catch {

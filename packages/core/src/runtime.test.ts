@@ -2,10 +2,10 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
-import { getSunPilotPaths, SunPilotDatabase } from "@sunpilot/storage";
+import { InMemoryDatabaseContext } from "@sunpilot/storage";
 import { WorkflowRegistry, type BusinessWorkflow } from "@sunpilot/workflow";
 import type { ToolProvider } from "./providers.js";
-import { SunPilotRuntime } from "./runtime.js";
+import { RepositoryRuntimeStore, SunPilotRuntime } from "./runtime.js";
 
 const highRiskWorkflow: BusinessWorkflow = {
   id: "test.high-risk",
@@ -35,15 +35,17 @@ const provider: ToolProvider = {
 };
 
 let home: string;
-let db: SunPilotDatabase;
+let db: InMemoryDatabaseContext;
+let store: RepositoryRuntimeStore;
 
 beforeEach(() => {
   home = mkdtempSync(join(tmpdir(), "sunpilot-runtime-test-"));
-  db = new SunPilotDatabase(getSunPilotPaths(home));
+  db = new InMemoryDatabaseContext();
+  store = new RepositoryRuntimeStore(db);
 });
 
-afterEach(() => {
-  db.close();
+afterEach(async () => {
+  await db.close();
   rmSync(home, { recursive: true, force: true });
 });
 
@@ -51,31 +53,31 @@ describe("SunPilotRuntime approval policy", () => {
   test("automatically gates a high-risk capability and resumes it after approval", async () => {
     const workflows = new WorkflowRegistry();
     workflows.register(highRiskWorkflow);
-    const runtime = new SunPilotRuntime(db, workflows, [provider]);
+    const runtime = new SunPilotRuntime(store, workflows, [provider]);
 
     const waiting = await runtime.createRun({}, highRiskWorkflow.id, "auto");
     expect(waiting.status).toBe("waiting_approval");
-    expect(db.listSteps(waiting.id)).toEqual([expect.objectContaining({ type: "skill", status: "waiting_approval" })]);
-    const [approval] = db.listApprovals();
+    expect(await store.listSteps(waiting.id)).toEqual([expect.objectContaining({ type: "skill", status: "waiting_approval" })]);
+    const [approval] = await store.listApprovals();
     expect(approval).toMatchObject({ status: "pending", risk: "high", requestedAction: { skillId: "test.provider", capability: "danger.execute" } });
 
     await runtime.approve(approval!.id, { reason: "test" });
-    expect(db.getRun(waiting.id)).toMatchObject({ status: "completed" });
-    expect(db.listSteps(waiting.id)).toEqual([expect.objectContaining({ type: "skill", status: "completed", output: { value: 1 } })]);
+    expect(await store.getRun(waiting.id)).toMatchObject({ status: "completed" });
+    expect(await store.listSteps(waiting.id)).toEqual([expect.objectContaining({ type: "skill", status: "completed", output: { value: 1 } })]);
   });
 
   test("does not allow an approval to be decided more than once", async () => {
     const workflows = new WorkflowRegistry();
     workflows.register(highRiskWorkflow);
-    const runtime = new SunPilotRuntime(db, workflows, [provider]);
+    const runtime = new SunPilotRuntime(store, workflows, [provider]);
 
     const waiting = await runtime.createRun({}, highRiskWorkflow.id, "auto");
-    const [approval] = db.listApprovals();
+    const [approval] = await store.listApprovals();
     await runtime.approve(approval!.id, { reason: "test" });
 
-    expect(() => runtime.reject(approval!.id, { reason: "late reject" })).toThrow("Approval is already approved");
-    expect(db.getRun(waiting.id)).toMatchObject({ status: "completed" });
-    expect(db.listSteps(waiting.id)).toEqual([expect.objectContaining({ type: "skill", status: "completed" })]);
+    await expect(runtime.reject(approval!.id, { reason: "late reject" })).rejects.toThrow("Approval is already approved");
+    expect(await store.getRun(waiting.id)).toMatchObject({ status: "completed" });
+    expect(await store.listSteps(waiting.id)).toEqual([expect.objectContaining({ type: "skill", status: "completed" })]);
   });
 
   test("requires approval for low-risk capabilities that declare privileged permissions", async () => {
@@ -104,13 +106,13 @@ describe("SunPilotRuntime approval policy", () => {
         return provider.execute(request);
       }
     };
-    const runtime = new SunPilotRuntime(db, workflows, [permissionedProvider]);
+    const runtime = new SunPilotRuntime(store, workflows, [permissionedProvider]);
 
     const waiting = await runtime.createRun({}, highRiskWorkflow.id, "auto");
 
     expect(waiting.status).toBe("waiting_approval");
     expect(executed).toBe(false);
-    expect(db.listApprovals()).toEqual([
+    expect(await store.listApprovals()).toEqual([
       expect.objectContaining({
         status: "pending",
         requestedAction: expect.objectContaining({ skillId: "test.provider", capability: "danger.execute" })
@@ -118,11 +120,25 @@ describe("SunPilotRuntime approval policy", () => {
     ]);
   });
 
+  test("does not create duplicate approvals while a step is already waiting", async () => {
+    const workflows = new WorkflowRegistry();
+    workflows.register(highRiskWorkflow);
+    const runtime = new SunPilotRuntime(store, workflows, [provider]);
+
+    const waiting = await runtime.createRun({}, highRiskWorkflow.id, "auto");
+    await (runtime as unknown as { continueRun(runId: string): Promise<void> }).continueRun(waiting.id);
+
+    const approvals = await store.listApprovals();
+    expect(approvals).toHaveLength(1);
+    expect(approvals[0]).toMatchObject({ status: "pending", stepId: `${waiting.id}_danger` });
+    expect(await store.getRun(waiting.id)).toMatchObject({ status: "waiting_approval" });
+  });
+
   test("dry run plans steps without requesting approval or executing providers", async () => {
     const workflows = new WorkflowRegistry();
     workflows.register(highRiskWorkflow);
     let executed = false;
-    const runtime = new SunPilotRuntime(db, workflows, [
+    const runtime = new SunPilotRuntime(store, workflows, [
       {
         ...provider,
         async execute(request) {
@@ -136,10 +152,10 @@ describe("SunPilotRuntime approval policy", () => {
 
     expect(run.status).toBe("completed");
     expect(executed).toBe(false);
-    expect(db.listSteps(run.id)).toEqual([expect.objectContaining({ status: "skipped", output: { dryRun: true } })]);
-    expect(db.listApprovals()).toEqual([]);
-    expect(db.listJobs(run.id)).toEqual([expect.objectContaining({ status: "completed", payload: { workflowId: highRiskWorkflow.id, mode: "dry_run" } })]);
-    expect(db.listEvents(run.id)).toEqual(expect.arrayContaining([expect.objectContaining({ type: "workflow.planned" }), expect.objectContaining({ type: "run.completed", payload: { dryRun: true } })]));
+    expect(await store.listSteps(run.id)).toEqual([expect.objectContaining({ status: "skipped", output: { dryRun: true } })]);
+    expect(await store.listApprovals()).toEqual([]);
+    expect(await store.listJobs(run.id)).toEqual([expect.objectContaining({ status: "completed", payload: { workflowId: highRiskWorkflow.id, mode: "dry_run" } })]);
+    expect(await store.listEvents(run.id)).toEqual(expect.arrayContaining([expect.objectContaining({ type: "workflow.planned" }), expect.objectContaining({ type: "run.completed", payload: { dryRun: true } })]));
   });
 
   test("preserves interrupted state when an active provider rejects after cancellation", async () => {
@@ -160,24 +176,24 @@ describe("SunPilotRuntime approval policy", () => {
     };
     const workflows = new WorkflowRegistry();
     workflows.register(highRiskWorkflow);
-    const runtime = new SunPilotRuntime(db, workflows, [interruptible]);
+    const runtime = new SunPilotRuntime(store, workflows, [interruptible]);
 
     const execution = runtime.createRun({}, highRiskWorkflow.id, "auto");
     await new Promise((resolve) => setTimeout(resolve, 10));
-    const [run] = db.listRuns();
-    runtime.interrupt(run!.id);
+    const [run] = await store.listRuns();
+    await runtime.interrupt(run!.id);
     await execution;
 
-    expect(db.getRun(run!.id)).toMatchObject({ status: "interrupted" });
-    expect(db.listSteps(run!.id)).toEqual([expect.objectContaining({ status: "interrupted" })]);
-    expect(db.listEvents(run!.id)).toEqual(expect.arrayContaining([expect.objectContaining({ type: "step.interrupted" }), expect.objectContaining({ type: "run.interrupted" })]));
+    expect(await store.getRun(run!.id)).toMatchObject({ status: "interrupted" });
+    expect(await store.listSteps(run!.id)).toEqual([expect.objectContaining({ status: "interrupted" })]);
+    expect(await store.listEvents(run!.id)).toEqual(expect.arrayContaining([expect.objectContaining({ type: "step.interrupted" }), expect.objectContaining({ type: "run.interrupted" })]));
   });
 
   test("cancels a waiting run without executing pending skill steps", async () => {
     const workflows = new WorkflowRegistry();
     workflows.register(highRiskWorkflow);
     let executed = false;
-    const runtime = new SunPilotRuntime(db, workflows, [
+    const runtime = new SunPilotRuntime(store, workflows, [
       {
         ...provider,
         async execute(request) {
@@ -188,21 +204,21 @@ describe("SunPilotRuntime approval policy", () => {
     ]);
 
     const waiting = await runtime.createRun({}, highRiskWorkflow.id, "auto");
-    const canceled = runtime.cancel(waiting.id);
+    const canceled = await runtime.cancel(waiting.id);
 
     expect(canceled.status).toBe("canceled");
     expect(executed).toBe(false);
-    expect(db.listSteps(waiting.id)).toEqual([expect.objectContaining({ status: "canceled", error: { reason: "run canceled" } })]);
-    expect(db.listEvents(waiting.id)).toEqual(expect.arrayContaining([expect.objectContaining({ type: "run.canceled" })]));
-    expect(db.listAuditLogs()).toEqual(expect.arrayContaining([expect.objectContaining({ action: "run.cancel", target: waiting.id })]));
+    expect(await store.listSteps(waiting.id)).toEqual([expect.objectContaining({ status: "canceled", error: { reason: "run canceled" } })]);
+    expect(await store.listEvents(waiting.id)).toEqual(expect.arrayContaining([expect.objectContaining({ type: "run.canceled" })]));
+    expect(await db.audit.list()).toEqual(expect.arrayContaining([expect.objectContaining({ action: "run.cancel", target: waiting.id })]));
   });
 
-  test("rejects interrupt and cancel for unknown runs", () => {
+  test("rejects interrupt and cancel for unknown runs", async () => {
     const workflows = new WorkflowRegistry();
     workflows.register(highRiskWorkflow);
-    const runtime = new SunPilotRuntime(db, workflows, [provider]);
+    const runtime = new SunPilotRuntime(store, workflows, [provider]);
 
-    expect(() => runtime.interrupt("run_missing")).toThrow("Unknown run: run_missing");
-    expect(() => runtime.cancel("run_missing")).toThrow("Unknown run: run_missing");
+    await expect(runtime.interrupt("run_missing")).rejects.toThrow("Unknown run: run_missing");
+    await expect(runtime.cancel("run_missing")).rejects.toThrow("Unknown run: run_missing");
   });
 });

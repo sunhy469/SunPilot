@@ -12,6 +12,8 @@
 export SUNPILOT_LLM_BASE_URL=https://api.deepseek.com
 export SUNPILOT_LLM_MODEL=deepseek-v4-flash
 export SUNPILOT_LLM_API_KEY=你的密钥
+export SUNPILOT_DATABASE_PROVIDER=postgres
+export SUNPILOT_DATABASE_URL=postgresql://sunpilot:sunpilot_dev_password@localhost:5432/sunpilot
 ```
 
 daemon 由 `sun start` 启动时，会继承当前 shell 中已经存在的环境变量。
@@ -42,6 +44,8 @@ nano ~/.bashrc
 export SUNPILOT_LLM_BASE_URL=https://api.deepseek.com
 export SUNPILOT_LLM_MODEL=deepseek-v4-flash
 export SUNPILOT_LLM_API_KEY=你的密钥
+export SUNPILOT_DATABASE_PROVIDER=postgres
+export SUNPILOT_DATABASE_URL=postgresql://sunpilot:sunpilot_dev_password@localhost:5432/sunpilot
 ```
 
 保存后执行：
@@ -60,11 +64,14 @@ sun start
 | --- | --- | --- | --- | --- |
 | `SUNPILOT_HOME` | `~/.sunpilot` | 否 | storage | 指定 SunPilot 本地数据目录 |
 | `SUNPILOT_PORT` | `3737` | 否 | launcher / daemon | 指定 daemon 端口 |
-| `SUNPILOT_CONSOLE_URL` | `https://tradeagent.asia` | 否 | launcher | 指定 `sun open` 输出的控制台域名 |
+| `SUNPILOT_WEB_URL` | `https://tradeagent.asia` | 否 | launcher | 指定 `sun open` 输出的 Web 域名 |
+| `SUNPILOT_CONSOLE_URL` | `https://tradeagent.asia` | 否 | launcher | 旧变量名；仅作为 `SUNPILOT_WEB_URL` 未设置时的兼容 fallback |
 | `SUNPILOT_ALLOWED_ORIGINS` | 空 | 否 | daemon | 追加允许访问 daemon 的外部 Origin |
 | `SUNPILOT_LOG_LEVEL` | `info` | 否 | daemon | Fastify 日志级别 |
 | `SUNPILOT_SKILL_TIMEOUT_MS` | `300000` | 否 | daemon / skill-runner | 单个 skill 最大执行时间 |
 | `SUNPILOT_SKILL_MAX_CONCURRENCY` | `4` | 否 | daemon / skill-runner | skill 最大并发执行数 |
+| `SUNPILOT_DATABASE_PROVIDER` | `postgres` | 否 | storage | 指定主数据库类型；当前阶段只支持 PostgreSQL |
+| `SUNPILOT_DATABASE_URL` | `postgresql://sunpilot:sunpilot_dev_password@localhost:5432/sunpilot` | 否 | storage | PostgreSQL 连接字符串 |
 | `SUNPILOT_LLM_BASE_URL` | `https://api.deepseek.com` | 否 | core LLM | OpenAI-compatible 模型服务地址 |
 | `SUNPILOT_LLM_MODEL` | `deepseek-v4-flash` | 否 | core LLM | 默认模型名 |
 | `SUNPILOT_LLM_API_KEY` | 无 | 是 | core LLM | 模型服务 API key |
@@ -96,7 +103,6 @@ packages/storage/src/paths.ts
 ```text
 ~/.sunpilot/
 ├── config.json
-├── sunpilot.db
 ├── artifacts/
 ├── skills/
 ├── logs/
@@ -148,7 +154,9 @@ sun start --port 3738
 sun status --port 3738
 ```
 
-### 4.3 `SUNPILOT_CONSOLE_URL`
+主数据库不再保存在 `~/.sunpilot` 下。当前主数据库由 Docker PostgreSQL 提供，默认 Docker volume 为 `sunpilot_pg_data`。
+
+### 4.3 `SUNPILOT_WEB_URL`
 
 默认值：
 
@@ -164,13 +172,13 @@ packages/launcher/src/index.ts
 
 作用：
 
-- 控制 `sun open` 输出和尝试打开的控制台地址。
+- 控制 `sun open` 输出和尝试打开的 Web 地址。
 - 当前服务器部署默认使用域名 `tradeagent.asia`。
 
 示例：
 
 ```bash
-export SUNPILOT_CONSOLE_URL=http://127.0.0.1:3737
+export SUNPILOT_WEB_URL=http://127.0.0.1:3737
 sun open
 ```
 
@@ -179,6 +187,11 @@ sun open
 ```text
 http://127.0.0.1:3737/?token=...
 ```
+
+兼容说明：
+
+- `SUNPILOT_CONSOLE_URL` 是旧变量名。
+- 如果同时设置 `SUNPILOT_WEB_URL` 和 `SUNPILOT_CONSOLE_URL`，launcher 优先使用 `SUNPILOT_WEB_URL`。
 
 ### 4.4 `SUNPILOT_ALLOWED_ORIGINS`
 
@@ -309,7 +322,62 @@ sun stop
 sun start
 ```
 
-### 4.8 `SUNPILOT_LLM_BASE_URL`
+### 4.8 `SUNPILOT_DATABASE_PROVIDER`
+
+默认值：
+
+```bash
+postgres
+```
+
+使用位置：
+
+```text
+packages/storage/src/database/database.config.ts
+```
+
+作用：
+
+- 指定 SunPilot 主数据库类型。
+- 当前阶段只支持 `postgres`。
+- `sqlite` 不再作为默认主数据库，也不再作为 fallback。
+
+示例：
+
+```bash
+export SUNPILOT_DATABASE_PROVIDER=postgres
+sun stop
+sun start
+```
+
+### 4.9 `SUNPILOT_DATABASE_URL`
+
+默认值：
+
+```bash
+postgresql://sunpilot:sunpilot_dev_password@localhost:5432/sunpilot
+```
+
+使用位置：
+
+```text
+packages/storage/src/database/database.config.ts
+```
+
+作用：
+
+- 指定 PostgreSQL 连接字符串。
+- 本地开发默认配合项目根目录 `docker-compose.yml` 使用。
+
+示例：
+
+```bash
+export SUNPILOT_DATABASE_URL=postgresql://sunpilot:sunpilot_dev_password@localhost:5432/sunpilot
+sun stop
+sun start
+```
+
+### 4.10 `SUNPILOT_LLM_BASE_URL`
 
 默认值：
 
@@ -334,7 +402,7 @@ packages/core/src/llm.ts
 export SUNPILOT_LLM_BASE_URL=https://api.deepseek.com
 ```
 
-### 4.9 `SUNPILOT_LLM_MODEL`
+### 4.11 `SUNPILOT_LLM_MODEL`
 
 默认值：
 
@@ -358,7 +426,7 @@ packages/core/src/llm.ts
 export SUNPILOT_LLM_MODEL=deepseek-v4-flash
 ```
 
-### 4.10 `SUNPILOT_LLM_API_KEY`
+### 4.12 `SUNPILOT_LLM_API_KEY`
 
 默认值：
 
@@ -390,7 +458,7 @@ export SUNPILOT_LLM_API_KEY=你的密钥
 echo ${#SUNPILOT_LLM_API_KEY}
 ```
 
-### 4.11 `DEEPSEEK_API_KEY`
+### 4.13 `DEEPSEEK_API_KEY`
 
 默认值：
 
@@ -455,7 +523,7 @@ export SUNPILOT_LLM_API_KEY=你的密钥
 可选：
 
 ```bash
-export SUNPILOT_CONSOLE_URL=https://tradeagent.asia
+export SUNPILOT_WEB_URL=https://tradeagent.asia
 export SUNPILOT_PORT=3737
 export SUNPILOT_LOG_LEVEL=info
 ```
@@ -477,7 +545,7 @@ SUNPILOT_SKILL_MAX_CONCURRENCY
 echo $SUNPILOT_LLM_BASE_URL
 echo $SUNPILOT_LLM_MODEL
 echo $SUNPILOT_PORT
-echo $SUNPILOT_CONSOLE_URL
+echo $SUNPILOT_WEB_URL
 ```
 
 查看密钥是否存在，只显示长度：
@@ -539,4 +607,3 @@ packages/core/.env
 ```
 
 当前阶段不要依赖 `.env`。
-

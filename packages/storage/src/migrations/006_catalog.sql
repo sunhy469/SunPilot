@@ -1,0 +1,22 @@
+CREATE TABLE IF NOT EXISTS workflows (
+  id TEXT PRIMARY KEY,
+  title TEXT NOT NULL,
+  version TEXT NOT NULL,
+  source TEXT NOT NULL,
+  enabled BOOLEAN NOT NULL DEFAULT TRUE,
+  definition JSONB NOT NULL DEFAULT '{}'::jsonb,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS installed_skills (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  version TEXT NOT NULL,
+  path TEXT NOT NULL,
+  enabled BOOLEAN NOT NULL DEFAULT TRUE,
+  manifest JSONB NOT NULL DEFAULT '{}'::jsonb,
+  readme_summary TEXT,
+  installed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
