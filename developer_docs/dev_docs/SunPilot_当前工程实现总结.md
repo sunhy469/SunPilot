@@ -1,164 +1,329 @@
 # SunPilot 当前工程实现总结
 
-本文档使用中文总结当前 SunPilot 工程实现状态。该文件位于 `developer_docs/dev_docs/`，当前被 `.gitignore` 忽略，默认作为本地开发记录。
+更新时间：2026-06-07
 
-更新时间：2026-06-05
+本文档总结当前 SunPilot 工程架构、核心模块边界、运行链路和主要实现状态，作为开发、审查和后续重构时的工程地图。
 
 ## 1. 项目定位
 
-SunPilot 是 daemon-first 的本地业务 Agent 运行时。当前工程已经形成可运行闭环：
+SunPilot 是一个 daemon-first 的本地业务 Agent 运行时。它的核心目标不是只做一个聊天前端，而是在本机 daemon 中承载：
 
-- 本机 daemon 监听 `127.0.0.1:3737`。
-- daemon 托管构建后的 React Web 页面。
-- Web 当前是 Chat-first 产品界面，主入口为 `/` 和 `/chat`。
-- 前端与 daemon 使用 WebSocket JSON-RPC 通信。
-- daemon 与 DeepSeek/OpenAI-compatible 模型服务使用 HTTP streaming。
-- PostgreSQL 由项目 Docker Compose 提供，默认映射到 `localhost:5432`。
-- conversations、messages、runs、events、artifacts、audit logs 等持久化到 PostgreSQL。
-- `sun` launcher 负责启动、停止、查看状态和打开 Web 页面。
+- Web Chat 交互入口。
+- Agent Loop：理解意图、构建上下文、规划、选工具、执行、审批、反思、回复。
+- Skill 生态：开发、安装、扫描、权限控制和执行外部能力。
+- Workflow 生态：预定义业务流程的注册和执行。
+- PostgreSQL 持久化：run、event、message、approval、artifact、memory、tool/model call、audit 等。
+- CLI launcher：通过 `sun` / `sunpilot` 启停 daemon、打开 Web、查看日志和状态。
 
-当前重点是“本地 daemon + Docker PostgreSQL + WebSocket streaming chat + React Web”的端到端体验。
+当前工程已经形成端到端闭环：
 
-## 2. 当前运行架构
+```text
+Browser Web
+  <-> daemon WebSocket JSON-RPC / REST
+  <-> core AgentService / AgentKernel / Runtime
+  <-> storage PostgreSQL repositories
+  <-> skill-runner / workflow runtime / LLM provider
+```
+
+## 2. 总体运行架构
 
 ```text
 Browser
   |
-  | HTTPS / WebSocket
+  | HTTP / WebSocket
   v
-Nginx: tradeagent.asia
+SunPilot daemon (Fastify)
   |
-  | proxy_pass http://127.0.0.1:3737
+  | JSON-RPC command routing
   v
-SunPilot daemon
+AgentService (core/src/agent)
   |
-  | PostgreSQL protocol
+  | Agent Loop
   v
-Docker PostgreSQL
-
-SunPilot daemon
+agent-kernel
+  |       |          |
+  |       |          +--> LLM provider -> OpenAI-compatible HTTP SSE
+  |       |
+  |       +--> SkillRunner -> installed skills
   |
-  | OpenAI-compatible HTTP streaming
+  +--> Workflow runtime -> workflow steps -> providers/skills
+  |
   v
-DeepSeek
+Storage repositories -> PostgreSQL
 ```
 
-本地默认端口：
+前端和 daemon 之间使用 WebSocket JSON-RPC 推送 Agent 事件；daemon/core 和大模型之间使用 OpenAI-compatible HTTP streaming，也就是请求 `stream: true` 后解析 SSE `data:` 流。
 
-| 服务 | 地址 | 说明 |
-| --- | --- | --- |
-| daemon | `http://127.0.0.1:3737` | REST、WebSocket、静态 Web |
-| Web dev server | `http://127.0.0.1:3738` | Vite 开发模式 |
-| PostgreSQL | `localhost:5432` | Docker Compose 暴露端口 |
+## 3. Monorepo 包边界
 
-## 3. Monorepo 包结构
-
-| 包 | 作用 |
+| 包 | 职责 |
 | --- | --- |
-| `@sunpilot/protocol` | 共享协议类型、运行状态、事件 schema |
-| `@sunpilot/storage` | PostgreSQL 存储、迁移、路径、审计、artifact、conversation/message store |
-| `@sunpilot/workflow` | workflow 定义与 registry |
-| `@sunpilot/skill-sdk` | skill 开发和测试 SDK |
-| `@sunpilot/skill-runner` | skill 注册、权限控制、执行器、事件包装 |
-| `@sunpilot/core` | runtime service、agent service、LLM provider、业务编排 |
-| `@sunpilot/daemon` | Fastify HTTP 服务、WebSocket JSON-RPC、Web 静态资源托管 |
-| `@sunpilot/launcher` | `sun` / `sunpilot` 命令行入口 |
-| `@sunpilot/web` | React + Ant Design Chat-first 前端 |
-| `tests/integration` | daemon 端到端集成测试 |
+| `@sunpilot/protocol` | 跨包/跨端共享协议，定义数据类型、Zod schema、Agent 命令、Agent 事件、Agent 错误码。 |
+| `@sunpilot/storage` | 数据访问层，包含 repository 接口、Postgres 实现、migration、测试用内存数据库、本地路径和 artifact 文件写入。 |
+| `@sunpilot/core` | 核心业务层，包含 AgentService、AgentKernel、Workflow Runtime、LLM provider、provider 抽象和内部错误。 |
+| `@sunpilot/daemon` | 本地服务进程，提供 Fastify REST、WebSocket JSON-RPC、静态 Web 托管、composition root 和运行时恢复。 |
+| `@sunpilot/web` | React + Ant Design Web 前端，当前以 ChatPage 为主，展示对话、Agent timeline、approval、artifact。 |
+| `@sunpilot/launcher` | `sun` / `sunpilot` CLI，负责启动、停止、状态、doctor、日志和打开 Web。 |
+| `@sunpilot/skill-sdk` | 给技能作者使用的 SDK，定义标准 skill 结构、capability、handler context 和测试 helper。 |
+| `@sunpilot/skill-runner` | 技能运行时，扫描 manifest、注册技能、权限检查、动态 import、执行 handler、写 audit/event/artifact/memory。 |
+| `@sunpilot/workflow` | Workflow 定义和 registry，目前是薄抽象，执行逻辑在 `core/runtime`。 |
+| `tests/integration` | 跨包集成测试，当前覆盖 daemon/WebSocket Agent 链路。 |
 
-## 4. 数据库实现状态
+## 4. 核心概念关系
 
-数据库使用 Docker Compose PostgreSQL：
+### Agent
 
-```bash
-docker compose up -d postgres
+Agent 是动态决策者。用户输入一条消息后，Agent 会判断意图、构建上下文、决定是否需要工具、是否需要审批、是否需要工作流，最后生成回复。
+
+入口在：
+
+```text
+packages/core/src/agent/agent.service.ts
 ```
 
-默认连接字符串：
+Agent 内部执行引擎在：
 
-```bash
-postgresql://sunpilot:sunpilot_dev_password@localhost:5432/sunpilot
+```text
+packages/core/src/agent-kernel/
 ```
 
-如果本机已有服务占用 `5432`：
+### Skill
 
-```bash
-SUNPILOT_POSTGRES_PORT=55432 docker compose up -d postgres
-export SUNPILOT_DATABASE_URL=postgresql://sunpilot:sunpilot_dev_password@localhost:55432/sunpilot
+Skill 是原子能力。它回答“系统能做什么”，例如读文件、写文件、生成 artifact、查询外部系统、执行某个业务动作。
+
+开发标准在：
+
+```text
+packages/skill-sdk/
 ```
 
-`@sunpilot/storage` 当前负责：
+运行执行在：
 
-- PostgreSQL 连接配置。
-- SQL migration。
-- migration advisory lock。
-- conversation / message repository。
-- runtime run / job / step 状态。
-- append-only event log。
-- audit log。
-- artifact 元数据。
-- memory / skill / workflow catalog。
-- 本地 runtime 路径、pid、日志路径。
+```text
+packages/skill-runner/
+```
 
-SQLite 不再作为主数据库 fallback。
+### Workflow
 
-## 5. daemon 和 API
+Workflow 是预定义业务流程。它回答“为了完成某个业务目标，应该按什么步骤做”。Workflow 内部步骤最终可以调用 skill/provider。
 
-daemon 使用 Fastify。
+定义和 registry 在：
 
-基础接口：
+```text
+packages/workflow/
+```
 
-| 接口 | 说明 |
+执行在：
+
+```text
+packages/core/src/runtime/runtime.service.ts
+```
+
+三者关系：
+
+```text
+Agent
+  ├─ 可以直接调用 Skill
+  └─ 可以启动 Workflow
+          └─ Workflow step 可以调用 Skill
+```
+
+## 5. protocol 包
+
+`protocol` 是公共契约层，尽量只放稳定的跨端协议，不放业务实现。
+
+主要文件：
+
+- `types.ts`：run、step、event、approval、artifact、memory、skill、workflow 等共享类型。
+- `schemas.ts`：传统 REST/Runtime 请求 schema。
+- `agent-commands.ts`：WebSocket JSON-RPC 命令 schema/type，例如 `chat.send`、`chat.stop`、`run.retry`、`approval.approve`。
+- `agent-events.ts`：`agent.*` 事件词表和 payload 类型。
+- `agent-errors.ts`：`AGENT_*` 错误码、错误分类、JSON-RPC 错误码映射。
+
+`protocol/src/agent-errors.ts` 和 `core/src/errors` 的区别：
+
+- `protocol/agent-errors` 是对外协议错误码。
+- `core/errors` 是 core 内部 `Error` class 和 HTTP/runtime 映射。
+
+## 6. storage 包
+
+`storage` 是数据访问层，核心目标是让 core/daemon 依赖 repository 抽象，而不是直接依赖 SQL。
+
+目录职责：
+
+| 目录 | 职责 |
 | --- | --- |
-| `GET /healthz` | 健康检查 |
-| `GET /readyz` | 可用性检查，返回数据库、配置、stub storage、skill/workflow 数量 |
-| `GET /v1/config` | 读取本地配置 |
-| `PATCH /v1/config` | 更新本地配置并写 audit |
+| `database/` | 数据库配置、工厂、`DatabaseContext` 聚合接口。 |
+| `repositories/` | 每类数据的 repository interface，如 run/event/memory/approval/tool-call。 |
+| `postgres/` | repository 的 Postgres 实现、transaction、migration runner。 |
+| `migrations/` | SQL schema 演进脚本。 |
+| `testing/` | 测试用内存 `DatabaseContext`。 |
 
-Chat / conversation：
+当前持久化覆盖：
 
-| 接口 | 说明 |
+- conversation / message
+- run / step / job
+- event replay
+- approval
+- artifact metadata
+- memory
+- audit log
+- installed skills
+- workflows
+- idempotency keys
+- tool calls
+- model calls
+- run status history
+
+### SQL migrations
+
+`migrations/*.sql` 是数据库版本演进脚本，由 `postgres/postgres.migrations.ts` 按顺序执行，并记录到 `schema_migrations` 表中，保证每个 migration 只执行一次。
+
+当前 migration 作用：
+
+| 文件 | 作用 |
 | --- | --- |
-| `POST /v1/chat` | HTTP chat 调用 |
-| `GET /v1/conversations` | conversation 列表 |
-| `POST /v1/conversations` | 创建 conversation |
-| `GET /v1/conversations/:id/messages` | conversation messages |
-| `DELETE /v1/conversations/:id` | 删除 conversation |
+| `001_init.sql` | 创建基础 `runs`、`events`、`settings`。 |
+| `002_conversations.sql` | 创建 `conversations`，给 run 增加 conversation 外键。 |
+| `003_messages.sql` | 创建 `messages`。 |
+| `004_runtime_aux.sql` | 创建 approvals、artifacts、memory_metadata、audit_logs。 |
+| `005_runtime_steps_jobs.sql` | 创建 steps、job_queue。 |
+| `006_catalog.sql` | 创建 workflows、installed_skills。 |
+| `007_agent_runtime_core.sql` | 增加 Agent run 字段、event sequence、run_status_history。 |
+| `008_agent_events_sequence.sql` | 增加 event replay/filter 相关索引。 |
+| `009_agent_idempotency.sql` | 创建 idempotency_keys、tool_calls、model_calls。 |
+| `010_agent_observability.sql` | 增强 approval/artifact/audit 可观测字段。 |
+| `011_memory_core.sql` | 增强长期记忆 scope/type/content/source/confidence/soft delete 等字段。 |
 
-Runtime / workflow / skill：
+## 7. core 包
 
-| 接口 | 说明 |
-| --- | --- |
-| `POST /v1/runs` | 创建 workflow run |
-| `GET /v1/runs` | run 列表 |
-| `GET /v1/runs/:id` | run 详情，包含 steps/events/artifacts/memory |
-| `GET /v1/runs/:id/events` | run events |
-| `POST /v1/runs/:id/interrupt` | 中断 run |
-| `POST /v1/runs/:id/cancel` | 取消 run |
-| `POST /v1/runs/:id/retry` | 重试 run |
-| `GET /v1/workflows` | workflow catalog |
-| `POST /v1/workflows/reload` | 重载 workflow catalog |
-| `GET /v1/skills` | skill catalog |
-| `POST /v1/skills/reload` | 重载 skills |
-| `POST /v1/skills/:id/enable` | 启用 skill |
-| `POST /v1/skills/:id/disable` | 禁用 skill |
+`core` 是业务核心层，分为几块。
 
-其他运行数据：
+### agent
 
-| 接口 | 说明 |
-| --- | --- |
-| `GET /v1/approvals` | approval 列表 |
-| `POST /v1/approvals/:id/approve` | 通过 approval |
-| `POST /v1/approvals/:id/reject` | 拒绝 approval |
-| `GET /v1/artifacts` | artifact 列表 |
-| `GET /v1/artifacts/:id/content` | artifact 内容 |
-| `GET /v1/audit-logs` | audit log |
-| `GET /v1/jobs` | job 列表 |
-| `POST /v1/jobs/expire-timeouts` | 处理超时 job |
-| `GET /v1/capabilities` | runtime capability 列表 |
-| `GET /v1/memory` | memory 列表 |
+目录：
 
-## 6. WebSocket JSON-RPC
+```text
+packages/core/src/agent/
+```
+
+职责：
+
+- 对 daemon/API 暴露 AgentService facade。
+- 处理 `chat.send`、stop、cancel、resume、retry、approve、reject。
+- 创建 conversation/message。
+- 处理 clientRequestId 幂等。
+- 兼容旧 `chat()` API。
+- 调用 `AgentLoopEngine` 完成真正执行。
+
+### agent-kernel
+
+目录：
+
+```text
+packages/core/src/agent-kernel/
+```
+
+职责：
+
+- `agent-loop-engine.ts`：Agent Loop 状态机。
+- `context/`：构建上下文，收集 history、memory、skills、artifacts、tool results。
+- `intent/`：意图识别，规则优先，必要时用 LLM 分类。
+- `planning/`：基于规则生成计划。
+- `tools/`：根据 intent/plan 匹配 skill/workflow/no_tool。
+- `safety/`：权限和风险判断，决定 allow/approval/reject。
+- `execution/`：执行 tool calls，记录 tool_calls 和 events。
+- `response/`：调用 LLM 流式生成 assistant 回复，并保存 message/model call。
+- `memory/`：记忆写入策略、内容提取、脱敏。
+- `persistence/`：基于 repository 的 run 状态、approval、event sink。
+
+`agent` 和 `agent-kernel` 的区别：
+
+```text
+agent        = 服务入口 / facade / 生命周期操作
+agent-kernel = 内部执行引擎 / Agent Loop 机制
+```
+
+### runtime
+
+目录：
+
+```text
+packages/core/src/runtime/
+```
+
+职责：
+
+- 执行传统 Workflow Runtime。
+- 根据 `workflowId` 找 workflow。
+- 调用 `workflow.plan()` 生成 steps。
+- 持久化 run/job/steps/events。
+- 按 step 调用 ToolProvider。
+- 处理 approval、cancel、interrupt、retry。
+
+这部分和 Agent Runtime 并行存在：Agent 可以动态调用 skill，也可以启动一个 workflow run。
+
+### llm
+
+目录：
+
+```text
+packages/core/src/llm/
+```
+
+职责：
+
+- 定义 LLM provider interface。
+- 从环境变量创建默认 OpenAI-compatible provider。
+- 通过 HTTP POST `/chat/completions`，请求体带 `stream: true`。
+- 解析 SSE `data:` 流，yield delta。
+
+默认配置：
+
+- `SUNPILOT_LLM_API_KEY` 或 `DEEPSEEK_API_KEY`
+- `SUNPILOT_LLM_BASE_URL`
+- `SUNPILOT_LLM_MODEL`
+
+### providers
+
+目录：
+
+```text
+packages/core/src/providers/
+```
+
+职责：
+
+- 定义 ToolProvider/ToolCapability 抽象。
+- `SkillProvider` 将 skill-runner 暴露为 runtime 可调用 provider。
+- `McpProviderStub` 当前是 MCP 能力占位。
+
+## 8. daemon 包
+
+`daemon` 是本地服务进程，负责把 core、storage、skill-runner、workflow、web 组装起来。
+
+关键文件：
+
+- `main.ts`：进程入口，解析启动参数，写 pid/log。
+- `server.ts`：Fastify 主服务，提供 REST、WebSocket、静态资源、metrics、diagnostics、recovery。
+- `composition-root.ts`：组装 Agent Loop 的所有依赖。
+- `json-rpc-router.ts`：WebSocket JSON-RPC 命令路由。
+- `connection-registry.ts`：维护 WebSocket 连接和 run/conversation subscription。
+- `event-streamer.ts`：把 runtime/agent event 分发给订阅连接。
+- `ws-protocol.ts`：WebSocket notification 和 error envelope 规范化。
+
+daemon 启动时会：
+
+1. 创建或接收 `DatabaseContext`。
+2. 运行 PostgreSQL migration。
+3. 恢复 interrupted/stale runtime 状态。
+4. 初始化 SkillRegistry、SkillRunner。
+5. 初始化 WorkflowRegistry 和 SunPilotRuntime。
+6. 懒加载 AgentService。
+7. 注册 REST routes 和 WebSocket server。
+8. 托管 Web dist 静态资源。
+
+## 9. WebSocket 与 REST
 
 WebSocket 入口：
 
@@ -166,302 +331,281 @@ WebSocket 入口：
 /v1/ws
 ```
 
-当前测试阶段已关闭本地 token 验证，WS 连接不需要 query token。
+主要 JSON-RPC method：
 
-主要 method：
+- `chat.send`
+- `chat.stop`
+- `conversation.subscribe`
+- `conversation.unsubscribe`
+- `run.create`
+- `run.subscribe`
+- `run.unsubscribe`
+- `run.cancel`
+- `run.resume`
+- `run.retry`
+- `approval.approve`
+- `approval.reject`
+- `ping`
 
-| method | 用途 |
-| --- | --- |
-| `ping` | WS 连通性测试，返回 `pong` notification |
-| `chat.send` | 发送对话消息 |
-| `chat.stop` | 停止聊天占位接口，当前只返回 `{ stopped: true }` |
-| `conversation.subscribe` | conversation 订阅占位接口 |
-| `conversation.unsubscribe` | conversation 取消订阅占位接口 |
-| `run.create` | 创建 runtime run |
-| `run.subscribe` | 订阅 run event |
-| `run.unsubscribe` | 取消订阅 run event |
+主要 Agent event：
 
-聊天推送事件：
+- `agent.run.created`
+- `agent.context.started`
+- `agent.context.completed`
+- `agent.intent.detected`
+- `agent.plan.created`
+- `agent.tool.selected`
+- `agent.tool.started`
+- `agent.tool.delta`
+- `agent.tool.completed`
+- `agent.approval.required`
+- `agent.response.started`
+- `agent.response.delta`
+- `agent.response.completed`
+- `agent.run.completed`
+- `agent.run.failed`
+- `agent.run.cancelled`
+- `agent.error`
 
-| event | 说明 |
-| --- | --- |
-| `chat.message.created` | 用户消息已创建 |
-| `chat.assistant.started` | assistant 消息占位开始 |
-| `chat.assistant.delta` | assistant 增量文本 |
-| `chat.assistant.completed` | assistant 完整消息落库完成 |
-| `chat.error` | 聊天请求失败，前端结束 pending 并展示错误 |
+REST 主要承担：
 
-daemon 对 WebSocket 有 60 秒 idle timeout。前端每 25 秒发送一次 `ping` 保活。
+- health/ready/config
+- conversations/messages
+- runs/events/status-history/tool-calls/model-calls
+- approvals
+- artifacts/content
+- memory
+- workflows/skills catalog
+- audit logs
+- diagnostics/metrics
 
-## 7. DeepSeek / OpenAI-compatible 流式输出
+## 10. skill-sdk 与 skill-runner
 
-项目使用两段流式链路：
+### skill-sdk
 
-```text
-DeepSeek -> daemon: HTTP streaming
-daemon -> browser: WebSocket JSON-RPC event
-```
+`skill-sdk` 给技能作者使用，用来开发符合 SunPilot 标准的 skill。
 
-`@sunpilot/core` 中 LLM provider 使用：
+它提供：
+
+- `defineSkill()`
+- capability input/output schema 标准
+- risk 等级
+- `SkillContext`
+- testing helper
+
+技能作者依赖 `@sunpilot/skill-sdk`，不需要依赖整个 core。
+
+### skill-runner
+
+`skill-runner` 是 daemon/runtime 侧执行器，负责：
+
+- 扫描技能目录。
+- 校验 `skill.json` manifest。
+- 检查 manifest 路径不能逃逸技能目录。
+- 动态 import skill entry。
+- 校验 skill definition 与 manifest 匹配。
+- 校验输入输出 Zod schema。
+- 执行 capability handler。
+- 控制并发、超时、AbortSignal。
+- 检查文件、env secret、network、shell 权限。
+- 写 artifact、memory、audit、event。
+
+它没有放进 `agent-kernel`，因为 skill execution 是插件运行时能力，不是 Agent Loop 的内部机制。AgentKernel 只决定要不要用工具、用哪个工具；SkillRunner 负责安全执行工具。
+
+## 11. workflow 包
+
+`workflow` 当前代码很少，因为它只是定义层，不是执行层。
+
+核心接口：
 
 ```ts
-streamChat(request): AsyncIterable<ChatCompletionDelta>
-```
-
-OpenAI-compatible 请求体包含：
-
-```json
-{
-  "stream": true
+interface BusinessWorkflow {
+  id: string;
+  title: string;
+  version: string;
+  description: string;
+  match(input, context): Promise<{ score; reason }>;
+  plan(input, context): Promise<WorkflowPlan>;
 }
 ```
 
-provider 从 response body 解析 SSE `data:` 行，遇到 `[DONE]` 结束，并提取 `choices[0].delta.content`。
+`WorkflowRegistry` 负责注册、列出、查找 workflow，并把 workflow 转成数据库 record。
 
-`AgentService.chat` 当前流程：
-
-1. 解析 chat request。
-2. 获取或创建 conversation。
-3. 创建用户消息，并触发 `onUserMessage`。
-4. 读取 conversation history。
-5. 创建 assistant message id，并触发 `onAssistantStarted`。
-6. 遍历 `llm.streamChat`。
-7. 每个 delta 累加到 assistant content，并触发 `onAssistantDelta`。
-8. 流结束后把完整 assistant 消息落库。
-9. 触发 `onAssistantMessage` 并返回 conversation id 和 assistant message。
-
-## 8. 前端实现状态
-
-技术栈：
-
-- React 19
-- React Router 7
-- Ant Design 6
-- Vite 6
-- Vitest + Testing Library
-
-当前页面：
-
-- `/`：ChatPage
-- `/chat`：ChatPage
-- `*`：ChatPage fallback
-
-当前保留的页面目录只有：
+Workflow 执行不在 `workflow` 包，而在：
 
 ```text
-packages/web/src/pages/ChatPage/
+packages/core/src/runtime/runtime.service.ts
 ```
 
-此前 Runs、Artifacts、Memory、Settings 页面已从当前工作区移除；对应 runtime API 仍然在 daemon 中存在。
+边界：
 
-Chat 页面能力：
+```text
+skill     = 原子能力
+workflow  = 固定业务流程编排
+agent     = 动态决策者
+```
 
-- conversation 侧边栏。
-- 新建对话。
-- 历史 conversation 选择。
-- WebSocket streaming assistant delta 展示。
-- offline banner。
-- error card。
-- stop 按钮发送 `chat.stop`。
-- 插件入口当前展示空状态。
+## 12. web 包
 
-`useChat` 当前处理：
+`web` 是 React 前端，当前主页面是 ChatPage。
 
-- 发送消息后进入 pending / thinking。
-- WebSocket 打开超时：10 秒。
-- 聊天响应超时：90 秒。
-- socket `error` / `close` 时结束 pending。
-- JSON-RPC error 和 `chat.error` 展示错误。
-- 收到 delta 时刷新响应超时计时器。
-- 组件卸载时关闭 socket 和清理 timer。
-- 每 25 秒发送 `ping` 保持 WS 活动。
+主要目录：
 
-## 9. launcher 实现状态
+- `app/`：应用入口、router、providers。
+- `layouts/AppShell/`：整体布局、侧边栏、最近对话、用户 footer。
+- `pages/ChatPage/`：聊天页面、composer、message list、timeline、approval strip、artifact panel。
+- `features/chat/`：WebSocket client 和 chat socket 类型。
+- `features/conversations/`：conversation REST API 和模型。
+- `features/agent-runtime/`：approval、artifact、event replay 等 Agent runtime REST API。
+- `rich-cards/`：富卡片渲染组件。
+- `shared/`：API client、hooks、通用组件、类型和工具函数。
+- `styles/`：全局样式、tokens、AntD 覆盖。
 
-`@sunpilot/launcher` 提供：
+前端当前链路：
+
+1. 加载 conversation 列表。
+2. 用户发送消息。
+3. 通过 WebSocket `chat.send` 发给 daemon。
+4. 接收 `agent.*` event。
+5. 根据 `agent.response.delta` 更新 assistant streaming message。
+6. 根据 approval/artifact/tool/model/run events 更新 timeline、approval strip、artifact panel。
+
+## 13. launcher 包
+
+`launcher` 提供本地 CLI：
+
+```text
+sun
+sunpilot
+```
+
+主要职责：
+
+- 启动 daemon。
+- 停止 daemon。
+- 查看 daemon 状态。
+- 打开 Web 页面。
+- 查看日志。
+- doctor 检查环境。
+
+入口：
+
+```text
+packages/launcher/src/index.ts
+```
+
+根目录 `scripts/link-sun-bin.mjs` 会在 postinstall 后链接本地命令。
+
+## 14. 典型调用链
+
+### Chat 到 Agent 回复
+
+```text
+Web ChatComposer
+  -> WebSocket chat.send
+  -> daemon JsonRpcRouter
+  -> AgentService.handleChatCommand
+  -> AgentLoopEngine.run
+  -> ContextBuilder
+  -> IntentRouter
+  -> RuleBasedPlanner
+  -> ToolDecisionEngine
+  -> PermissionPolicy / Approval
+  -> ExecutionOrchestrator / SkillRunner / WorkflowRuntime
+  -> ResponseComposer
+  -> LLM streamChat
+  -> agent.response.delta events
+  -> Web MessageList streaming update
+```
+
+### Agent 直接执行 Skill
+
+```text
+Agent intent requires tool
+  -> ToolDecisionEngine selects skill capability
+  -> ExecutionOrchestrator records tool call
+  -> toolExecutor calls SkillRunner
+  -> SkillRunner imports skill and runs handler
+  -> artifacts/memory/events/audit persisted
+  -> Agent observes result and responds
+```
+
+### Agent 启动 Workflow
+
+```text
+Agent intent is workflow_execution
+  -> ToolDecisionEngine selects workflow.* pseudo skill
+  -> composition-root toolExecutor calls SunPilotRuntime.createRun
+  -> WorkflowRegistry.get(workflowId)
+  -> workflow.plan(input)
+  -> runtime creates run/steps/job/events
+  -> runtime executes steps via providers/skills
+```
+
+### 大模型流式输出
+
+```text
+ResponseComposer
+  -> llm.streamChat({ messages })
+  -> OpenAI-compatible POST /chat/completions stream:true
+  -> parse SSE data lines
+  -> emit agent.model.delta
+  -> emit agent.response.delta
+  -> WebSocket pushes to browser
+```
+
+## 15. 当前实现特征与注意点
+
+- 当前 Agent skill 匹配仍是 MVP：`IntentRouter` + `candidateSkills` + `INTENT_SKILL_MAP` + enabled skill scan。未来 skill 数量变大时，需要增加 SkillIndex/ToolRetriever，先召回 Top K，再让 LLM 或决策器选择。
+- `workflow` 当前是薄定义包，不是执行引擎；执行逻辑在 `core/runtime`。
+- `skill-runner` 是插件执行安全边界，不应塞进 `agent-kernel`。
+- `protocol` 应保持稳定协议定义，不应引入 core 内部运行时异常类。
+- `storage` 的 repository interface 和 Postgres implementation 已经分离，测试用 `InMemoryDatabaseContext` 支撑 core/daemon 快速测试。
+- daemon 同时支持旧 runtime/workflow routes 和新 Agent Runtime routes，需要注意状态名、event 名和 cancel/cancelled 语义一致性。
+- Web 前端当前是 Chat-first，runtime 的许多 REST 能力已具备，但 UI 只展示对话、timeline、approval、artifact 等核心体验。
+
+## 16. 验证命令
+
+常用全仓验证：
 
 ```bash
-sun start
-sun stop
-sun status
-sun open
+pnpm -r build
+pnpm -r test
+pnpm -r lint
 ```
 
-当前行为：
-
-- `sun start` 先检查 daemon 是否可达，不可达则后台启动 daemon。
-- `sun start --foreground` 前台运行 daemon，便于看日志。
-- `sun start --port <port>` 指定端口。
-- `sun stop` 根据 `~/.sunpilot/runtime/daemon.pid` 停止 daemon。
-- `sun status` 查看 `/healthz`。
-- `sun open` 默认打开 `https://tradeagent.asia`，可通过 `SUNPILOT_WEB_URL` 覆盖。
-
-尚未实现：
-
-- `sun chat`
-- `sun ask`
-- 生产级服务安装命令
-
-## 10. runtime / workflow / skill
-
-runtime service 当前负责：
-
-- 创建 run/job/step。
-- 执行 workflow。
-- 写入 append-only event。
-- 写入 audit log。
-- artifact 记录。
-- approval 等待态处理。
-- run interrupt/cancel/retry。
-
-skill-runner 当前具备：
-
-- skill registry。
-- 用户本地 skill 加载。
-- 权限控制。
-- secret/env 限制。
-- shell/file/helper 调用。
-- custom event protocol-safe 包装。
-- 超时和并发控制。
-
-## 11. 环境变量
-
-核心环境变量：
-
-| 变量 | 默认值 | 说明 |
-| --- | --- | --- |
-| `SUNPILOT_DATABASE_URL` | `postgresql://sunpilot:sunpilot_dev_password@localhost:5432/sunpilot` | PostgreSQL 连接 |
-| `SUNPILOT_DATABASE_PROVIDER` | `postgres` | 数据库类型，当前只支持 PostgreSQL |
-| `SUNPILOT_LLM_BASE_URL` | `https://api.deepseek.com` | OpenAI-compatible API base |
-| `SUNPILOT_LLM_MODEL` | `deepseek-v4-flash` | 默认模型 |
-| `SUNPILOT_LLM_API_KEY` | 无 | 模型 API key |
-| `DEEPSEEK_API_KEY` | 无 | 备用 API key 名 |
-| `SUNPILOT_WEB_URL` | `https://tradeagent.asia` | `sun open` 打开地址 |
-| `SUNPILOT_ALLOWED_ORIGINS` | 空 | 追加允许的外部 Origin |
-
-API key 不应写入仓库。推荐放到 shell profile、systemd environment、进程管理器环境变量或部署环境变量中。
-
-## 12. 当前验证命令
-
-推荐完整验证：
+常用开发命令：
 
 ```bash
-pnpm build
-pnpm test
-pnpm lint
+pnpm dev:daemon
+pnpm dev:web
 ```
 
-健康检查：
+本地 PostgreSQL：
 
 ```bash
-curl http://127.0.0.1:3737/healthz
+docker compose up -d postgres
 ```
 
-就绪检查：
+## 17. 修改入口速查
 
-```bash
-curl http://127.0.0.1:3737/readyz
-```
-
-WebSocket ping：
-
-```bash
-node --input-type=module -e 'const ws=new WebSocket("ws://127.0.0.1:3737/v1/ws"); ws.addEventListener("open",()=>ws.send(JSON.stringify({jsonrpc:"2.0",id:"ping_1",method:"ping",params:{}}))); ws.addEventListener("message",(event)=>{ console.log(String(event.data)); ws.close(); });'
-```
-
-HTTP chat：
-
-```bash
-curl -X POST http://127.0.0.1:3737/v1/chat \
-  -H "Content-Type: application/json" \
-  -d '{"message":"用一句话介绍 SunPilot"}'
-```
-
-## 13. 常见故障判断
-
-### 13.1 页面显示 offline
-
-检查 daemon：
-
-```bash
-curl http://127.0.0.1:3737/healthz
-sun status
-```
-
-如果 daemon 没启动：
-
-```bash
-sun start
-```
-
-### 13.2 WebSocket pending 或连接失败
-
-判断顺序：
-
-1. daemon 是否监听 `3737`。
-2. Nginx 是否配置 `Upgrade` / `Connection`。
-3. 浏览器访问 Origin 是否被 daemon 允许。
-4. 前端访问地址和后端代理是否一致。
-5. daemon 日志是否有模型请求错误。
-
-### 13.3 用户消息发出后没有 assistant 内容
-
-优先检查：
-
-- `SUNPILOT_LLM_API_KEY` 或 `DEEPSEEK_API_KEY` 是否设置。
-- `SUNPILOT_LLM_BASE_URL` 是否正确。
-- `SUNPILOT_LLM_MODEL` 是否是实际可用模型。
-- daemon 日志中是否有 `LLM request failed`。
-
-当前前端会在失败时结束 pending 并展示错误。
-
-### 13.4 数据库连接失败
-
-检查 Docker PostgreSQL：
-
-```bash
-docker compose ps postgres
-docker compose logs postgres
-```
-
-检查端口：
-
-```bash
-ss -ltnp | grep 5432
-```
-
-如果本机 PostgreSQL 抢占 `5432`，停止本机服务或改 Docker 映射端口。
-
-## 14. 当前代码改动状态
-
-当前工作区包含未提交改动，主要方向是：
-
-- Web 从多页面控制台收敛到 Chat-first 界面。
-- 删除/移除 Runs、Artifacts、Memory、Settings 页面目录。
-- Chat 页面支持 conversation 侧边栏和插件空状态入口。
-- WebSocket chat 支持 streaming delta、错误提示、超时、ping 保活和 stop 按钮。
-- daemon 保留 runtime、workflow、skill、artifact、approval、audit API。
-
-这部分改动来自当前工作区状态，提交前需要结合 `git status` 和测试结果确认。
-
-## 15. 后续建议
-
-短期建议：
-
-- 为 `chat.stop` 接入真正的 abort controller，支持用户中断 LLM streaming。
-- 为插件入口接入真实 skill/plugin catalog。
-- 增加 WebSocket 自动重连策略。
-- 增加前端对 `chat.error`、offline、stop 的专项测试。
-- 增加生产环境 systemd 配置，确保服务器重启后 daemon 自动恢复。
-
-中期建议：
-
-- 增加 conversation 订阅的真实增量同步。
-- 增加 artifact 下载/预览 UI。
-- 增加 run/workflow/approval 的 Web 管理界面或诊断页。
-- 增加 migration 版本可视化和数据库诊断命令。
-- 对大依赖继续做按页面/按组件拆包。
-
-## 16. 当前一句话结论
-
-SunPilot 当前已经具备 Docker PostgreSQL + daemon + WebSocket + DeepSeek/OpenAI-compatible streaming + React Chat-first Web 的完整对话闭环；主要剩余工作是生产级进程守护、流式中断、插件入口真实数据接入和更多业务运行管理界面。
+| 想改什么 | 优先看哪里 |
+| --- | --- |
+| WebSocket 命令 | `packages/daemon/src/json-rpc-router.ts` |
+| REST API | `packages/daemon/src/server.ts` |
+| Agent 对外行为 | `packages/core/src/agent/agent.service.ts` |
+| Agent 内部循环 | `packages/core/src/agent-kernel/agent-loop-engine.ts` |
+| 意图识别 | `packages/core/src/agent-kernel/intent/intent-router.ts` |
+| 工具/skill 选择 | `packages/core/src/agent-kernel/tools/tool-decision-engine.ts` |
+| 工具执行 | `packages/core/src/agent-kernel/execution/execution-orchestrator.ts` |
+| Skill 扫描和执行 | `packages/skill-runner/src/registry.ts`、`packages/skill-runner/src/runner.ts` |
+| 写新 skill | `packages/skill-sdk/src/index.ts` |
+| Workflow 定义 | `packages/workflow/src/registry.ts` |
+| Workflow 执行 | `packages/core/src/runtime/runtime.service.ts` |
+| LLM streaming | `packages/core/src/llm/openai-compatible.provider.ts` |
+| 数据库接口 | `packages/storage/src/repositories/` |
+| Postgres SQL 实现 | `packages/storage/src/postgres/` |
+| 数据库 schema | `packages/storage/src/migrations/` |
+| Chat 页面 | `packages/web/src/pages/ChatPage/` |
+| Web API client | `packages/web/src/features/`、`packages/web/src/shared/api/` |
+| CLI | `packages/launcher/src/index.ts` |
