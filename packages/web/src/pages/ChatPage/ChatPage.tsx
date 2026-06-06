@@ -8,6 +8,9 @@ import { ChatHeader } from "./components/ChatHeader";
 import { WelcomeView } from "./components/WelcomeView";
 import { MessageList } from "./components/MessageList";
 import { ChatComposer } from "./components/ChatComposer";
+import { AgentTimeline } from "./components/AgentTimeline";
+import { ArtifactPanel } from "./components/ArtifactPanel";
+import { ApprovalStrip } from "./components/ApprovalStrip";
 import { OfflineBanner } from "./components/OfflineBanner";
 import { ErrorMessageCard } from "./components/ErrorMessageCard";
 import { PluginsEmptyView } from "./components/PluginsEmptyView";
@@ -89,6 +92,18 @@ export function ChatPage() {
                   status={chat.chatViewState}
                 />
                 <div className="chat-composer-wrap">
+                  <AgentTimeline items={chat.timeline} />
+                  <ArtifactPanel
+                    artifacts={chat.artifacts}
+                    selected={chat.selectedArtifact}
+                    onOpen={chat.openArtifact}
+                    onClose={chat.closeArtifact}
+                  />
+                  <ApprovalStrip
+                    approvals={chat.approvals}
+                    onApprove={chat.approveApproval}
+                    onReject={chat.rejectApproval}
+                  />
                   {isOffline && <OfflineBanner />}
                   {chat.error && (
                     <div className="chat-page__error-wrap">

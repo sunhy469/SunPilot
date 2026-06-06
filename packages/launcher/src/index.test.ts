@@ -11,32 +11,38 @@ const paths = {
   logs: "/tmp/sunpilot/logs",
   cache: "/tmp/sunpilot/cache",
   runtime: "/tmp/sunpilot/runtime",
-  pidFile: "/tmp/sunpilot/runtime/daemon.pid"
+  pidFile: "/tmp/sunpilot/runtime/daemon.pid",
 };
 
 describe("launcher", () => {
   test("status returns success when daemon is reachable", async () => {
     const messages: string[] = [];
-    const fetchImpl = vi.fn(async () => ({ ok: true, json: async () => ({ ok: true, daemon: "alive" }) })) as any;
+    const fetchImpl = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({ ok: true, daemon: "alive" }),
+    })) as any;
     const code = await runLauncher({
       argv: ["status", "--port", "4111"],
       paths,
       log: (message) => messages.push(message),
-      fetchImpl
+      fetchImpl,
     });
     expect(code).toBe(0);
     expect(fetchImpl).toHaveBeenCalledWith("http://127.0.0.1:4111/healthz");
-    expect(messages.join("\n")).toContain("\"daemon\": \"alive\"");
+    expect(messages.join("\n")).toContain('"daemon": "alive"');
   });
 
   test("accepts pnpm separator style for compact sun commands", async () => {
     const messages: string[] = [];
-    const fetchImpl = vi.fn(async () => ({ ok: true, json: async () => ({ ok: true, daemon: "alive" }) })) as any;
+    const fetchImpl = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({ ok: true, daemon: "alive" }),
+    })) as any;
     const code = await runLauncher({
       argv: ["--", "status", "--port", "4111"],
       paths,
       log: (message) => messages.push(message),
-      fetchImpl
+      fetchImpl,
     });
     expect(code).toBe(0);
     expect(fetchImpl).toHaveBeenCalledWith("http://127.0.0.1:4111/healthz");
@@ -47,10 +53,77 @@ describe("launcher", () => {
     const code = await runLauncher({
       argv: ["help"],
       paths,
-      log: (message) => messages.push(message)
+      log: (message) => messages.push(message),
     });
     expect(code).toBe(0);
-    expect(messages).toEqual(["Usage: sun <start|stop|status|open>"]);
+    expect(messages).toEqual([
+      "Usage: sun <start|stop|status|doctor|logs|open>",
+    ]);
+  });
+
+  test("doctor prints daemon diagnostics", async () => {
+    const messages: string[] = [];
+    const fetchImpl = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({
+        daemon: { status: "ok" },
+        database: { status: "ok", latencyMs: 1 },
+      }),
+    })) as any;
+    const code = await runLauncher({
+      argv: ["doctor", "--port", "4111"],
+      paths,
+      log: (message) => messages.push(message),
+      fetchImpl,
+    });
+    expect(code).toBe(0);
+    expect(fetchImpl).toHaveBeenCalledWith(
+      "http://127.0.0.1:4111/v1/diagnostics",
+    );
+    expect(messages.join("\n")).toContain('"database"');
+  });
+
+  test("doctor returns failure when diagnostics are unreachable", async () => {
+    const messages: string[] = [];
+    const code = await runLauncher({
+      argv: ["doctor"],
+      paths,
+      log: (message) => messages.push(message),
+      fetchImpl: vi.fn(async () => {
+        throw new Error("offline");
+      }) as any,
+    });
+    expect(code).toBe(1);
+    expect(messages).toEqual(["SunPilot diagnostics are not reachable."]);
+  });
+
+  test("logs prints the tail of the daemon log", async () => {
+    const messages: string[] = [];
+    const code = await runLauncher({
+      argv: ["logs", "--lines", "2"],
+      paths,
+      log: (message) => messages.push(message),
+      existsImpl: (path) => path === "/tmp/sunpilot/logs/daemon.log",
+      readFileImpl: () => "line 1\nline 2\nline 3\n",
+    });
+
+    expect(code).toBe(0);
+    expect(messages).toEqual(["line 2\nline 3"]);
+  });
+
+  test("logs returns failure when the daemon log is missing", async () => {
+    const messages: string[] = [];
+    const code = await runLauncher({
+      argv: ["logs"],
+      paths,
+      log: (message) => messages.push(message),
+      existsImpl: () => false,
+    });
+
+    expect(code).toBe(1);
+    expect(messages).toEqual([
+      "SunPilot daemon log was not found at /tmp/sunpilot/logs/daemon.log",
+    ]);
   });
 
   test("status returns failure when daemon is unreachable", async () => {
@@ -61,7 +134,7 @@ describe("launcher", () => {
       log: (message) => messages.push(message),
       fetchImpl: vi.fn(async () => {
         throw new Error("offline");
-      }) as any
+      }) as any,
     });
     expect(code).toBe(1);
     expect(messages).toEqual(["SunPilot daemon is not reachable."]);
@@ -81,17 +154,33 @@ describe("launcher", () => {
         throw new Error("offline");
       }) as any,
       spawnImpl,
-      resolveDaemonMainImpl: () => "/repo/node_modules/@sunpilot/daemon/dist/main.js"
+      resolveDaemonMainImpl: () =>
+        "/repo/node_modules/@sunpilot/daemon/dist/main.js",
     });
     expect(code).toBe(0);
-    expect(spawnImpl).toHaveBeenCalledWith(process.execPath, ["/repo/node_modules/@sunpilot/daemon/dist/main.js", "--foreground", "--port", "3999"], expect.objectContaining({ cwd: "/repo", detached: true, stdio: "ignore" }));
+    expect(spawnImpl).toHaveBeenCalledWith(
+      process.execPath,
+      [
+        "/repo/node_modules/@sunpilot/daemon/dist/main.js",
+        "--foreground",
+        "--port",
+        "3999",
+      ],
+      expect.objectContaining({
+        cwd: "/repo",
+        detached: true,
+        stdio: "ignore",
+      }),
+    );
     expect(unref).toHaveBeenCalled();
-    expect(messages).toContain("SunPilot daemon starting at http://127.0.0.1:3999");
+    expect(messages).toContain(
+      "SunPilot daemon starting at http://127.0.0.1:3999",
+    );
   });
 
   test("start foreground passes port and waits for daemon exit", async () => {
     const spawnImpl = vi.fn(() => ({
-      once: (_event: "exit", callback: (code: number) => void) => callback(0)
+      once: (_event: "exit", callback: (code: number) => void) => callback(0),
     })) as any;
     const code = await runLauncher({
       argv: ["start", "--foreground", "--port", "4112"],
@@ -102,13 +191,23 @@ describe("launcher", () => {
         throw new Error("offline");
       }) as any,
       spawnImpl,
-      resolveDaemonMainImpl: () => "/repo/node_modules/@sunpilot/daemon/dist/main.js"
+      resolveDaemonMainImpl: () =>
+        "/repo/node_modules/@sunpilot/daemon/dist/main.js",
     });
     expect(code).toBe(0);
     expect(spawnImpl).toHaveBeenCalledWith(
       process.execPath,
-      ["/repo/node_modules/@sunpilot/daemon/dist/main.js", "--foreground", "--port", "4112"],
-      expect.objectContaining({ cwd: "/repo", detached: false, stdio: "inherit" })
+      [
+        "/repo/node_modules/@sunpilot/daemon/dist/main.js",
+        "--foreground",
+        "--port",
+        "4112",
+      ],
+      expect.objectContaining({
+        cwd: "/repo",
+        detached: false,
+        stdio: "inherit",
+      }),
     );
   });
 
@@ -120,7 +219,7 @@ describe("launcher", () => {
       env: { SUNPILOT_PORT: "3737" },
       paths,
       log: (message) => messages.push(message),
-      openImpl
+      openImpl,
     });
     expect(code).toBe(0);
     expect(openImpl).toHaveBeenCalledWith("https://tradeagent.asia/");
@@ -134,7 +233,7 @@ describe("launcher", () => {
       env: { SUNPILOT_WEB_URL: "http://127.0.0.1:3737/" },
       paths,
       log: () => {},
-      openImpl
+      openImpl,
     });
 
     expect(code).toBe(0);
@@ -150,13 +249,13 @@ describe("launcher", () => {
       log: (message) => messages.push(message),
       openImpl: vi.fn(async () => {
         throw new Error("no browser");
-      })
+      }),
     });
 
     expect(code).toBe(0);
     expect(messages).toEqual([
       "Browser open is not available on this machine.",
-      "Opened https://tradeagent.asia/"
+      "Opened https://tradeagent.asia/",
     ]);
   });
 
@@ -171,7 +270,7 @@ describe("launcher", () => {
       existsImpl: () => true,
       readFileImpl: () => "123",
       killImpl,
-      rmImpl
+      rmImpl,
     });
     expect(code).toBe(0);
     expect(killImpl).toHaveBeenCalledWith(123, "SIGTERM");
@@ -192,12 +291,14 @@ describe("launcher", () => {
       existsImpl: () => true,
       readFileImpl: () => "123",
       killImpl,
-      rmImpl
+      rmImpl,
     });
 
     expect(code).toBe(0);
     expect(killImpl).toHaveBeenCalledWith(123, "SIGTERM");
     expect(rmImpl).toHaveBeenCalledWith(paths.pidFile, { force: true });
-    expect(messages).toEqual(["SunPilot daemon pid file exists, but the process is not running."]);
+    expect(messages).toEqual([
+      "SunPilot daemon pid file exists, but the process is not running.",
+    ]);
   });
 });

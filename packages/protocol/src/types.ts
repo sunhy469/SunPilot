@@ -1,14 +1,31 @@
-export type RunMode = "chat" | "plan" | "auto" | "approval_required" | "dry_run";
+import type { AgentEventType } from "./agent-events.js";
+
+export type RunMode =
+  | "chat"
+  | "agent"
+  | "workflow"
+  | "plan"
+  | "auto"
+  | "approval_required"
+  | "dry_run";
 
 export type RunStatus =
+  | "created"
   | "queued"
+  | "context_building"
+  | "intent_routing"
   | "planning"
+  | "tool_deciding"
   | "waiting_approval"
+  | "executing"
+  | "observing"
+  | "reflecting"
+  | "responding"
   | "running"
   | "paused"
   | "completed"
   | "failed"
-  | "canceled"
+  | "cancelled"
   | "interrupted";
 
 export type StepStatus =
@@ -18,7 +35,7 @@ export type StepStatus =
   | "completed"
   | "failed"
   | "skipped"
-  | "canceled"
+  | "cancelled"
   | "interrupted";
 
 export type SkillRisk = "low" | "medium" | "high" | "critical";
@@ -29,7 +46,7 @@ export type SunPilotEventType =
   | "run.started"
   | "run.completed"
   | "run.failed"
-  | "run.canceled"
+  | "run.cancelled"
   | "run.interrupted"
   | "workflow.selected"
   | "workflow.planned"
@@ -49,6 +66,8 @@ export type SunPilotEventType =
   | "artifact.created"
   | "memory.written"
   | "audit.written";
+
+export type EventType = SunPilotEventType | AgentEventType;
 
 export type ArtifactType =
   | "text"
@@ -70,9 +89,14 @@ export interface RunRecord {
   status: RunStatus;
   mode: RunMode;
   workflowId?: string;
+  conversationId?: string;
+  userId?: string;
+  goal?: string;
+  error?: unknown;
   createdAt: string;
   updatedAt: string;
   completedAt?: string;
+  cancelledAt?: string;
   input: unknown;
   context: Record<string, unknown>;
 }
@@ -97,8 +121,10 @@ export interface StepRecord {
 export interface SunPilotEvent {
   id: string;
   runId: string;
+  conversationId?: string;
   stepId?: string;
-  type: SunPilotEventType;
+  sequence?: number;
+  type: EventType;
   payload: unknown;
   createdAt: string;
 }
@@ -108,12 +134,14 @@ export interface ApprovalRecord {
   runId: string;
   stepId?: string;
   status: "pending" | "approved" | "rejected" | "expired";
-  risk: "medium" | "high" | "critical";
+  risk: "low" | "medium" | "high" | "critical";
   title: string;
   reason: string;
   requestedAction: unknown;
   decision?: unknown;
   createdAt: string;
+  expiresAt?: string;
+  decidedBy?: string;
   decidedAt?: string;
 }
 
@@ -121,9 +149,13 @@ export interface ArtifactRecord {
   id: string;
   runId: string;
   stepId?: string;
+  conversationId?: string;
   type: ArtifactType;
   name: string;
   path: string;
+  storageKey?: string;
+  checksum?: string;
+  version?: number;
   mimeType?: string;
   sizeBytes?: number;
   metadata: Record<string, unknown>;
@@ -136,8 +168,59 @@ export interface MemoryRecord {
   stepId?: string;
   key: string;
   value: unknown;
+  scope?: MemoryScope;
+  scopeId?: string;
+  type?: MemoryType;
+  title?: string;
+  content?: string;
+  summary?: string;
+  source?: string;
+  confidence?: number;
+  importance?: number;
   metadata: Record<string, unknown>;
   createdAt: string;
+  updatedAt?: string;
+  lastAccessedAt?: string;
+  expiresAt?: string;
+  supersededBy?: string;
+  deletedAt?: string;
+}
+
+export type MemoryType =
+  | "user_preference"
+  | "project_profile"
+  | "technical_stack"
+  | "deployment_info"
+  | "workflow_pattern"
+  | "error_solution"
+  | "long_term_goal"
+  | "conversation_summary"
+  | "tool_observation"
+  | "manual_note";
+
+export type MemoryScope =
+  | "global"
+  | "user"
+  | "project"
+  | "conversation"
+  | "run";
+
+export interface MemorySearchInput {
+  query?: string;
+  runId?: string;
+  key?: string;
+  userId?: string;
+  projectId?: string;
+  conversationId?: string;
+  scopes?: MemoryScope[];
+  types?: MemoryType[];
+  includeDeleted?: boolean;
+  limit?: number;
+}
+
+export interface RetrievedMemoryRecord extends MemoryRecord {
+  score: number;
+  relevance: number;
 }
 
 export interface WorkflowStepPlan {

@@ -1,5 +1,3 @@
-import type { ChatMessage, LlmProvider } from "../llm/index.js";
-
 export type AgentMessageRole = "system" | "user" | "assistant";
 
 export interface AgentMessage {
@@ -30,8 +28,15 @@ export interface AgentChatResponse {
 
 export interface AgentChatHooks {
   onUserMessage?(message: AgentMessage): Promise<void> | void;
-  onAssistantStarted?(input: { conversationId: string; messageId: string }): Promise<void> | void;
-  onAssistantDelta?(input: { conversationId: string; messageId: string; delta: string }): Promise<void> | void;
+  onAssistantStarted?(input: {
+    conversationId: string;
+    messageId: string;
+  }): Promise<void> | void;
+  onAssistantDelta?(input: {
+    conversationId: string;
+    messageId: string;
+    delta: string;
+  }): Promise<void> | void;
   onAssistantMessage?(message: AgentMessage): Promise<void> | void;
 }
 
@@ -48,19 +53,11 @@ export interface CreateAgentMessageInput {
 }
 
 export interface AgentConversationStore {
-  createConversation(input?: CreateAgentConversationInput): Promise<AgentConversation>;
+  createConversation(
+    input?: CreateAgentConversationInput,
+  ): Promise<AgentConversation>;
   findConversationById(id: string): Promise<AgentConversation | null>;
   touchConversation(id: string): Promise<void>;
   createMessage(input: CreateAgentMessageInput): Promise<AgentMessage>;
   listMessages(conversationId: string): Promise<AgentMessage[]>;
-}
-
-export interface AgentServiceConfig {
-  llm: LlmProvider;
-  conversations: AgentConversationStore;
-  systemPrompt?: string;
-}
-
-export interface AgentLlmMessage extends ChatMessage {
-  role: AgentMessageRole;
 }

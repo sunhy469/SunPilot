@@ -1,4 +1,4 @@
-import type { ApprovalRecord, RunRecord, StepRecord, SunPilotEvent } from "@sunpilot/protocol";
+import type { ApprovalRecord, MemorySearchInput, RunRecord, StepRecord, SunPilotEvent } from "@sunpilot/protocol";
 import type { DatabaseContext } from "@sunpilot/storage";
 import type { RuntimeAuditInput, RuntimeStore } from "./runtime.store.js";
 
@@ -83,7 +83,7 @@ export class RepositoryRuntimeStore implements RuntimeStore {
     await this.db.artifacts.create(artifact);
   }
 
-  async listMemory(filter: { runId?: string; key?: string } = {}) {
+  async listMemory(filter: MemorySearchInput = {}) {
     return this.db.memory.list(filter);
   }
 

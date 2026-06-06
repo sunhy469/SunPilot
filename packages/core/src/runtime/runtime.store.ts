@@ -1,4 +1,4 @@
-import type { ApprovalRecord, ArtifactRecord, MemoryRecord, RunRecord, StepRecord, SunPilotEvent } from "@sunpilot/protocol";
+import type { ApprovalRecord, ArtifactRecord, MemoryRecord, MemorySearchInput, RunRecord, StepRecord, SunPilotEvent } from "@sunpilot/protocol";
 
 export interface RuntimeAuditInput {
   runId?: string;
@@ -33,7 +33,7 @@ export interface RuntimeStore {
 
   getArtifact(id: string): Promise<ArtifactRecord | undefined> | ArtifactRecord | undefined;
   listArtifacts(runId?: string): Promise<ArtifactRecord[]> | ArtifactRecord[];
-  listMemory(filter?: { runId?: string; key?: string }): Promise<MemoryRecord[]> | MemoryRecord[];
+  listMemory(filter?: MemorySearchInput): Promise<MemoryRecord[]> | MemoryRecord[];
   listEvents(runId: string): Promise<SunPilotEvent[]> | SunPilotEvent[];
   appendEvent(event: SunPilotEvent): Promise<void> | void;
   audit(record: RuntimeAuditInput): Promise<void> | void;

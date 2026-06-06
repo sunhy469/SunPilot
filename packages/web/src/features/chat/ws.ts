@@ -1,4 +1,4 @@
-import type { ChatSendParams } from "./types";
+import type { ChatSendParams, ChatStopParams } from "./types";
 
 export function createChatSocket(): WebSocket {
   const protocol = location.protocol === "https:" ? "wss:" : "ws:";
@@ -11,9 +11,29 @@ export function chatSocketUrl(): string {
 }
 
 export function sendChatMessage(socket: WebSocket, params: ChatSendParams) {
-  socket.send(JSON.stringify({ jsonrpc: "2.0", id: crypto.randomUUID(), method: "chat.send", params }));
+  socket.send(
+    JSON.stringify({
+      jsonrpc: "2.0",
+      id: crypto.randomUUID(),
+      method: "chat.send",
+      params: {
+        conversationId: params.conversationId,
+        message: params.message,
+        mode: params.mode ?? "agent",
+        clientRequestId: params.clientRequestId,
+        attachments: params.attachments,
+      },
+    }),
+  );
 }
 
-export function sendChatStop(socket: WebSocket) {
-  socket.send(JSON.stringify({ jsonrpc: "2.0", id: crypto.randomUUID(), method: "chat.stop", params: {} }));
+export function sendChatStop(socket: WebSocket, params: ChatStopParams) {
+  socket.send(
+    JSON.stringify({
+      jsonrpc: "2.0",
+      id: crypto.randomUUID(),
+      method: "chat.stop",
+      params: { runId: params.runId },
+    }),
+  );
 }

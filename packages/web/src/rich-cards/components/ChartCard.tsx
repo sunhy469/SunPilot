@@ -13,7 +13,8 @@ export function ChartCard({
   const total = data.items.reduce((sum, item) => sum + item.value, 0) || 1;
   const segments = data.items.reduce<Array<{ color: string; start: number; end: number }>>(
     (acc, item) => {
-      const start = acc.length > 0 ? acc[acc.length - 1].end : 0;
+      const previous = acc.at(-1);
+      const start = previous ? previous.end : 0;
       const end = start + (item.value / total) * 100;
       acc.push({ color: item.color ?? "#1f7aff", start, end });
       return acc;

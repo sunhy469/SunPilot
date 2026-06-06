@@ -206,10 +206,10 @@ describe("SunPilotRuntime approval policy", () => {
     const waiting = await runtime.createRun({}, highRiskWorkflow.id, "auto");
     const canceled = await runtime.cancel(waiting.id);
 
-    expect(canceled.status).toBe("canceled");
+    expect(canceled.status).toBe("cancelled");
     expect(executed).toBe(false);
-    expect(await store.listSteps(waiting.id)).toEqual([expect.objectContaining({ status: "canceled", error: { reason: "run canceled" } })]);
-    expect(await store.listEvents(waiting.id)).toEqual(expect.arrayContaining([expect.objectContaining({ type: "run.canceled" })]));
+    expect(await store.listSteps(waiting.id)).toEqual([expect.objectContaining({ status: "cancelled", error: { reason: "run cancelled" } })]);
+    expect(await store.listEvents(waiting.id)).toEqual(expect.arrayContaining([expect.objectContaining({ type: "run.cancelled" })]));
     expect(await db.audit.list()).toEqual(expect.arrayContaining([expect.objectContaining({ action: "run.cancel", target: waiting.id })]));
   });
 

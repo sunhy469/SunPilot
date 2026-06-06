@@ -179,18 +179,18 @@ export class SunPilotRuntime {
       payload: approval,
     });
     if (approval.stepId)
-      await this.db.updateStep(approval.stepId, "canceled", undefined, {
+      await this.db.updateStep(approval.stepId, "cancelled", undefined, {
         rejected: true,
       });
     await this.db.updateRunStatus(
       approval.runId,
-      "canceled",
+      "cancelled",
       new Date().toISOString(),
     );
-    await this.db.updateJobStatus(approval.runId, "canceled");
+    await this.db.updateJobStatus(approval.runId, "cancelled");
     await this.emit({
       runId: approval.runId,
-      type: "run.canceled",
+      type: "run.cancelled",
       payload: { approvalId },
     });
     return approval;
@@ -210,7 +210,7 @@ export class SunPilotRuntime {
     await this.db.updateJobStatus(runId, "interrupted");
     for (const step of await this.db.listSteps(runId)) {
       if (
-        !["completed", "failed", "skipped", "canceled", "interrupted"].includes(
+        !["completed", "failed", "skipped", "cancelled", "interrupted"].includes(
           step.status,
         )
       ) {
@@ -239,16 +239,16 @@ export class SunPilotRuntime {
       throw notFound(`Unknown run: ${runId}`);
     }
     for (const provider of this.providers) provider.interrupt?.(runId);
-    await this.db.updateRunStatus(runId, "canceled", new Date().toISOString());
-    await this.db.updateJobStatus(runId, "canceled");
+    await this.db.updateRunStatus(runId, "cancelled", new Date().toISOString());
+    await this.db.updateJobStatus(runId, "cancelled");
     for (const step of await this.db.listSteps(runId)) {
       if (
-        !["completed", "failed", "skipped", "canceled", "interrupted"].includes(
+        !["completed", "failed", "skipped", "cancelled", "interrupted"].includes(
           step.status,
         )
       ) {
-        await this.db.updateStep(step.id, "canceled", undefined, {
-          reason: "run canceled",
+        await this.db.updateStep(step.id, "cancelled", undefined, {
+          reason: "run cancelled",
         });
       }
     }
@@ -261,7 +261,7 @@ export class SunPilotRuntime {
     });
     await this.emit({
       runId,
-      type: "run.canceled",
+      type: "run.cancelled",
       payload: { actor: "local-user" },
     });
     return (await this.db.getRun(runId))!;
@@ -294,7 +294,7 @@ export class SunPilotRuntime {
     const run = await this.db.getRun(runId);
     if (
       !run ||
-      ["completed", "canceled", "failed", "interrupted"].includes(run.status)
+      ["completed", "cancelled", "failed", "interrupted"].includes(run.status)
     )
       return;
 
@@ -333,7 +333,7 @@ export class SunPilotRuntime {
         const current = await this.db.getRun(runId);
         if (
           !current ||
-          ["completed", "canceled", "failed", "interrupted"].includes(
+          ["completed", "cancelled", "failed", "interrupted"].includes(
             current.status,
           )
         )
@@ -344,7 +344,7 @@ export class SunPilotRuntime {
     const current = await this.db.getRun(runId);
     if (
       !current ||
-      ["completed", "canceled", "failed", "interrupted"].includes(
+      ["completed", "cancelled", "failed", "interrupted"].includes(
         current.status,
       )
     )
@@ -445,7 +445,7 @@ export class SunPilotRuntime {
     const run = await this.db.getRun(approval.runId);
     if (!run) throw notFound(`Unknown run: ${approval.runId}`);
     if (
-      ["completed", "canceled", "failed", "interrupted"].includes(run.status)
+      ["completed", "cancelled", "failed", "interrupted"].includes(run.status)
     ) {
       throw conflict(`Run is already ${run.status}: ${approval.runId}`);
     }
@@ -538,7 +538,7 @@ export class SunPilotRuntime {
         message: error instanceof Error ? error.message : String(error),
       };
       const run = await this.db.getRun(step.runId);
-      if (run?.status === "interrupted" || run?.status === "canceled") return;
+      if (run?.status === "interrupted" || run?.status === "cancelled") return;
       await this.db.updateStep(step.id, "failed", undefined, payload);
       await this.db.updateRunStatus(
         step.runId,

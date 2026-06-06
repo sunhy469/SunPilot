@@ -1,0 +1,96 @@
+/**
+ * Agent error codes — standard error taxonomy for the Agent Runtime.
+ * Maps to JSON-RPC error codes per the architecture document.
+ */
+
+export const AGENT_ERROR_CODES = [
+  "AGENT_PERMISSION_DENIED",
+  "AGENT_APPROVAL_REQUIRED",
+  "AGENT_APPROVAL_REJECTED",
+  "AGENT_APPROVAL_EXPIRED",
+  "AGENT_APPROVAL_ALREADY_DECIDED",
+  "AGENT_RUN_STATE_CONFLICT",
+  "AGENT_RUN_NOT_FOUND",
+  "AGENT_RUN_ALREADY_COMPLETED",
+  "AGENT_RUN_ALREADY_CANCELLED",
+  "AGENT_RUN_CANCELLED",
+  "AGENT_RUN_INTERRUPTED",
+  "AGENT_TOOL_NOT_FOUND",
+  "AGENT_TOOL_DISABLED",
+  "AGENT_TOOL_ARGUMENT_INVALID",
+  "AGENT_TOOL_TIMEOUT",
+  "AGENT_TOOL_EXECUTION_FAILED",
+  "AGENT_MODEL_CALL_FAILED",
+  "AGENT_CONTEXT_BUDGET_EXCEEDED",
+  "AGENT_MAX_STEPS_REACHED",
+  "AGENT_MAX_TOOL_ROUNDS_REACHED",
+  "AGENT_IDEMPOTENCY_CONFLICT",
+  "AGENT_RATE_LIMITED",
+  "AGENT_CONCURRENCY_LIMIT",
+  "AGENT_INTERNAL_ERROR",
+  "AGENT_NOT_IMPLEMENTED",
+] as const;
+
+export type AgentErrorCode = (typeof AGENT_ERROR_CODES)[number];
+
+export type AgentErrorCategory =
+  | "permission"
+  | "approval"
+  | "run_state"
+  | "tool"
+  | "model"
+  | "context"
+  | "limit"
+  | "idempotency"
+  | "rate_limit"
+  | "internal";
+
+export interface AgentError {
+  code: AgentErrorCode;
+  message: string;
+  category: AgentErrorCategory;
+  retryable: boolean;
+  details?: Record<string, unknown>;
+  cause?: unknown;
+}
+
+/** JSON-RPC error code mapping per the architecture document. */
+export const JSON_RPC_ERROR_CODES = {
+  PARSE_ERROR: -32700,
+  INVALID_REQUEST: -32600,
+  METHOD_NOT_FOUND: -32601,
+  INVALID_PARAMS: -32602,
+  INTERNAL_ERROR: -32603,
+  AGENT_DOMAIN_ERROR: -32001,
+  PERMISSION_ERROR: -32002,
+  RUN_STATE_CONFLICT: -32003,
+  RATE_LIMIT: -32004,
+  UPSTREAM_FAILURE: -32005,
+} as const;
+
+export function agentErrorToJsonRpcCode(code: AgentErrorCode): number {
+  switch (code) {
+    case "AGENT_PERMISSION_DENIED":
+      return JSON_RPC_ERROR_CODES.PERMISSION_ERROR;
+    case "AGENT_APPROVAL_REQUIRED":
+    case "AGENT_APPROVAL_REJECTED":
+    case "AGENT_APPROVAL_EXPIRED":
+    case "AGENT_APPROVAL_ALREADY_DECIDED":
+      return JSON_RPC_ERROR_CODES.PERMISSION_ERROR;
+    case "AGENT_RUN_STATE_CONFLICT":
+    case "AGENT_RUN_ALREADY_COMPLETED":
+    case "AGENT_RUN_ALREADY_CANCELLED":
+    case "AGENT_RUN_CANCELLED":
+    case "AGENT_RUN_INTERRUPTED":
+      return JSON_RPC_ERROR_CODES.RUN_STATE_CONFLICT;
+    case "AGENT_RATE_LIMITED":
+    case "AGENT_CONCURRENCY_LIMIT":
+      return JSON_RPC_ERROR_CODES.RATE_LIMIT;
+    case "AGENT_MODEL_CALL_FAILED":
+    case "AGENT_TOOL_EXECUTION_FAILED":
+    case "AGENT_TOOL_TIMEOUT":
+      return JSON_RPC_ERROR_CODES.UPSTREAM_FAILURE;
+    default:
+      return JSON_RPC_ERROR_CODES.AGENT_DOMAIN_ERROR;
+  }
+}

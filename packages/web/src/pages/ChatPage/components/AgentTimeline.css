@@ -1,0 +1,69 @@
+.agent-timeline {
+  display: grid;
+  gap: 6px;
+  max-width: var(--chat-content-width, 760px);
+  max-height: 168px;
+  margin: 0 auto 10px;
+  overflow-y: auto;
+  padding: 2px 2px 4px;
+}
+
+.agent-timeline__item {
+  display: grid;
+  grid-template-columns: 8px minmax(0, 1fr);
+  align-items: start;
+  column-gap: 10px;
+  min-height: 28px;
+  color: #334155;
+  font-size: 12px;
+}
+
+.agent-timeline__dot {
+  width: 8px;
+  height: 8px;
+  margin-top: 7px;
+  border-radius: 999px;
+  background: #94a3b8;
+}
+
+.agent-timeline__item.is-working .agent-timeline__dot {
+  background: #2563eb;
+}
+
+.agent-timeline__item.is-success .agent-timeline__dot {
+  background: #16a34a;
+}
+
+.agent-timeline__item.is-warning .agent-timeline__dot {
+  background: #d97706;
+}
+
+.agent-timeline__item.is-danger .agent-timeline__dot {
+  background: #dc2626;
+}
+
+.agent-timeline__body {
+  min-width: 0;
+}
+
+.agent-timeline__title {
+  overflow: hidden;
+  color: #111827;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-timeline__detail {
+  overflow: hidden;
+  margin-top: 1px;
+  color: #64748b;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@media (max-width: 640px) {
+  .agent-timeline {
+    max-height: 128px;
+  }
+}

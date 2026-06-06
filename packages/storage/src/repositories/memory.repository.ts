@@ -1,11 +1,35 @@
-import type { MemoryRecord } from "@sunpilot/protocol";
+import type {
+  MemoryRecord,
+  MemorySearchInput,
+  RetrievedMemoryRecord,
+} from "@sunpilot/protocol";
 
-export interface ListMemoryInput {
-  runId?: string;
-  key?: string;
-}
+export type ListMemoryInput = MemorySearchInput;
+export type UpdateMemoryInput = Partial<
+  Pick<
+    MemoryRecord,
+    | "key"
+    | "value"
+    | "scope"
+    | "scopeId"
+    | "type"
+    | "title"
+    | "content"
+    | "summary"
+    | "source"
+    | "confidence"
+    | "importance"
+    | "metadata"
+    | "expiresAt"
+  >
+>;
 
 export interface MemoryRepository {
   create(input: MemoryRecord): Promise<MemoryRecord>;
+  update(id: string, input: UpdateMemoryInput): Promise<MemoryRecord | null>;
   list(input?: ListMemoryInput): Promise<MemoryRecord[]>;
+  search(input?: MemorySearchInput): Promise<RetrievedMemoryRecord[]>;
+  markAccessed(id: string, accessedAt?: string): Promise<void>;
+  supersede(id: string, supersededBy: string): Promise<void>;
+  softDelete(id: string, reason: string, deletedAt?: string): Promise<void>;
 }

@@ -39,7 +39,7 @@ export class PostgresStepRepository implements StepRepository {
   }
 
   async updateStatus(stepId: string, status: StepStatus, output?: unknown, error?: unknown): Promise<void> {
-    const terminal = ["completed", "failed", "skipped", "canceled", "interrupted"].includes(status);
+    const terminal = ["completed", "failed", "skipped", "cancelled", "interrupted"].includes(status);
     await this.pool.query(
       `UPDATE steps
        SET status = $1,

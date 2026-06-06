@@ -35,31 +35,93 @@ class FakeWebSocket extends EventTarget {
     };
     this.sent.push(request);
     if (request.method !== "chat.send") return;
-    const user = {
-      id: "msg_user",
-      conversationId: "conv_1",
-      role: "user",
-      content: request.params.message,
-      createdAt: "2026-06-05T00:00:00.000Z",
-    };
     const assistant = {
       id: "msg_assistant",
-      conversationId: "conv_1",
-      role: "assistant",
       content: "assistant reply",
-      createdAt: "2026-06-05T00:00:01.000Z",
     };
     this.emit({
-      method: "chat.message.created",
-      params: { conversationId: "conv_1", message: user },
-    });
-    this.emit({
-      method: "chat.assistant.started",
-      params: { conversationId: "conv_1", messageId: assistant.id },
-    });
-    this.emit({
-      method: "chat.assistant.delta",
+      method: "agent.run.created",
       params: {
+        runId: "run_1",
+        conversationId: "conv_1",
+        mode: "agent",
+      },
+    });
+    this.emit({
+      method: "agent.context.completed",
+      params: {
+        runId: "run_1",
+        tokenEstimate: 120,
+      },
+    });
+    this.emit({
+      method: "agent.intent.detected",
+      params: {
+        runId: "run_1",
+        intent: "file_operation",
+        confidence: 0.9,
+        candidateSkills: ["filesystem.read"],
+      },
+    });
+    this.emit({
+      method: "agent.tool.selected",
+      params: {
+        runId: "run_1",
+        toolCallId: "tool_1",
+        skillId: "filesystem.read",
+        name: "Read File",
+        riskLevel: "low",
+      },
+    });
+    this.emit({
+      method: "agent.tool.delta",
+      params: {
+        runId: "run_1",
+        toolCallId: "tool_1",
+        delta: "Reading report.md",
+      },
+    });
+    this.emit({
+      method: "agent.tool.completed",
+      params: {
+        runId: "run_1",
+        toolCallId: "tool_1",
+        skillId: "filesystem.read",
+        summary: "Read completed",
+      },
+    });
+    this.emit({
+      method: "agent.artifact.created",
+      params: {
+        runId: "run_1",
+        artifactId: "artifact_1",
+        name: "report.md",
+        type: "markdown",
+        version: 2,
+      },
+    });
+    this.emit({
+      method: "agent.approval.expired",
+      params: {
+        runId: "run_1",
+        approvalId: "approval_1",
+        title: "Approve old shell",
+        riskLevel: "high",
+        runCancelled: false,
+      },
+    });
+    this.emit({
+      method: "agent.response.started",
+      params: {
+        runId: "run_1",
+        conversationId: "conv_1",
+        messageId: assistant.id,
+      },
+    });
+    this.emit({
+      method: "agent.response.delta",
+      params: {
+        runId: "run_1",
         conversationId: "conv_1",
         messageId: assistant.id,
         delta: assistant.content,
@@ -67,8 +129,28 @@ class FakeWebSocket extends EventTarget {
     });
     if (FakeWebSocket.holdCompletion) return;
     this.emit({
-      method: "chat.assistant.completed",
-      params: { conversationId: "conv_1", message: assistant },
+      method: "agent.response.completed",
+      params: {
+        runId: "run_1",
+        conversationId: "conv_1",
+        messageId: assistant.id,
+      },
+    });
+    this.emit({
+      method: "agent.run.completed",
+      params: {
+        runId: "run_1",
+        assistantMessageId: assistant.id,
+        artifacts: [],
+        toolCalls: 0,
+      },
+    });
+    this.emit({
+      method: "agent.run.interrupted",
+      params: {
+        runId: "run_2",
+        reason: "daemon restart",
+      },
     });
   }
 
@@ -78,8 +160,29 @@ class FakeWebSocket extends EventTarget {
   }
 
   private emit(payload: unknown) {
+    const event = payload as { method?: string; params?: unknown };
+    const framed =
+      typeof event.method === "string" && event.method.startsWith("agent.")
+        ? {
+            ...event,
+            params: {
+              eventId: `evt_${crypto.randomUUID()}`,
+              sequence: 1,
+              runId:
+                event.params && typeof event.params === "object"
+                  ? (event.params as { runId?: string }).runId
+                  : undefined,
+              conversationId:
+                event.params && typeof event.params === "object"
+                  ? (event.params as { conversationId?: string }).conversationId
+                  : undefined,
+              createdAt: "2026-06-06T00:00:00.000Z",
+              payload: event.params,
+            },
+          }
+        : payload;
     this.dispatchEvent(
-      new MessageEvent("message", { data: JSON.stringify(payload) }),
+      new MessageEvent("message", { data: JSON.stringify(framed) }),
     );
   }
 }
@@ -134,6 +237,16 @@ describe("Web ChatPage", () => {
       expect(screen.getByText("assistant reply")).toBeInTheDocument(),
     );
     expect(screen.getByText("hello")).toBeInTheDocument();
+    expect(screen.getByText("Intent: file_operation")).toBeInTheDocument();
+    expect(
+      screen.getByText("Tool completed: filesystem.read"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Tool update: tool_1")).toBeInTheDocument();
+    expect(screen.getByText("Approval expired")).toBeInTheDocument();
+    expect(screen.getByText("Run interrupted")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /report.md/ }),
+    ).toBeInTheDocument();
   });
 
   test("renders a clean welcome state without opening a socket", async () => {

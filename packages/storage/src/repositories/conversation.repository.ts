@@ -13,6 +13,7 @@ export interface CreateConversationInput {
 
 export interface ListConversationsInput {
   limit?: number;
+  cursor?: string;
 }
 
 export interface ConversationRepository {

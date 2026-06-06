@@ -39,7 +39,7 @@ const sunPilotEventTypes = new Set<string>([
   "run.started",
   "run.completed",
   "run.failed",
-  "run.canceled",
+  "run.cancelled",
   "run.interrupted",
   "workflow.selected",
   "workflow.planned",
@@ -199,14 +199,26 @@ export class SkillRunner {
       },
       memory: {
         async write(key, value) {
+          const content = typeof value === "string" ? value : JSON.stringify(value);
+          const now = new Date().toISOString();
           const memory: MemoryRecord = {
             id: `memory_${crypto.randomUUID()}`,
             runId: step.runId,
             stepId: step.id,
             key,
             value,
+            scope: "run",
+            scopeId: step.runId,
+            type: "tool_observation",
+            title: key,
+            content,
+            summary: content,
+            source: "skill",
+            confidence: 0.8,
+            importance: 0.5,
             metadata: { skillId: step.skillId, capability: step.capability },
-            createdAt: new Date().toISOString()
+            createdAt: now,
+            updatedAt: now
           };
           await db.insertMemory(memory);
           await db.audit({ runId: step.runId, stepId: step.id, actor: "daemon", action: "memory.write", target: key, risk: capability.risk, payload: { skillId: step.skillId, capability: step.capability } });

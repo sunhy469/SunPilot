@@ -4,7 +4,19 @@ import { fileURLToPath } from "node:url";
 import type { PostgresPool } from "./postgres.client.js";
 
 const migrationDir = join(dirname(fileURLToPath(import.meta.url)), "..", "migrations");
-const migrationFiles = ["001_init.sql", "002_conversations.sql", "003_messages.sql", "004_runtime_aux.sql", "005_runtime_steps_jobs.sql", "006_catalog.sql"];
+const migrationFiles = [
+  "001_init.sql",
+  "002_conversations.sql",
+  "003_messages.sql",
+  "004_runtime_aux.sql",
+  "005_runtime_steps_jobs.sql",
+  "006_catalog.sql",
+  "007_agent_runtime_core.sql",
+  "008_agent_events_sequence.sql",
+  "009_agent_idempotency.sql",
+  "010_agent_observability.sql",
+  "011_memory_core.sql",
+];
 const migrationLockKey = 7_290_317_373_001;
 
 export async function runPostgresMigrations(pool: PostgresPool): Promise<void> {
