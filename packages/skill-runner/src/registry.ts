@@ -80,6 +80,20 @@ function validateManifestPaths(
   }
 }
 
+/**
+ * SkillRegistry — Skill 插件注册中心。
+ *
+ * 职责：
+ * - 从磁盘目录扫描并加载 skill.json manifest
+ * - 校验 manifest 路径安全（禁止路径穿越）
+ * - 同步到 DB（upsert），作为 Skill 目录的唯一真实来源
+ * - 提供 entry 文件的 ESM URL（用于动态 import）
+ *
+ * 安全约束：
+ * - entry、readme、schema 路径必须相对于 skill 根目录
+ * - 禁止绝对路径和路径穿越（resolveSkillPath 中的前缀检查）
+ * - 加载失败的 skill 记录到 audit log，不影响其他 skill 加载
+ */
 export class SkillRegistry {
   private readonly skills = new Map<string, InstalledSkillRecord>();
 

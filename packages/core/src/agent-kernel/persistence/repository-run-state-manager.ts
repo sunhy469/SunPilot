@@ -23,6 +23,17 @@ const LEGAL_TRANSITIONS: Record<AgentLoopStatus, readonly AgentLoopStatus[]> = {
   failed: [],
 };
 
+/**
+ * RepositoryRunStateManager — PostgreSQL 持久化的 Run 状态管理器。
+ *
+ * 与 InMemoryRunStateManager 的接口完全相同，但所有状态写入都经过 DatabaseContext。
+ * 每次状态变更同时写入三处：
+ * 1. runs 表（主记录：status、completedAt、error）
+ * 2. runs.context.statusHistory（JSON 数组，用于恢复状态历史）
+ * 3. run_status_history 表（独立表，支持按 runId 查询变更历史）
+ *
+ * 状态转换验证规则与 InMemoryRunStateManager 共享 LEGAL_TRANSITIONS 表。
+ */
 export class RepositoryRunStateManager implements RunStateManager {
   constructor(private readonly db: DatabaseContext) {}
 

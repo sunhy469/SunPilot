@@ -9,14 +9,19 @@ import {
 } from './safety-types.js';
 
 /**
- * PermissionPolicy — evaluates whether a tool call is allowed,
- * requires approval, or should be rejected outright.
+ * PermissionPolicy — 权限策略引擎，评估工具调用是否允许/需审批/应拒绝。
  *
- * Implements the policy matrix from architecture doc §15.4:
- *   low       → auto allow
- *   medium    → allow if inside workspace, otherwise approval
- *   high      → approval required
- *   critical  → reject by default
+ * 策略矩阵（架构文档 §15.4）：
+ *   low       → 自动允许，无需审批
+ *   medium    → 有显式权限声明则允许，否则需审批
+ *   high      → 必须审批
+ *   critical  → 默认拒绝
+ *
+ * 风险等级由 classifyRisk 根据 skillId 类别和参数内容判定：
+ * - filesystem.write → high
+ * - shell.execute → high
+ * - network.request → medium
+ * - filesystem.read → low
  */
 export class PermissionPolicy implements PermissionPolicyInterface {
   async evaluate(input: {

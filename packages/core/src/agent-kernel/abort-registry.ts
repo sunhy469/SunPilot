@@ -1,6 +1,13 @@
 /**
- * AbortRegistry — maps runId → AbortController for real chat.stop.
- * Replaces the placeholder { stopped: true } implementation.
+ * AbortRegistry — 管理 runId → AbortController 的映射，实现真正的聊天取消。
+ *
+ * 关键行为：
+ * - create(runId)：为 run 创建新的 AbortSignal。如果已有残留的旧控制器（上次未正常清理），
+ *   先 abort 旧控制器再创建新的，防止 AbortController 泄漏。
+ * - abort(runId)：触发 abort 信号并删除控制器。Agent Loop 的 signal.aborted 变为 true。
+ * - remove(runId)：仅删除控制器不触发 abort。用于正常完成路径的清理。
+ *
+ * 前端 chat.stop → JSON-RPC router → AgentService.stopChat → abortRegistry.abort(runId)。
  */
 export class AbortRegistry {
   private controllers = new Map<string, AbortController>();

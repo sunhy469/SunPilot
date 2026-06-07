@@ -297,6 +297,16 @@ const AGENT_RECOVERY_INTERRUPT_STATUSES: readonly RunStatus[] = [
   "reflecting",
 ];
 
+/**
+ * Daemon 重启恢复扫描。
+ *
+ * 扫描所有处于"非终态"的 Run，根据状态分类处理：
+ * - 中间状态（context_building 等）→ 标记为 interrupted（用户可 resume）
+ * - responding 状态 → 标记为 failed（响应生成中途中断，不可安全续接）
+ * - waiting_approval 状态 → 重新发送审批事件，通知前端恢复审批 UI
+ *
+ * 所有恢复操作记录到 audit log 和 run_status_history。
+ */
 async function recoverAgentRuntimeRuns(database: DatabaseContext): Promise<{
   recoveredRuns: string[];
   interruptedRuns: string[];
@@ -470,6 +480,19 @@ function bindIdleTimeout(socket: WebSocket): () => void {
   return markActivity;
 }
 
+/**
+ * 创建 SunPilot Daemon — 单进程承载 HTTP REST + WebSocket JSON-RPC 双协议的服务端。
+ *
+ * 启动流程：
+ * 1. 初始化存储（Postgres + DuckDB/LanceDB stubs）
+ * 2. 恢复上次未完成的 Run（recoverInterrupted + recoverAgentRuntimeRuns）
+ * 3. 清理过期审批（expireStale）
+ * 4. 加载 Workflow 和 Skill 注册表
+ * 5. 按需懒加载 AgentService（首次 chat.send 时通过 composition-root 装配）
+ * 6. 注册 Fastify REST 路由
+ * 7. 挂载 WebSocket JSON-RPC 路由
+ * 8. 订阅 EventBus → WebSocket 事件推送桥
+ */
 export async function createDaemon(options: DaemonOptions = {}) {
   const host = options.host ?? "127.0.0.1";
   const port = options.port ?? 3737;
@@ -478,9 +501,12 @@ export async function createDaemon(options: DaemonOptions = {}) {
   const database = options.database ?? (await createDatabaseContext());
   const shouldCloseDatabase = !options.database;
   const runtimeStore = new RepositoryRuntimeStore(database);
+  // 恢复上次异常退出时未完成的 Run
   await runtimeStore.recoverInterrupted();
   const approvalExpiryService = new RepositoryApprovalExpiryService(database);
+  // 清理超过有效期的待审批记录
   await approvalExpiryService.expireStale();
+  // 恢复 Agent Runtime 的未完成 Run（daemon 重启导致的中断恢复）
   await recoverAgentRuntimeRuns(database);
   const duckDb = new DuckDbAdapterStub(paths).initialize();
   const lanceDb = new LanceDbAdapterStub(paths).initialize();
@@ -511,8 +537,9 @@ export async function createDaemon(options: DaemonOptions = {}) {
     new SkillProvider(skillRegistry, skillRunner),
     new McpProviderStub(),
   ]);
-  // Agent Loop service — the primary chat entry point.
-  // Uses composition root to wire all Agent Kernel components.
+  // Agent Loop 服务 — 主聊天入口。
+  // 懒加载：首次 chat.send 请求时才通过 composition-root 装配全部 Agent Kernel 组件。
+  // 这样 daemon 启动更快，且 LLM provider 认证信息可能在启动后才就绪。
   let chatAgent = options.chatAgent;
   let chatAgentInit: Promise<AgentService> | undefined;
   const getChatAgent = async (): Promise<AgentService> => {
@@ -1354,6 +1381,9 @@ export async function createDaemon(options: DaemonOptions = {}) {
     }));
   }
 
+  // ── WebSocket JSON-RPC 层 ───────────────────────────────────────
+  // 每条 WebSocket 连接复用同一个 JSON-RPC 路由器和连接注册表。
+  // 事件推送路径：EventBus → event-streamer → connectionRegistry.interestedSockets → sendJson。
   const wsServer = new WebSocketServer({ noServer: true });
   const connectionRegistry = new ConnectionRegistry<WebSocket>(WebSocket.OPEN);
   const jsonRpcRouter = new JsonRpcRouter({
@@ -1362,6 +1392,7 @@ export async function createDaemon(options: DaemonOptions = {}) {
     runtime,
     runtimeStore,
   });
+  // 订阅运行时事件 → 通过 WebSocket 推送到前端
   const unsubscribeEvents = subscribeEventStreamer({
     runtimeStore,
     registry: connectionRegistry,
@@ -1375,6 +1406,11 @@ export async function createDaemon(options: DaemonOptions = {}) {
     socket.once("close", () => {
       connectionRegistry.remove(socket);
     });
+    // WebSocket 消息处理：JSON-RPC 命令 → AgentService/Runtime → 事件 → WebSocket 推送
+    // 关键方法路由（由 JsonRpcRouter 分发）：
+    //   chat.send    → AgentService.handleChatCommand → AgentLoopEngine.run
+    //   chat.stop    → AgentService.stopChat
+    //   run.subscribe → 注册 run ID 到连接，后续该 run 的事件推送到此 socket
     socket.on("message", async (raw) => {
       markActivity();
       let message: { id?: string; method?: string; params?: any } = {};
@@ -1429,6 +1465,8 @@ export async function createDaemon(options: DaemonOptions = {}) {
       await app.listen({ host, port });
       writeFileSync(paths.pidFile, String(process.pid), { mode: 0o600 });
       const server = app.server;
+      // HTTP Upgrade：将 /v1/ws 的 WebSocket 请求交由 wsServer 处理
+      // 非 /v1/ws 路径的 upgrade 请求被忽略，由 Fastify 处理
       server.on("upgrade", (request, socket, head) => {
         if (!request.url?.startsWith("/v1/ws")) return;
         if (!isAllowedLocalOrigin(request.headers.origin, port)) {

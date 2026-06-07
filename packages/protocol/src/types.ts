@@ -1,5 +1,6 @@
 import type { AgentEventType } from "./agent-events.js";
 
+// 字符串字面量联合类型
 export type RunMode =
   | "chat"
   | "agent"
@@ -38,7 +39,11 @@ export type StepStatus =
   | "cancelled"
   | "interrupted";
 
-export type SkillRisk = "low" | "medium" | "high" | "critical";
+export type SkillRisk = 
+  | "low" 
+  | "medium" 
+  | "high" 
+  | "critical";
 
 export type SunPilotEventType =
   | "run.created"

@@ -54,15 +54,22 @@ export interface ApprovalResumeInput {
 }
 
 /**
- * AgentLoopEngine — the central state machine that runs every user interaction
- * through the full Agent Loop instead of a simple LLM call.
+ * AgentLoopEngine — 中央状态机，负责将每次用户交互走完完整 Agent Loop，
+ * 而非一次性 LLM 调用。
  *
- * Full loop per architecture doc §9:
+ * 完整流程（架构文档 §9）：
  *   created → context_building → intent_routing → (planning?) →
  *   tool_deciding → (executing → observing → reflecting)? → responding → completed
  *
- * The engine is transport-agnostic. It receives an AgentLoopInput and
- * returns an AgentLoopResult. The daemon layer handles WebSocket/REST wiring.
+ * 分支说明：
+ * - no_tool：跳过 execute/observe/reflect，直接进入 responding
+ * - use_tool：走完整的 execute→observe→reflect→responding 子流程
+ * - ask_clarification：直接返回澄清问题，不调用 LLM 生成回答
+ * - require_approval/waiting_approval：暂停状态机，等待用户审批后通过
+ *   resumeApprovedTool 继续执行
+ *
+ * 引擎与传输层解耦：接收 AgentLoopInput，返回 AgentLoopResult。
+ * WebSocket/REST 的接线由 daemon 层处理。
  */
 export class AgentLoopEngine {
   constructor(private readonly deps: AgentLoopEngineDeps) {}
@@ -74,7 +81,9 @@ export class AgentLoopEngine {
     const { runId, conversationId } = input;
 
     try {
-      // ── Step 1: Context Building ──────────────────────────────────
+      // ── 阶段 1：上下文构建 ──────────────────────────────────────
+      // 从多数据源（对话历史、记忆、制品、工具结果、技能目录）收集上下文，
+      // 应用 Token 预算后返回统一的 AgentContext。
       await this.deps.runStateManager.markStatus(runId, "context_building");
       this.deps.eventBus.emit(
         "agent.context.started",
@@ -99,7 +108,9 @@ export class AgentLoopEngine {
         { runId, conversationId },
       );
 
-      // ── Step 2: Intent Routing ────────────────────────────────────
+      // ── 阶段 2：意图路由 ──────────────────────────────────────
+      // 优先规则匹配（快速），失败后降级到 LLM 轻量分类，
+      // 返回 RoutedIntent（类型、候选技能、是否需要规划/审批/工具）。
       await this.deps.runStateManager.markStatus(runId, "intent_routing");
       const intent = await this.deps.intentRouter.route(context, signal);
 
@@ -114,7 +125,9 @@ export class AgentLoopEngine {
         { runId, conversationId },
       );
 
-      // ── Step 3: Planning (if needed) ──────────────────────────────
+      // ── 阶段 3：规划（仅在意图需要时） ─────────────────────────
+      // 当前使用 RuleBasedPlanner，根据意图类型生成步骤计划（tool/response/approval）。
+      // 规划结果可被后续 tool_deciding 阶段直接使用（跳过 skill 匹配）。
       let plan;
       if (intent.requiresPlanning) {
         await this.deps.runStateManager.markStatus(runId, "planning");
@@ -135,14 +148,19 @@ export class AgentLoopEngine {
         );
       }
 
-      // ── Step 4: Tool Decision ─────────────────────────────────────
+      // ── 阶段 4：工具决策 ──────────────────────────────────────
+      // 基于意图、计划、可用技能三者综合判断：
+      // - use_tool：匹配到可用技能 → 进入权限检查/审批/执行分支
+      // - no_tool：无需工具 → 直接进入 LLM 回答阶段
+      // - ask_clarification：信息不足 → 返回澄清问题
+      // - require_approval：决策阶段即需审批 → 暂停等待
       await this.deps.runStateManager.markStatus(runId, "tool_deciding");
       const decision = await this.deps.toolDecisionEngine.decide(
         { context, intent, plan },
         signal,
       );
 
-      // ── Branch A: Use Tool ────────────────────────────────────────
+      // ── 分支 A：使用工具 ──────────────────────────────────────
       if (decision.type === "use_tool") {
         // Emit tool selected events
         for (const tc of decision.toolCalls) {
@@ -159,7 +177,7 @@ export class AgentLoopEngine {
           );
         }
 
-        // Check permissions
+        // 权限检查：对每个工具调用评估是否允许/需审批/应拒绝
         for (const tc of decision.toolCalls) {
           const permDecision = await this.deps.permissionPolicy.evaluate({
             userId: input.userId,
@@ -218,7 +236,8 @@ export class AgentLoopEngine {
         );
       }
 
-      // ── Branch B: No Tool ─────────────────────────────────────────
+      // ── 分支 B：无需工具 ─────────────────────────────────────
+      // 直接通过 LLM 生成纯文本回答（不涉及工具调用）。
       if (decision.type === "no_tool") {
         await this.deps.runStateManager.markStatus(runId, "responding");
 
@@ -267,7 +286,8 @@ export class AgentLoopEngine {
         };
       }
 
-      // ── Branch C: Ask Clarification ───────────────────────────────
+      // ── 分支 C：请求澄清 ─────────────────────────────────────
+      // 当意图无法确定或信息不足时，向用户发问澄清。
       if (decision.type === "ask_clarification") {
         await this.deps.runStateManager.markStatus(runId, "responding");
         const response = await this.deps.responseComposer.composeClarification({
@@ -308,7 +328,8 @@ export class AgentLoopEngine {
         };
       }
 
-      // ── Branch D: Require Approval (blocked at decision stage) ────
+      // ── 分支 D：决策阶段即需审批 ──────────────────────────────
+      // 工具决策本身判断需审批（如高风险操作无法自动匹配时）。
       if (decision.type === "require_approval") {
         const approval = await this.requestApproval({
           runId,
@@ -346,7 +367,9 @@ export class AgentLoopEngine {
         toolCalls: [],
       };
     } catch (error) {
-      // Handle explicit abort
+      // 异常处理分两条路径：
+      // 1. 用户主动取消（signal.aborted）→ 状态为 cancelled，可恢复
+      // 2. 系统/业务错误 → 状态为 failed，可重试
       if (signal.aborted) {
         await this.deps.runStateManager.markCancelled(runId, "aborted by user");
         this.deps.eventBus.emit(
@@ -402,6 +425,15 @@ export class AgentLoopEngine {
     }
   }
 
+  /**
+   * 审批通过后恢复被暂停的工具执行。
+   *
+   * 这是 Agent Loop 的"重入点"：
+   * 1. 从 runStateManager 获取被暂停的 Run，校验状态为 waiting_approval
+   * 2. 重新构建上下文（可能已过时，但保留了审批前的会话状态）
+   * 3. 构造人工 Intent 和 ToolDecision（跳过意图路由和工具决策）
+   * 4. 直接进入 executeToolDecision 子流程
+   */
   async resumeApprovedTool(
     approval: ApprovalResumeInput,
     signal: AbortSignal,
@@ -533,6 +565,15 @@ export class AgentLoopEngine {
     }
   }
 
+  /**
+   * 发起审批请求。
+   *
+   * 两条路径：
+   * 1. DB 持久化审批（approvalRequestService 存在）：写入 DB 并发布预构建事件
+   * 2. 内存审批（仅 approvalGate）：写入内存并 emit 事件
+   *
+   * 审批请求创建后，状态机暂停在 waiting_approval，等待 approve() 或 reject()。
+   */
   private async requestApproval(input: {
     runId: string;
     conversationId: string;
@@ -573,6 +614,15 @@ export class AgentLoopEngine {
     return approval;
   }
 
+  /**
+   * 工具执行的子状态机：executing → reflecting → responding → writeMemories。
+   *
+   * 这是 use_tool 分支的核心执行路径：
+   * 1. executionOrchestrator.execute：并发执行工具调用（含重试）
+   * 2. reflectionEngine.reflect：评估工具执行结果是否达成目标
+   * 3. responseComposer.composeFromObservation：LLM 将工具结果总结为用户可读的回复
+   * 4. writeMemories：根据 turn 中的显式记忆请求或隐式规则写入记忆
+   */
   private async executeToolDecision(
     input: AgentLoopInput,
     context: AgentContext,
@@ -655,6 +705,16 @@ export class AgentLoopEngine {
     };
   }
 
+  /**
+   * 写入记忆（最佳努力，失败不阻塞主流程）。
+   *
+   * 写入策略由 MemoryWriter 内部决定：
+   * - 用户显式"记住" → 高置信度写入
+   * - 意图为 memory_update → 中置信度写入
+   * - 工具任务完成 → 生成任务摘要记忆
+   *
+   * 每条写入的记忆都会 emit agent.memory.written 事件。
+   */
   private async writeMemories(
     input: Parameters<
       NonNullable<AgentLoopEngineDeps["memoryWriter"]>["writeFromTurn"]

@@ -10,13 +10,17 @@ import type {
 import type { ComposeResult, ResponseComposerDeps } from "./response-types.js";
 
 /**
- * ResponseComposer — generates the final assistant response.
+ * ResponseComposer — 生成最终的助手回复。
  *
- * Two modes per architecture doc §18:
- *   1. composeDirect — for no_tool decisions (pure LLM response)
- *   2. composeFromObservation — for tool-based decisions (LLM summarizes results)
+ * 两种模式（架构文档 §18）：
+ *   1. composeDirect      — no_tool 路径：将 AgentContext 组装为 ChatMessage 数组后
+ *                            调用 LLM 流式生成纯文本回复
+ *   2. composeFromObservation — use_tool 路径：将工具执行结果和反思总结格式化后
+ *                               注入上下文，调用 LLM 生成自然语言总结
+ *   3. composeClarification — ask_clarification 路径：直接返回澄清问题，不调用 LLM
  *
- * Both modes stream deltas via AgentEventBus and persist the final message.
+ * 所有模式都通过 AgentEventBus 流式输出 delta 事件（agent.response.delta），
+ * 并在完成后持久化最终消息。
  */
 export class ResponseComposer implements ResponseComposerInterface {
   constructor(private readonly deps: ResponseComposerDeps) {}

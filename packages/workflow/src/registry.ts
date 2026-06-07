@@ -12,6 +12,18 @@ export interface BusinessWorkflow {
   plan(input: unknown, context: Record<string, unknown>): Promise<WorkflowPlan>;
 }
 
+/**
+ * WorkflowRegistry — 业务 Workflow 注册中心。
+ *
+ * Workflow 和 Skill 的区别：
+ * - Skill 是单个可执行能力（读文件、写文件、执行 shell 命令），
+ *   由 skill-runner 包的 SkillRunner 执行。
+ * - Workflow 是多步骤编排（计划→审批→步骤执行），
+ *   每个 BusinessWorkflow 包含 match（匹配度评估）和 plan（生成执行计划）。
+ *
+ * Workflow 被 Agent 调用时通过 ToolDecisionEngine 选择（skillId 以 "workflow." 开头），
+ * 然后由 composition-root 的 toolExecutor 桥接到 SunPilotRuntime.createRun。
+ */
 export class WorkflowRegistry {
   private readonly workflows = new Map<string, BusinessWorkflow>();
 

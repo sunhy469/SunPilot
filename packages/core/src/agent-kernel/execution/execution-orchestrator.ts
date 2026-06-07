@@ -27,10 +27,16 @@ export interface ExecutionOrchestratorDeps {
 }
 
 /**
- * ExecutionOrchestrator — executes tool calls with concurrency control,
- * retry logic, and event emission. Wraps the skill-runner package.
+ * ExecutionOrchestrator — 工具调用执行编排器。
  *
- * Architecture doc §17.
+ * 核心能力：
+ * - 并发控制：按 skillId 类别分组（filesystem.read 可并发，shell.execute 串行）
+ * - 重试逻辑：最多 MAX_RETRIES 次，指数退避（RETRY_BACKOFF），仅可重试错误才重试
+ * - 事件发射：tool.started → tool.completed / tool.failed
+ * - 制品追踪：收集所有工具返回的 artifacts
+ *
+ * 内部包装 skill-runner 包，通过 ToolExecutor 接口解耦。
+ * 架构文档 §17。
  */
 export class ExecutionOrchestrator implements ExecutionOrchestratorInterface {
   constructor(private readonly deps: ExecutionOrchestratorDeps) {}

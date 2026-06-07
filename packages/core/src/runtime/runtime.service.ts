@@ -10,6 +10,21 @@ import { conflict, notFound } from "../errors/index.js";
 import type { ToolCapability, ToolProvider } from "../providers/index.js";
 import type { RuntimeStore } from "./runtime.store.js";
 
+/**
+ * SunPilotRuntime — 旧版 Workflow 执行引擎。
+ *
+ * 与 Agent Loop 的关系：
+ * - Agent Loop 是新的"每次用户交互走完整状态机"引擎
+ * - SunPilotRuntime 是旧的 Workflow 执行引擎，支持 plan→approve→execute 的步骤式流程
+ * - 当 ToolDecisionEngine 选择 workflow.* 开头的 skill 时，
+ *   由 composition-root 的 toolExecutor 桥接到 Runtime.createRun
+ *
+ * Workflow 和 Skill 的区别：
+ * - Skill：单个能力（读文件、写文件、执行命令等），同步执行，返回结果
+ * - Workflow：多步骤编排（计划→审批→步骤执行），异步执行，产生 Run 和多个 Step
+ *
+ * Runtime 本身是审批驱动的：每个高风险的 step 执行前需要创建 Approval，等待用户 approve/reject。
+ */
 export class SunPilotRuntime {
   constructor(
     private readonly db: RuntimeStore,

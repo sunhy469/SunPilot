@@ -1,15 +1,18 @@
 import type { AgentEventType } from '@sunpilot/protocol';
 
 /**
- * AgentEventBus — in-process typed event emitter.
+ * AgentEventBus — 进程内类型化事件发射器。
  *
- * Events flow: business logic → EventBus.emit()
- *   → memory subscribers (logging, metrics)
- *   → database sink (persistence)
- *   → WebSocket sink (frontend push)
+ * 事件流向：
+ *   业务逻辑 → EventBus.emit()
+ *     → 持久化订阅者（RepositoryAgentEventSink → DB events 表）
+ *     → WebSocket 订阅者（daemon event-streamer → 前端推送）
  *
- * The actual persistence and WebSocket forwarding are done by
- * subscribing listeners; the EventBus itself is transport-agnostic.
+ * 事件总线本身与传输协议解耦。所有持久化和 WebSocket 转发由外部订阅者完成。
+ *
+ * 订阅者调用规则：
+ * - 同步订阅者：按注册顺序同步调用，异常被捕获并记录
+ * - 异步订阅者：fire-and-forget，不阻塞 emit/publish 返回
  */
 
 export interface AgentEvent<P = Record<string, unknown>> {

@@ -11,6 +11,16 @@ import {
 
 const AGENT_ERROR_CODE_SET = new Set<string>(AGENT_ERROR_CODES);
 
+/**
+ * 将各类错误映射为 JSON-RPC 标准错误对象。
+ *
+ * 映射优先级：
+ * 1. SyntaxError → JSON-RPC PARSE_ERROR
+ * 2. ZodError → JSON-RPC INVALID_PARAMS
+ * 3. 已知 AgentErrorCode → 通过 agentErrorToJsonRpcCode 映射
+ * 4. RuntimeError → AGENT_DOMAIN_ERROR
+ * 5. 其他 → INTERNAL_ERROR
+ */
 export function rpcError(error: unknown): {
   code: number;
   message: string;
@@ -148,6 +158,15 @@ export function agentEventParams(
   };
 }
 
+/**
+ * 将 SunPilotEvent 转换为 JSON-RPC 通知格式。
+ *
+ * 约定：
+ * - agent.* 类型事件 → method 直接使用事件类型名（如 "agent.response.delta"）
+ * - 非 agent.* 事件 → method 统一为 "agent.runtime.event"，原始事件放在 params.event 中
+ *
+ * 前端根据 method 字段区分事件类型并更新 UI。
+ */
 export function websocketNotificationForEvent(event: SunPilotEvent): {
   jsonrpc: "2.0";
   method: string;
