@@ -13,16 +13,16 @@ export interface ToolDecisionEngineDeps {
 }
 
 /**
- * ToolDecisionEngine — decides whether and which tools to use.
+ * ToolDecisionEngine — 决定是否使用工具以及使用哪个工具。
  *
- * Decision logic (per architecture doc §14.3):
- *   1. Read available skills
- *   2. Filter disabled / no-permission skills
- *   3. Match intent → candidate skills
- *   4. Return ToolDecision
+ * 决策逻辑（架构文档 §14.3）：
+ *   1. 如果有 Plan 且包含 tool 步骤 → 直接使用 Plan 中的工具调用
+ *   2. 如果意图不需要工具（如 casual_chat）→ 返回 no_tool
+ *   3. 匹配意图的候选技能到可用技能 → 返回 use_tool
+ *   4. 无匹配且意图为 workflow_execution → 根据用户消息关键词匹配 Workflow
+ *   5. 仍然无匹配 → 查找 INTENT_SKILL_MAP 中的兜底技能
  *
- * In the MVP, this is primarily rule-based. Phase 5 will add
- * LLM-based tool call argument generation.
+ * 当前 MVP 阶段以规则匹配为主，后续阶段将引入 LLM 生成工具调用参数。
  */
 export class ToolDecisionEngine implements ToolDecisionEngineInterface {
   constructor(private readonly deps: ToolDecisionEngineDeps) {}

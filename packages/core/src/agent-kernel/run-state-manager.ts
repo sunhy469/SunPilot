@@ -6,8 +6,13 @@ import type {
 } from './loop-types.js';
 
 /**
- * Legal state transitions for the Agent Loop state machine.
- * See architecture doc §9.5 for the complete transition table.
+ * Agent Loop 状态机的合法状态转换表。
+ *
+ * 每个状态可以转换到的一组"下一状态"。
+ * 不在合法转换表中的转换会抛出 AGENT_RUN_STATE_CONFLICT 错误。
+ * 终态（completed / cancelled / failed）没有合法后续转换。
+ *
+ * 架构文档 §9.5 包含完整的状态转换图。
  */
 const LEGAL_TRANSITIONS: Record<AgentLoopStatus, readonly AgentLoopStatus[]> = {
   created: ['context_building', 'cancelled', 'failed'],

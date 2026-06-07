@@ -52,11 +52,16 @@ export interface AgentLoopServiceConfig {
 }
 
 /**
- * AgentService — the primary entry point for all chat interactions.
+ * AgentService — 所有对话交互的统一入口。
  *
- * All chat-like commands are routed through handleChatCommand →
- * AgentLoopEngine.run. The chat() method remains only as a compatibility
- * adapter for older REST callers; it no longer performs direct LLM calls.
+ * 职责边界：
+ * - AgentService 是"门面"，负责：请求校验、会话管理、幂等性、Abort 控制、
+ *   EventBus 订阅→推流钩子转发、审批裁决。
+ * - AgentLoopEngine 是"引擎"，负责：上下文构建→意图路由→规划→工具决策→
+ *   安全→执行→反思→响应→记忆 的完整状态机流转。
+ *
+ * 所有聊天命令通过 handleChatCommand → AgentLoopEngine.run 路由。
+ * chat() 方法仅为旧 REST 调用方的兼容适配器，内部仍走 Agent Loop。
  */
 export class AgentService {
   private readonly loopConfig: AgentLoopServiceConfig;
@@ -65,11 +70,21 @@ export class AgentService {
     this.loopConfig = config;
   }
 
-  // ── NEW: Agent Loop path ─────────────────────────────────────────
+  // ── Agent Loop 主路径 ────────────────────────────────────────────
 
   /**
-   * Handle a chat command through the full Agent Loop.
-   * This is the primary entry point per architecture doc §0.3.
+   * 通过完整 Agent Loop 处理一次聊天命令。
+   * 这是架构文档 §0.3 定义的唯一标准入口。
+   *
+   * 完整流程：
+   * 1. 幂等性检查（基于 clientRequestId + 请求哈希）
+   * 2. 创建 AbortSignal 用于取消控制
+   * 3. 订阅 EventBus → 将 Agent 内部事件转发到 streamHooks
+   * 4. 必要时创建 Conversation 记录
+   * 5. 持久化 User Message
+   * 6. 持久化 Run 初始状态（含 created 事件）
+   * 7. 调用 AgentLoopEngine.run 启动状态机
+   * 8. 清理 Abort/订阅 → 完成幂等性记录 → 触发 onCompleted
    */
   async handleChatCommand(
     input: {
@@ -128,6 +143,8 @@ export class AgentService {
         connectionId: ctx.connectionId,
       },
     };
+    // 幂等性保护：若客户端携带 clientRequestId 重放相同请求，
+    // 则直接返回缓存结果，避免重复执行 Agent Loop。
     const idempotency = input.clientRequestId
       ? await this.reserveIdempotency(
           input.clientRequestId,
@@ -140,10 +157,12 @@ export class AgentService {
       return idempotency.replay;
     }
 
-    // Create the abort signal for this run
+    // 为本 run 创建 AbortSignal，用于用户取消或超时中断
     const signal = abortRegistry.create(runId);
 
-    // Subscribe to Agent events and forward to stream hooks
+    // 订阅 EventBus → 将 Agent 内部事件转发到 streamHooks，
+    // 由 daemon 层的 JSON-RPC/WebSocket 推送给前端。
+    // 特别处理 agent.response.delta 事件，将增量文本推送到 onDelta 钩子。
     const unsubscribe = eventBus.subscribe((event) => {
       if (event.runId === runId) {
         streamHooks?.onEvent?.(event);
@@ -167,12 +186,14 @@ export class AgentService {
     });
 
     try {
+      // 必要时创建新会话（Conversation 持久化）
       if (shouldCreateConversation && this.loopConfig.conversations) {
         await this.loopConfig.conversations.createConversation({
           id: conversationId,
         });
       }
 
+      // 持久化 Run 初始状态（优先使用 DB 初始化的原子写入）
       const initialized = this.loopConfig.agentRunInitializer
         ? await this.loopConfig.agentRunInitializer.createRunWithCreatedEvent(
             loopInput,
@@ -182,6 +203,7 @@ export class AgentService {
         await runStateManager.createRun(loopInput);
       }
 
+      // 持久化用户消息
       if (this.loopConfig.conversations) {
         const userMessage = await this.loopConfig.conversations.createMessage({
           id: userMessageId,
@@ -192,7 +214,9 @@ export class AgentService {
         await streamHooks?.onUserMessage?.(userMessage);
       }
 
+      // 发出 run.created 事件（推送→前端通知"Run 已创建"）
       if (initialized) {
+        // 使用 DB 原子写入时预构建的事件，保留 id 和 sequence
         eventBus.publish(initialized.event);
       } else {
         eventBus.emit(
@@ -207,10 +231,10 @@ export class AgentService {
         );
       }
 
-      // Run the Agent Loop
+      // 启动 Agent Loop 状态机（核心执行路径）
       const result = await loopEngine.run(loopInput, signal);
 
-      // Clean up
+      // 正常完成：清理 Abort 控制器和事件订阅
       abortRegistry.remove(runId);
       unsubscribe();
 
@@ -219,17 +243,21 @@ export class AgentService {
         conversationId,
         messageId: result.assistantMessageId ?? userMessageId,
       };
+      // 标记幂等性记录为已完成，后续相同 clientRequestId 可直接重放
       await this.completeIdempotency(idempotency?.id, response);
 
       streamHooks?.onCompleted?.(result);
 
       return response;
     } catch (error) {
+      // 异常路径：清理 Abort 控制器和事件订阅
       abortRegistry.remove(runId);
       unsubscribe();
 
+      // 标记幂等性记录为失败（非幂等性错误仍可重试）
       await this.failIdempotency(idempotency?.id, error);
 
+      // 将 Run 状态持久化为 failed，并发出错误事件
       await runStateManager.markFailed(runId, error);
       eventBus.emit(
         "agent.error",
@@ -250,8 +278,8 @@ export class AgentService {
   }
 
   /**
-   * Stop a running chat via AbortRegistry.
-   * Replaces the placeholder `{ stopped: true }` implementation.
+   * 通过 AbortRegistry 中止正在运行的聊天。
+   * 仅触发 abort 信号，不持久化状态变更。
    */
   stopChat(runId: string): { stopped: boolean; runId: string } {
     const stopped = this.loopConfig.abortRegistry.abort(runId);
@@ -259,11 +287,12 @@ export class AgentService {
   }
 
   /**
-   * Cancel an Agent run through the Agent state manager.
+   * 取消一个 Agent Run。
    *
-   * This is the command-oriented counterpart to chat.stop: it aborts any active
-   * stream and persists the run as cancelled, producing the canonical
-   * `agent.run.cancelled` event for Web/CLI/API clients.
+   * 与 stopChat 的区别：cancelRun 在 abort 流的同时将 Run 状态持久化为
+   * cancelled，并发出 agent.run.cancelled 事件，前端可据此更新 UI。
+   *
+   * 这是面向 Web/CLI/API 客户端的标准取消入口。
    */
   async cancelRun(
     runId: string,
@@ -281,6 +310,10 @@ export class AgentService {
     return { cancelled: true, runId, stopped };
   }
 
+  /**
+   * 恢复一个被中断/暂停的 Run。
+   * 内部复用 createRunAttempt("resume")，校验状态为 interruptable 后创建新 Run。
+   */
   async resumeRun(runId: string): Promise<{
     resumed: true;
     originalRunId: string;
@@ -292,6 +325,10 @@ export class AgentService {
     return this.createRunAttempt(runId, "resume");
   }
 
+  /**
+   * 重试一个失败的 Run。
+   * 内部复用 createRunAttempt("retry")，校验状态为 retryable 后创建新 Run。
+   */
   async retryRun(runId: string): Promise<{
     retried: true;
     originalRunId: string;
@@ -312,7 +349,13 @@ export class AgentService {
   }
 
   /**
-   * Approve a pending approval request.
+   * 批准一个待审批的请求。
+   *
+   * 两条路径：
+   * 1. 有 approvalDecisionService（DB 持久化）→ 通过 DB 层审批
+   * 2. 仅有 approvalGate（内存）→ 通过内存 Gate 审批
+   *
+   * 批准后调用 loopEngine.resumeApprovedTool 继续执行被暂停的工具调用。
    */
   async approve(
     approvalId: string,
@@ -366,7 +409,8 @@ export class AgentService {
   }
 
   /**
-   * Reject a pending approval request.
+   * 拒绝一个待审批的请求。
+   * 拒绝后 Run 将保持 waiting_approval 状态，允许用户手动取消。
    */
   async reject(
     approvalId: string,
@@ -401,6 +445,14 @@ export class AgentService {
     return { rejected: true };
   }
 
+  /**
+   * resume 和 retry 的共享实现。
+   * 1. 从 DB/内存获取源 Run
+   * 2. 校验状态是否允许 resume/retry（仅 interrupted/failed/cancelled）
+   * 3. 从源 Run 提取消息和模式
+   * 4. 通过 handleChatCommand 创建新 Run
+   * 5. 记录 attempt 链：在原 Run context 中标记新 Run ID
+   */
   private async createRunAttempt(
     runId: string,
     action: "resume" | "retry",
@@ -616,6 +668,16 @@ export class AgentService {
     return true;
   }
 
+  /**
+   * 幂等性保留：基于 clientRequestId + 请求哈希进行去重。
+   *
+   * 返回值分三种情况：
+   * - inserted：首次请求，正常执行 Agent Loop
+   * - replay：重复请求且结果已缓存，直接返回缓存结果
+   * - 抛错：clientRequestId 冲突（不同请求用同一 ID）或正在进行中
+   *
+   * 幂等性窗口为 24 小时，超过窗口的记录视为过期。
+   */
   private async reserveIdempotency(
     clientRequestId: string,
     originalInput: {

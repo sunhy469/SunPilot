@@ -82,13 +82,19 @@ export interface ContextBuilderDeps {
 }
 
 /**
- * ContextBuilder — the unified context assembly pipeline.
+ * ContextBuilder — 统一的上下文组装管线。
  *
- * Gathers context from all sources (messages, memories, skills, artifacts,
- * run state, safety policy), packs them into chunks, applies token budget,
- * and returns a unified AgentContext.
+ * 从多个数据源收集上下文（消息、记忆、技能、制品、工具结果、运行状态、安全策略），
+ * 按优先级打包为 ContextChunk，应用 Token 预算（优先级低的 chunk 可能被裁剪），
+ * 最终返回统一的 AgentContext。
  *
- * This replaces the ad-hoc prompt construction in AgentService.chat().
+ * 上下文源及优先级（数字越大越容易被裁剪）：
+ *   0  — system_prompt / safety_policy / current_message / run_state
+ *   10 — conversation_history
+ *   15 — memories（语义检索结果）
+ *   18 — tool_results（最近工具调用结果）
+ *   20 — skill_catalog（可用技能目录）
+ *   25 — artifacts（运行中产生的制品）
  */
 export class ContextBuilder implements ContextBuilderInterface {
   private readonly budgeter: TokenBudgeter;

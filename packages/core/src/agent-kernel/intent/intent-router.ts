@@ -17,12 +17,20 @@ export interface IntentRouterDeps {
 }
 
 /**
- * IntentRouter — classifies user intent using a priority cascade:
- *   1. Rule-based pattern matching (fast, no LLM call)
- *   2. Lightweight LLM classification (for ambiguous cases)
- *   3. Default to 'unknown' with reasonable defaults
+ * IntentRouter — 用户意图分类器，采用三级优先级级联策略：
  *
- * Architecture doc §10.3
+ * 1. 规则匹配（最快，无 LLM 调用）
+ *    - 预定义正则模式匹配常见意图（问候、文件操作、Shell 命令等）
+ *    - 命中后直接返回 RoutedIntent，附带候选技能列表和风险等级
+ *
+ * 2. LLM 轻量分类（规则未命中时降级使用）
+ *    - 调用轻量模型做意图分类，避免对简单问候调用大模型
+ *    - 仅在规则全部未命中时触发
+ *
+ * 3. 默认 unknown（兜底）
+ *    - 置信度 0.3，不推荐使用工具，走纯 LLM 回答路径
+ *
+ * 架构文档 §10.3
  */
 export class IntentRouter implements IntentRouterInterface {
   private readonly rules: IntentRule[];

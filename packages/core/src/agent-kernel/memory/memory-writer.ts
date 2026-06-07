@@ -18,6 +18,18 @@ export interface DefaultMemoryWriterDeps {
   clock?: () => Date;
 }
 
+/**
+ * DefaultMemoryWriter — 记忆写入器。
+ *
+ * 写入流程（writeFromTurn）：
+ * 1. extractCandidates：从 turn 中提取候选记忆
+ *    - 用户显式"记住"关键词 → 高置信度候选
+ *    - 意图为 memory_update → 中置信度候选
+ *    - 工具任务完成 → 自动生成 task_summary 候选
+ * 2. secretRedactor.scan：扫描敏感信息（密钥、密码等）并脱敏
+ * 3. 查重：检索相似记忆，交由 memoryPolicy 决定 write/supersede/reject
+ * 4. 写入或拒写，记录决策理由
+ */
 export class DefaultMemoryWriter {
   private readonly policy: MemoryPolicy;
   private readonly secretRedactor: SecretRedactor;

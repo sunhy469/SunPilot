@@ -1,9 +1,26 @@
 /**
- * Composition root — assembles Agent Loop dependencies from
- * the available database, skill registry, and LLM provider.
+ * Composition Root — 组装 Agent Loop 全部依赖的唯一入口。
  *
- * This is the single place where concrete implementations are wired together.
- * The daemon server.ts consumes the assembled AgentService.
+ * 这里是全部具体实现被"接线"的唯一位置。daemon server.ts 只需调用
+ * createAgentLoopService 即可获得完全配置好的 AgentService。
+ *
+ * 装配层次：
+ *   Foundation: EventBus → AbortRegistry → RunStateManager → EventSink → RunInitializer
+ *   Context:    ContextBuilder（多数据源适配器）
+ *   Intent:     IntentRouter（规则 + LLM 双路径）
+ *   Tools:      ToolDecisionEngine（技能发现 + 意图匹配）
+ *   Safety:     PermissionPolicy → ApprovalGate → ApprovalDecisionService
+ *   Planner:    RuleBasedPlanner
+ *   Execution:  toolExecutor（桥接 skill-runner + workflow runtime）
+ *   Reflection: BasicReflectionEngine
+ *   Response:   ResponseComposer（LLM 流式输出 + 消息持久化）
+ *   Memory:     DefaultMemoryWriter（显式/隐式记忆提取 + 脱敏 + 去重）
+ *   Loop:       AgentLoopEngine（状态机，注入以上全部组件）
+ *   Service:    AgentService（门面，注入 Loop + Abort + 幂等 + 审批裁决）
+ *
+ * 工具执行分两条路径：
+ * - workflow.* skillId → SunPilotRuntime.createRun（走旧 Runtime 审批流程）
+ * - 其他 skillId → SkillRunner.execute（走 skill-runner 包直接执行）
  */
 import {
   type ArtifactRecord,

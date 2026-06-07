@@ -67,6 +67,22 @@ function normalizeSkillEvent(type: string, payload: unknown): { type: SunPilotEv
   return { type: "step.progress", payload: { type, payload } };
 }
 
+/**
+ * SkillRunner — Skill 插件执行引擎。
+ *
+ * 为什么 SkillRunner 是独立包而不是放在 agent-kernel 里面：
+ * - Skill 是"插件"概念：第三方可开发和安装 Skill，Skill 代码运行在独立沙箱中
+ * - agent-kernel 负责"决策"，skill-runner 负责"执行"，两者通过 ExecutionOrchestrator 桥接
+ * - skill-runner 提供完整的 SDK 上下文（events/files/memory/secrets/logger/artifacts），
+ *   这是插件执行边界：Skill 代码不能直接访问 Agent 内部状态，只能通过 SDK 接口交互
+ *
+ * 并发控制：
+ * - acquireSlot / releaseSlot 实现信号量模式，限制同时执行的 Skill 数量
+ * - maxConcurrency 默认 4，通过 SUNPILOT_SKILL_MAX_CONCURRENCY 环境变量调整
+ *
+ * 超时控制：
+ * - 每个 Skill 执行有超时限制（默认 5 分钟），超时后 abort 并记录审计日志
+ */
 export class SkillRunner {
   private activeExecutions = 0;
   private readonly waiters: Array<() => void> = [];
