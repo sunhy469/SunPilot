@@ -342,7 +342,7 @@ describe("createAgentLoopService", () => {
             id: "run_workflow_child",
             title: "Daily Close",
             status: "completed",
-            mode: "approval_required",
+            mode: "workflow",
             workflowId,
             createdAt: "2026-06-06T00:00:00.000Z",
             updatedAt: "2026-06-06T00:00:01.000Z",

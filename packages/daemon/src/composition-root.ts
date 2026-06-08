@@ -18,15 +18,14 @@
  *   Loop:       AgentLoopEngine（状态机，注入以上全部组件）
  *   Service:    AgentService（门面，注入 Loop + Abort + 幂等 + 审批裁决）
  *
- * 工具执行分两条路径：
- * - workflow.* skillId → SunPilotRuntime.createRun（走旧 Runtime 审批流程）
+ * 工具执行分两条内部实现路径：
+ * - workflow.* skillId → SunPilotRuntime.createRun（迁移期内部 bridge，不再作为对外兼容入口）
  * - 其他 skillId → SkillRunner.execute（走 skill-runner 包直接执行）
  */
 import {
   type ArtifactRecord,
   type InstalledSkillRecord,
   type StepRecord,
-  type SkillRisk,
 } from "@sunpilot/protocol";
 import {
   AbortRegistry,

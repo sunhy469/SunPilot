@@ -840,85 +840,70 @@ describe("daemon Agent runtime REST routes", () => {
     ]);
   });
 
-  test("falls back to runtime approvals when an approval is not Agent-resumable", async () => {
+  test("returns 409 and keeps approval pending when the approval is not resumable", async () => {
     const db = new InMemoryDatabaseContext();
     await db.runs.create({
-      id: "run_legacy_approval",
-      title: "Legacy approval",
-      status: "paused",
-      mode: "approval_required",
+      id: "run_non_resumable",
+      title: "Non resumable approval",
+      status: "waiting_approval",
+      mode: "agent",
+      conversationId: "conv_non_resumable",
       input: {},
       context: {},
       createdAt: "2026-06-06T00:00:00.000Z",
       updatedAt: "2026-06-06T00:00:00.000Z",
     });
-    await db.steps.create({
-      id: "step_legacy_approval",
-      runId: "run_legacy_approval",
-      type: "approval",
-      name: "Approve legacy",
-      status: "pending",
-      input: {},
-    });
     await db.approvals.create({
-      id: "approval_legacy",
-      runId: "run_legacy_approval",
-      stepId: "step_legacy_approval",
+      id: "approval_non_resumable",
+      runId: "run_non_resumable",
       status: "pending",
       risk: "high",
-      title: "Approve legacy",
-      reason: "Legacy workflow approval",
+      title: "Approve legacy action",
+      reason: "No resumable action payload",
       requestedAction: { capability: "legacy.execute" },
       createdAt: "2026-06-06T00:00:00.000Z",
     });
     daemon = await createDaemon({
       database: db,
       port: 3737,
-      chatAgent: {
-        handleChatCommand: async () => {
-          throw new Error("not used");
-        },
-        stopChat: () => ({ stopped: false, runId: "unused" }),
-        cancelRun: async (runId: string) => ({
-          cancelled: true,
-          runId,
-          stopped: false,
-        }),
-        resumeRun: async (runId: string) => ({
-          resumed: true,
-          originalRunId: runId,
-          runId: "run_resumed",
-          conversationId: "conv_agent",
-          messageId: "msg_resumed",
-          status: "completed",
-        }),
-        retryRun: async (runId: string) => ({
-          retried: true,
-          originalRunId: runId,
-          runId: "run_retry",
-          conversationId: "conv_agent",
-          messageId: "msg_retry",
-          status: "completed",
-        }),
-        approve: async () => {
-          throw Object.assign(new Error("not resumable"), {
-            code: "AGENT_APPROVAL_NOT_RESUMABLE",
-          });
-        },
-        reject: async () => ({ rejected: true }),
-      },
     });
 
     const response = await daemon.app.inject({
       method: "POST",
-      url: "/v1/approvals/approval_legacy/approve",
+      url: "/v1/approvals/approval_non_resumable/approve",
       payload: { actor: "web" },
     });
 
-    expect(response.statusCode).toBe(200);
-    expect(response.json()).toEqual(
-      expect.objectContaining({ id: "approval_legacy", status: "approved" }),
+    expect(response.statusCode).toBe(409);
+    expect(response.json()).toEqual({
+      error: "approval_not_resumable",
+      message:
+        "Approval approval_non_resumable does not include a resumable action",
+    });
+    await expect(db.approvals.findById("approval_non_resumable")).resolves.toEqual(
+      expect.objectContaining({ status: "pending" }),
     );
+  });
+
+  test("rejects the legacy run creation endpoint", async () => {
+    const db = new InMemoryDatabaseContext();
+    daemon = await createDaemon({
+      database: db,
+      port: 3737,
+    });
+
+    const response = await daemon.app.inject({
+      method: "POST",
+      url: "/v1/runs",
+      payload: { mode: "workflow", input: { message: "run workflow" } },
+    });
+
+    expect(response.statusCode).toBe(410);
+    expect(response.json()).toEqual({
+      error: "legacy_runtime_removed",
+      message:
+        "POST /v1/runs has been removed. Start Agent runs through /v1/chat or WebSocket chat.send.",
+    });
   });
 
   test("lists artifact metadata and streams artifact content through REST", async () => {
