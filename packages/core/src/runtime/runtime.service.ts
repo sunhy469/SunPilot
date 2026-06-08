@@ -1,6 +1,5 @@
 import type {
   ApprovalRecord,
-  RunMode,
   RunRecord,
   StepRecord,
   SunPilotEvent,
@@ -9,6 +8,7 @@ import type { WorkflowRegistry } from "@sunpilot/workflow";
 import { conflict, notFound } from "../errors/index.js";
 import type { ToolCapability, ToolProvider } from "../providers/index.js";
 import type { RuntimeStore } from "./runtime.store.js";
+import type { LegacyWorkflowMode } from "./runtime.types.js";
 
 /**
  * SunPilotRuntime — 旧版 Workflow 执行引擎。
@@ -42,7 +42,7 @@ export class SunPilotRuntime {
   async createRun(
     input: unknown,
     workflowId: string | undefined,
-    mode: RunMode = "approval_required",
+    mode: LegacyWorkflowMode = "approval_required",
   ): Promise<RunRecord> {
     if (!workflowId) {
       throw notFound("workflowId is required.");
@@ -57,12 +57,12 @@ export class SunPilotRuntime {
       id: `run_${crypto.randomUUID()}`,
       title: plan.runTitle,
       status: "planning",
-      mode,
+      mode: "workflow",
       workflowId,
       createdAt: now,
       updatedAt: now,
       input,
-      context: { plan },
+      context: { plan, legacyMode: mode },
     };
     await this.db.insertRun(run);
     await this.db.insertJob({
@@ -287,7 +287,11 @@ export class SunPilotRuntime {
     if (!run) {
       throw notFound(`Unknown run: ${runId}`);
     }
-    const retry = await this.createRun(run.input, run.workflowId, run.mode);
+    const legacyMode =
+      typeof run.context.legacyMode === "string"
+        ? (run.context.legacyMode as LegacyWorkflowMode)
+        : "approval_required";
+    const retry = await this.createRun(run.input, run.workflowId, legacyMode);
     retry.context.retryOf = runId;
     await this.db.updateRunContext(retry.id, retry.context);
     await this.db.audit({

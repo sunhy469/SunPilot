@@ -1,12 +1,6 @@
 import { z } from "zod";
 
-export const runModeSchema = z.enum(["chat", "plan", "auto", "approval_required", "dry_run"]);
-
-export const createRunSchema = z.object({
-  input: z.unknown().default({}),
-  workflowId: z.string().optional(),
-  mode: runModeSchema.default("approval_required")
-});
+export const runModeSchema = z.enum(["chat", "agent", "workflow"]);
 
 export const approvalDecisionSchema = z.object({
   reason: z.string().optional(),

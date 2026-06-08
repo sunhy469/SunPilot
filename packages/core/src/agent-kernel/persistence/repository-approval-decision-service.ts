@@ -44,6 +44,15 @@ export class RepositoryApprovalDecisionService {
   ): Promise<ApprovalDecisionResult> {
     const work = async (database: DatabaseContext) => {
       const approval = await requirePendingApproval(database, approvalId);
+      if (
+        status === "approved" &&
+        !normalizeRequestedAction(approval.requestedAction)
+      ) {
+        throw Object.assign(
+          new Error(`Approval ${approvalId} does not include a resumable action`),
+          { code: "AGENT_APPROVAL_NOT_RESUMABLE" },
+        );
+      }
       const decided = await database.approvals.decide(approvalId, status, {
         decidedBy,
         reason,

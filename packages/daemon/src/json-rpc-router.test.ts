@@ -23,7 +23,6 @@ describe("JsonRpcRouter", () => {
     const calls: unknown[] = [];
     const router = new JsonRpcRouter({
       database: new InMemoryDatabaseContext(),
-      runtime: {} as any,
       runtimeStore: {} as any,
       getChatAgent: async () =>
         ({
@@ -113,7 +112,6 @@ describe("JsonRpcRouter", () => {
     const ctx = createContext(notifications);
     const router = new JsonRpcRouter({
       database: db,
-      runtime: {} as any,
       runtimeStore: {} as any,
       getChatAgent: async () => ({}) as any,
     });
@@ -144,12 +142,9 @@ describe("JsonRpcRouter", () => {
     ]);
   });
 
-  test("falls back to workflow runtime when run.cancel is not an Agent run", async () => {
+  test("surfaces Agent run.cancel errors without falling back to the legacy runtime", async () => {
     const router = new JsonRpcRouter({
       database: new InMemoryDatabaseContext(),
-      runtime: {
-        cancel: async (runId: string) => ({ id: runId, status: "cancelled" }),
-      } as any,
       runtimeStore: {} as any,
       getChatAgent: async () =>
         ({
@@ -166,23 +161,12 @@ describe("JsonRpcRouter", () => {
         { method: "run.cancel", params: { runId: "run_legacy" } },
         createContext(),
       ),
-    ).resolves.toEqual({
-      result: {
-        cancelled: true,
-        runId: "run_legacy",
-        run: { id: "run_legacy", status: "cancelled" },
-      },
-    });
+    ).rejects.toMatchObject({ code: "AGENT_RUN_NOT_FOUND" });
   });
 
   test("routes run.retry to AgentService first", async () => {
     const router = new JsonRpcRouter({
       database: new InMemoryDatabaseContext(),
-      runtime: {
-        retry: async () => {
-          throw new Error("legacy runtime should not be called");
-        },
-      } as any,
       runtimeStore: {} as any,
       getChatAgent: async () =>
         ({
@@ -214,12 +198,9 @@ describe("JsonRpcRouter", () => {
     });
   });
 
-  test("falls back to workflow runtime when run.retry is not an Agent run", async () => {
+  test("surfaces Agent run.retry errors without falling back to the legacy runtime", async () => {
     const router = new JsonRpcRouter({
       database: new InMemoryDatabaseContext(),
-      runtime: {
-        retry: async (runId: string) => ({ id: `${runId}_retry` }),
-      } as any,
       runtimeStore: {} as any,
       getChatAgent: async () =>
         ({
@@ -236,15 +217,12 @@ describe("JsonRpcRouter", () => {
         { method: "run.retry", params: { runId: "run_legacy" } },
         createContext(),
       ),
-    ).resolves.toEqual({
-      result: { id: "run_legacy_retry" },
-    });
+    ).rejects.toMatchObject({ code: "AGENT_RUN_NOT_FOUND" });
   });
 
   test("returns a JSON-RPC method-not-found error for unknown commands", async () => {
     const router = new JsonRpcRouter({
       database: new InMemoryDatabaseContext(),
-      runtime: {} as any,
       runtimeStore: {} as any,
       getChatAgent: async () => ({}) as any,
     });

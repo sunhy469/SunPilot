@@ -37,12 +37,6 @@ export const conversationUnsubscribeSchema = z.object({
   conversationId: z.string().min(1),
 });
 
-export const runCreateSchema = z.object({
-  input: z.unknown().default({}),
-  workflowId: z.string().optional(),
-  mode: z.enum(['chat', 'plan', 'auto', 'approval_required', 'dry_run']).default('approval_required'),
-});
-
 export const runSubscribeSchema = z.object({
   runId: z.string().optional(),
 });
@@ -98,12 +92,6 @@ export interface ChatSendResult {
 export interface ChatStopResult {
   stopped: boolean;
   runId: string;
-}
-
-export interface CreateRunParams {
-  input?: unknown;
-  workflowId?: string;
-  mode?: 'chat' | 'plan' | 'auto' | 'approval_required' | 'dry_run';
 }
 
 export interface ConversationSubscribeParams {

@@ -4,11 +4,7 @@ import type { AgentEventType } from "./agent-events.js";
 export type RunMode =
   | "chat"
   | "agent"
-  | "workflow"
-  | "plan"
-  | "auto"
-  | "approval_required"
-  | "dry_run";
+  | "workflow";
 
 export type RunStatus =
   | "created"

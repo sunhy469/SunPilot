@@ -1,13 +1,12 @@
 import type { AgentService } from "@sunpilot/core";
 import type { DatabaseContext } from "@sunpilot/storage";
-import type { RepositoryRuntimeStore, SunPilotRuntime } from "@sunpilot/core";
+import type { RepositoryRuntimeStore } from "@sunpilot/core";
 import {
   approvalDecideSchema,
   chatSendSchema,
   chatStopSchema,
   conversationSubscribeSchema,
   conversationUnsubscribeSchema,
-  createRunSchema,
   JSON_RPC_ERROR_CODES,
   runCancelSchema,
   runRetrySchema,
@@ -56,7 +55,6 @@ export interface JsonRpcRouterDeps {
     >
   >;
   database: DatabaseContext;
-  runtime: SunPilotRuntime;
   runtimeStore: RepositoryRuntimeStore;
 }
 
@@ -70,7 +68,7 @@ export interface JsonRpcRouterDeps {
  *
  * 路由方法一览：
  * - chat.send / chat.stop  → AgentService
- * - run.create / run.cancel / run.resume / run.retry → AgentService / Runtime 双路径
+ * - run.cancel / run.resume / run.retry → AgentService
  * - approval.approve / approval.reject → AgentService
  * - run.subscribe / conversation.subscribe → 注册事件订阅过滤器
  */
@@ -82,17 +80,6 @@ export class JsonRpcRouter {
     ctx: JsonRpcConnectionContext,
   ): Promise<JsonRpcRouterResponse> {
     switch (command.method) {
-      case "run.create": {
-        const body = createRunSchema.parse(command.params ?? {});
-        return {
-          result: await this.deps.runtime.createRun(
-            body.input,
-            body.workflowId,
-            body.mode,
-          ),
-        };
-      }
-
       case "chat.send": {
         const agent = await this.deps.getChatAgent();
         const params = chatSendSchema.parse(command.params ?? {});
@@ -214,17 +201,9 @@ export class JsonRpcRouter {
       case "run.cancel": {
         const { runId } = runCancelSchema.parse(command.params ?? {});
         const agent = await this.deps.getChatAgent();
-        try {
-          return {
-            result: await agent.cancelRun(runId, "cancelled by user"),
-          };
-        } catch (error) {
-          if ((error as { code?: string }).code !== "AGENT_RUN_NOT_FOUND") {
-            throw error;
-          }
-          const run = await this.deps.runtime.cancel(runId);
-          return { result: { cancelled: true, runId, run } };
-        }
+        return {
+          result: await agent.cancelRun(runId, "cancelled by user"),
+        };
       }
 
       case "run.resume": {
@@ -236,14 +215,7 @@ export class JsonRpcRouter {
       case "run.retry": {
         const { runId } = runRetrySchema.parse(command.params ?? {});
         const agent = await this.deps.getChatAgent();
-        try {
-          return { result: await agent.retryRun(runId) };
-        } catch (error) {
-          if ((error as { code?: string }).code !== "AGENT_RUN_NOT_FOUND") {
-            throw error;
-          }
-          return { result: await this.deps.runtime.retry(runId) };
-        }
+        return { result: await agent.retryRun(runId) };
       }
 
       default:

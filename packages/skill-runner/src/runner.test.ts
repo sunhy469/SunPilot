@@ -205,7 +205,7 @@ describe("SkillRunner execution controls", () => {
       id: "run_memory",
       title: "Memory run",
       status: "running",
-      mode: "auto",
+      mode: "agent",
       createdAt: "2026-06-04T00:00:00.000Z",
       updatedAt: "2026-06-04T00:00:00.000Z",
       input: {},
