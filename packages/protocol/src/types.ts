@@ -1,29 +1,62 @@
 import type { AgentEventType } from "./agent-events.js";
 
-// 字符串字面量联合类型
-export type RunMode =
-  | "chat"
-  | "agent"
-  | "workflow";
+// ── Run mode ──────────────────────────────────────────────────────
 
-export type RunStatus =
-  | "created"
-  | "queued"
-  | "context_building"
-  | "intent_routing"
-  | "planning"
-  | "tool_deciding"
-  | "waiting_approval"
-  | "executing"
-  | "observing"
-  | "reflecting"
-  | "responding"
-  | "running"
-  | "paused"
-  | "completed"
-  | "failed"
-  | "cancelled"
-  | "interrupted";
+export const RUN_MODES = ["chat", "agent"] as const;
+export type RunMode = (typeof RUN_MODES)[number];
+
+// ── Run status — single source of truth ────────────────────────────
+
+export const RUN_STATUSES = [
+  "created",
+  "context_building",
+  "intent_routing",
+  "planning",
+  "tool_deciding",
+  "waiting_approval",
+  "executing",
+  "observing",
+  "reflecting",
+  "responding",
+  "completed",
+  "failed",
+  "cancelled",
+  "interrupted",
+] as const;
+
+export type RunStatus = (typeof RUN_STATUSES)[number];
+
+export const AGENT_ACTIVE_STATUSES = [
+  "context_building",
+  "intent_routing",
+  "planning",
+  "tool_deciding",
+  "waiting_approval",
+  "executing",
+  "observing",
+  "reflecting",
+  "responding",
+] as const satisfies readonly RunStatus[];
+
+export const AGENT_RECOVERABLE_STATUSES = [
+  "context_building",
+  "intent_routing",
+  "planning",
+  "tool_deciding",
+  "executing",
+  "observing",
+  "reflecting",
+  "responding",
+] as const satisfies readonly RunStatus[];
+
+export const TERMINAL_RUN_STATUSES = [
+  "completed",
+  "failed",
+  "cancelled",
+  "interrupted",
+] as const satisfies readonly RunStatus[];
+
+// ── Step status ────────────────────────────────────────────────────
 
 export type StepStatus =
   | "pending"
@@ -35,40 +68,14 @@ export type StepStatus =
   | "cancelled"
   | "interrupted";
 
-export type SkillRisk = 
-  | "low" 
-  | "medium" 
-  | "high" 
-  | "critical";
+// ── Risk ───────────────────────────────────────────────────────────
 
-export type SunPilotEventType =
-  | "run.created"
-  | "run.planning"
-  | "run.started"
-  | "run.completed"
-  | "run.failed"
-  | "run.cancelled"
-  | "run.interrupted"
-  | "workflow.selected"
-  | "workflow.planned"
-  | "step.created"
-  | "step.started"
-  | "step.progress"
-  | "step.completed"
-  | "step.failed"
-  | "step.interrupted"
-  | "skill.loaded"
-  | "skill.execution.started"
-  | "skill.execution.completed"
-  | "skill.execution.failed"
-  | "approval.requested"
-  | "approval.approved"
-  | "approval.rejected"
-  | "artifact.created"
-  | "memory.written"
-  | "audit.written";
+export type SkillRisk = "low" | "medium" | "high" | "critical";
 
-export type EventType = SunPilotEventType | AgentEventType;
+// ── Event type (agent.* namespace only) ────────────────────────────
+// AgentEventType is the single canonical event type for the agent.* namespace.
+
+// ── Artifact ───────────────────────────────────────────────────────
 
 export type ArtifactType =
   | "text"
@@ -84,12 +91,13 @@ export type ArtifactType =
   | "directory"
   | "other";
 
+// ── Records ────────────────────────────────────────────────────────
+
 export interface RunRecord {
   id: string;
   title: string;
   status: RunStatus;
   mode: RunMode;
-  workflowId?: string;
   conversationId?: string;
   userId?: string;
   goal?: string;
@@ -125,7 +133,7 @@ export interface SunPilotEvent {
   conversationId?: string;
   stepId?: string;
   sequence?: number;
-  type: EventType;
+  type: AgentEventType;
   payload: unknown;
   createdAt: string;
 }
@@ -187,24 +195,30 @@ export interface MemoryRecord {
   deletedAt?: string;
 }
 
-export type MemoryType =
-  | "user_preference"
-  | "project_profile"
-  | "technical_stack"
-  | "deployment_info"
-  | "workflow_pattern"
-  | "error_solution"
-  | "long_term_goal"
-  | "conversation_summary"
-  | "tool_observation"
-  | "manual_note";
+export const MEMORY_SCOPES = [
+  "global",
+  "user",
+  "project",
+  "conversation",
+  "run",
+] as const;
 
-export type MemoryScope =
-  | "global"
-  | "user"
-  | "project"
-  | "conversation"
-  | "run";
+export type MemoryScope = (typeof MEMORY_SCOPES)[number];
+
+export const MEMORY_TYPES = [
+  "user_preference",
+  "project_profile",
+  "technical_stack",
+  "deployment_info",
+  "workflow_pattern",
+  "error_solution",
+  "long_term_goal",
+  "conversation_summary",
+  "tool_observation",
+  "manual_note",
+] as const;
+
+export type MemoryType = (typeof MEMORY_TYPES)[number];
 
 export interface MemorySearchInput {
   query?: string;
@@ -223,6 +237,8 @@ export interface RetrievedMemoryRecord extends MemoryRecord {
   score: number;
   relevance: number;
 }
+
+// ── Workflow ───────────────────────────────────────────────────────
 
 export interface WorkflowStepPlan {
   id: string;
@@ -252,6 +268,8 @@ export interface WorkflowRecord {
   createdAt: string;
   updatedAt: string;
 }
+
+// ── Skill manifest ─────────────────────────────────────────────────
 
 export interface PermissionDeclaration {
   filesystem?: { read?: string[]; write?: string[] };
@@ -294,4 +312,19 @@ export interface InstalledSkillRecord {
   readmeSummary?: string;
   installedAt: string;
   updatedAt: string;
+}
+
+// ── Agent wire event envelope ──────────────────────────────────────
+
+export interface AgentWireEvent<TPayload = Record<string, unknown>> {
+  jsonrpc: "2.0";
+  method: AgentEventType;
+  params: {
+    eventId: string;
+    sequence: number;
+    runId?: string;
+    conversationId?: string;
+    createdAt: string;
+    payload: TPayload;
+  };
 }

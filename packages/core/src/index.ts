@@ -1,10 +1,17 @@
-export * from "./runtime.js";
 export * from "./agent/index.js";
 export * from "./agent-kernel/abort-registry.js";
 export * from "./agent-kernel/agent-event-bus.js";
 export * from "./agent-kernel/run-state-manager.js";
 export * from "./agent-kernel/loop-types.js";
 export * from "./agent-kernel/agent-loop-engine.js";
+export {
+  LEGAL_TRANSITIONS,
+  canTransition,
+  assertLegalTransition,
+  isTerminal,
+} from "./agent-kernel/state/run-state-machine.js";
+export { AUDIT_ACTORS, AuditActor } from "./agent-kernel/audit/audit-actor.js";
+export type { AuditActor as AuditActorType } from "./agent-kernel/audit/audit-actor.js";
 export { ContextBuilder } from "./agent-kernel/context/context-builder.js";
 export { TokenBudgeter } from "./agent-kernel/context/context-budgeter.js";
 export * from "./agent-kernel/context/context-types.js";
@@ -27,6 +34,10 @@ export {
   type PermissionDecision,
 } from "./agent-kernel/safety/safety-types.js";
 export { ExecutionOrchestrator } from "./agent-kernel/execution/execution-orchestrator.js";
+export { ToolExecutorBridge } from "./agent-kernel/execution/tool-executor-bridge.js";
+export { SkillToolExecutor } from "./agent-kernel/execution/skill-tool-executor.js";
+export type { SkillToolExecutorDeps } from "./agent-kernel/execution/skill-tool-executor.js";
+export { WorkflowToolExecutorAdapter } from "./agent-kernel/execution/workflow-tool-executor-adapter.js";
 export * from "./agent-kernel/execution/execution-types.js";
 export { RepositoryAgentEventSink } from "./agent-kernel/persistence/agent-event-sink.js";
 export { RepositoryAgentRunInitializer } from "./agent-kernel/persistence/repository-agent-run-initializer.js";

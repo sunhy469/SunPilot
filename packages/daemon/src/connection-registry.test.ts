@@ -2,11 +2,8 @@ import { describe, expect, test } from "vitest";
 import {
   ConnectionRegistry,
   type WebSocketLike,
-} from "./connection-registry.js";
-import {
-  subscribeEventStreamer,
-  type RuntimeEventSource,
-} from "./event-streamer.js";
+} from "@sunpilot/api";
+import { subscribeEventStreamer } from "@sunpilot/api";
 
 interface SocketStub extends WebSocketLike {
   name: string;
@@ -57,21 +54,17 @@ describe("subscribeEventStreamer", () => {
     registry.add(interested).conversationSubscriptions.add("conv_1");
     registry.add(ignored).conversationSubscriptions.add("conv_other");
     const sent: Array<{ socket: string; notification: unknown }> = [];
-    let listener:
-      | Parameters<RuntimeEventSource["subscribeEvents"]>[0]
-      | undefined;
+    let listener: ((event: any) => void) | undefined;
     const unsubscribe = subscribeEventStreamer({
-      runtimeStore: {
-        subscribeEvents(next) {
-          listener = next;
-          return () => {
-            listener = undefined;
-          };
-        },
+      subscribe(next) {
+        listener = next;
+        return () => {
+          listener = undefined;
+        };
       },
       registry,
       send(socket, notification) {
-        sent.push({ socket: socket.name, notification });
+        sent.push({ socket: (socket as SocketStub).name, notification });
       },
     });
 

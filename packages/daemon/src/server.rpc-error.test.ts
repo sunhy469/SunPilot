@@ -6,7 +6,7 @@ import {
   agentEventParams,
   rpcError,
   websocketNotificationForEvent,
-} from "./ws-protocol.js";
+} from "@sunpilot/api";
 
 describe("rpcError", () => {
   test("maps Agent domain errors to JSON-RPC error data", () => {
@@ -108,26 +108,6 @@ describe("Agent WebSocket protocol helpers", () => {
     });
   });
 
-  test("keeps legacy runtime events behind agent.runtime.event", () => {
-    expect(
-      websocketNotificationForEvent({
-        id: "evt_runtime",
-        sequence: 2,
-        runId: "run_1",
-        type: "run.completed",
-        payload: { ok: true },
-        createdAt: "2026-06-06T00:00:00.000Z",
-      }),
-    ).toEqual({
-      jsonrpc: "2.0",
-      method: "agent.runtime.event",
-      params: {
-        runId: "run_1",
-        event: expect.objectContaining({ id: "evt_runtime" }),
-      },
-    });
-  });
-
   test("wraps agent.error notifications in the same envelope", () => {
     const notification = agentErrorNotification(
       Object.assign(new Error("Nope"), {
@@ -143,7 +123,7 @@ describe("Agent WebSocket protocol helpers", () => {
       method: "agent.error",
       params: expect.objectContaining({
         eventId: expect.stringMatching(/^evt_/),
-        sequence: 0,
+        sequence: -1,
         conversationId: "conv_1",
         payload: {
           conversationId: "conv_1",
@@ -170,7 +150,7 @@ describe("Agent WebSocket protocol helpers", () => {
       }),
     ).toEqual({
       eventId: "evt_text",
-      sequence: 0,
+      sequence: -1,
       createdAt: "2026-06-06T00:00:00.000Z",
       payload: { value: "plain" },
     });

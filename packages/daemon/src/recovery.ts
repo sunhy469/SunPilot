@@ -1,4 +1,4 @@
-import type { RunRecord, RunStatus } from "@sunpilot/protocol";
+import { AuditActor, type RunRecord, type RunStatus } from "@sunpilot/protocol";
 import type { DatabaseContext } from "@sunpilot/storage";
 
 const AGENT_RECOVERY_INTERRUPT_STATUSES: readonly RunStatus[] = [
@@ -51,13 +51,17 @@ export async function recoverAgentRuntimeRuns(
       category: "run_state",
       retryable: true,
     };
-    await database.runs.updateStatus(run.id, "failed", now, error);
+    await database.runs.updateStatus(run.id, {
+      status: "failed",
+      updatedAt: now,
+      error,
+    });
     await database.runStatusHistory.append({
       runId: run.id,
       previousStatus: run.status,
       nextStatus: "failed",
       reason: "daemon restarted during response generation",
-      actor: "daemon",
+      actor: AuditActor.Daemon,
       createdAt: now,
     });
     await database.events.append({
@@ -109,7 +113,7 @@ export async function recoverAgentRuntimeRuns(
   ) {
     await database.audit.create({
       runId: undefined,
-      actor: "daemon",
+      actor: AuditActor.Daemon,
       action: "daemon.recovery_scan",
       target: "agent-runtime",
       payload: {
@@ -136,13 +140,17 @@ async function interruptRecoveredRun(
     category: "run_state",
     retryable: true,
   };
-  await database.runs.updateStatus(run.id, "interrupted", now, error);
+  await database.runs.updateStatus(run.id, {
+    status: "interrupted",
+    updatedAt: now,
+    error,
+  });
   await database.runStatusHistory.append({
     runId: run.id,
     previousStatus: run.status,
     nextStatus: "interrupted",
     reason: "daemon restarted while run was unfinished",
-    actor: "daemon",
+    actor: AuditActor.Daemon,
     createdAt: now,
   });
   for (const step of await database.steps.listByRunId(run.id)) {
@@ -152,7 +160,6 @@ async function interruptRecoveredRun(
       });
     }
   }
-  await database.jobs.updateStatus(run.id, "interrupted");
   await database.events.append({
     id: `evt_${crypto.randomUUID()}`,
     runId: run.id,

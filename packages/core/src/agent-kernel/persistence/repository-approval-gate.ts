@@ -1,4 +1,4 @@
-import type { ApprovalRecord } from "@sunpilot/protocol";
+import { AuditActor, type ApprovalRecord } from "@sunpilot/protocol";
 import type { DatabaseContext } from "@sunpilot/storage";
 import type { ApprovalGate as ApprovalGateInterface } from "../loop-types.js";
 import {
@@ -72,7 +72,7 @@ export class RepositoryApprovalGate implements ApprovalGateInterface {
     await this.db.audit.create({
       runId: decided?.runId ?? approval.runId,
       stepId: approval.stepId,
-      actor: decidedBy ?? "user",
+      actor: decidedBy ?? AuditActor.User,
       action: "approval.approved",
       target: approvalId,
       risk: approval.risk,
@@ -111,7 +111,7 @@ export class RepositoryApprovalGate implements ApprovalGateInterface {
     await this.db.audit.create({
       runId: decided?.runId ?? approval.runId,
       stepId: approval.stepId,
-      actor: decidedBy ?? "user",
+      actor: decidedBy ?? AuditActor.User,
       action: "approval.rejected",
       target: approvalId,
       risk: approval.risk,

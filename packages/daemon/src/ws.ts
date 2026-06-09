@@ -1,11 +1,14 @@
 import type { Server as HttpServer } from "node:http";
 import { WebSocket, WebSocketServer } from "ws";
-import type { AgentService, RepositoryRuntimeStore } from "@sunpilot/core";
+import type { AgentEvent, AgentService } from "@sunpilot/core";
 import type { DatabaseContext } from "@sunpilot/storage";
-import { ConnectionRegistry } from "./connection-registry.js";
-import { subscribeEventStreamer } from "./event-streamer.js";
-import { JsonRpcRouter } from "./json-rpc-router.js";
-import { agentErrorNotification, rpcError } from "./ws-protocol.js";
+import {
+  ConnectionRegistry,
+  subscribeEventStreamer,
+  JsonRpcRouter,
+  agentErrorNotification,
+  rpcError,
+} from "@sunpilot/api";
 
 function sendJson(
   socket: WebSocket,
@@ -41,7 +44,7 @@ function bindIdleTimeout(socket: WebSocket): () => void {
 export function setupDaemonWebSocket(deps: {
   getChatAgent: () => Promise<AgentService>;
   database: DatabaseContext;
-  runtimeStore: RepositoryRuntimeStore;
+  eventSubscribe(listener: (event: AgentEvent) => void): () => void;
   port: number;
   isAllowedOrigin: (origin: string | undefined, port: number) => boolean;
 }) {
@@ -50,12 +53,12 @@ export function setupDaemonWebSocket(deps: {
   const jsonRpcRouter = new JsonRpcRouter({
     getChatAgent: deps.getChatAgent,
     database: deps.database,
-    runtimeStore: deps.runtimeStore,
   });
   const unsubscribeEvents = subscribeEventStreamer({
-    runtimeStore: deps.runtimeStore,
+    subscribe: deps.eventSubscribe,
     registry: connectionRegistry,
-    send: (socket, notification) => sendJson(socket, notification),
+    send: (socket: WebSocket, notification: unknown) =>
+      sendJson(socket, notification),
   });
 
   wsServer.on("connection", (socket, request) => {

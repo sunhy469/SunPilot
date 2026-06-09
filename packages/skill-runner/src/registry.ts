@@ -2,6 +2,7 @@ import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { isAbsolute, join, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 import {
+  AuditActor,
   skillManifestSchema,
   type InstalledSkillRecord,
   type SkillManifest,
@@ -147,14 +148,14 @@ export class SkillRegistry {
           this.skills.set(record.id, record);
           await this.db.skills.upsert(record);
           await this.db.audit.create({
-            actor: "daemon",
+            actor: AuditActor.Daemon,
             action: "skill.load",
             target: record.id,
             payload: { path: record.path, version: record.version },
           });
         } catch (error) {
           await this.db.audit.create({
-            actor: "daemon",
+            actor: AuditActor.Daemon,
             action: "skill.load.failed",
             target: resolve(candidate),
             risk: "high",
@@ -186,7 +187,7 @@ export class SkillRegistry {
     if (!updated) return undefined;
     this.skills.set(id, updated);
     await this.db.audit.create({
-      actor: "daemon",
+      actor: AuditActor.Daemon,
       action: enabled ? "skill.enable" : "skill.disable",
       target: id,
       payload: { enabled },

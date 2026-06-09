@@ -11,20 +11,18 @@
  *   Tools:      ToolDecisionEngine（技能发现 + 意图匹配）
  *   Safety:     PermissionPolicy → ApprovalGate → ApprovalDecisionService
  *   Planner:    RuleBasedPlanner
- *   Execution:  toolExecutor（桥接 skill-runner + workflow runtime）
+ *   Execution:  toolExecutor（桥接 skill-runner + workflow executor）
  *   Reflection: BasicReflectionEngine
  *   Response:   ResponseComposer（LLM 流式输出 + 消息持久化）
  *   Memory:     DefaultMemoryWriter（显式/隐式记忆提取 + 脱敏 + 去重）
  *   Loop:       AgentLoopEngine（状态机，注入以上全部组件）
  *   Service:    AgentService（门面，注入 Loop + Abort + 幂等 + 审批裁决）
  *
- * 工具执行分两条内部实现路径：
- * - workflow.* skillId → SunPilotRuntime.createRun（迁移期内部 bridge，不再作为对外兼容入口）
+ * 工具执行：
+ * - workflow.* skillId → WorkflowToolExecutor（作为 Agent tool 在当前 run 内执行）
  * - 其他 skillId → SkillRunner.execute（走 skill-runner 包直接执行）
  */
 import {
-  type ArtifactRecord,
-  type InstalledSkillRecord,
   type StepRecord,
 } from "@sunpilot/protocol";
 import {
@@ -34,6 +32,9 @@ import {
   ContextBuilder,
   DefaultMemoryWriter,
   ExecutionOrchestrator,
+  SkillToolExecutor,
+  ToolExecutorBridge,
+  WorkflowToolExecutorAdapter,
   InMemoryAgentEventBus,
   IntentRouter,
   PermissionPolicy,
@@ -46,12 +47,14 @@ import {
   RepositoryApprovalRequestService,
   RepositoryRunStateManager,
   AgentService,
+  type AgentEventBus,
   type AgentLoopServiceConfig,
   ToolDecisionEngine,
   type Permission,
 } from "@sunpilot/core";
 import type { DatabaseContext } from "@sunpilot/storage";
 import type { SkillRegistry } from "@sunpilot/skill-runner";
+import { WorkflowToolExecutor, workflowToToolDescriptor } from "@sunpilot/workflow";
 
 import type { LlmProvider } from "@sunpilot/core";
 
@@ -59,17 +62,36 @@ export function createAgentLoopService(deps: {
   database: DatabaseContext;
   skillRegistry: SkillRegistry;
   skillRunner?: import("@sunpilot/skill-runner").SkillRunner;
-  workflowRuntime?: import("@sunpilot/core").SunPilotRuntime;
   llmProvider: LlmProvider;
+  eventBus?: AgentEventBus;
+  /** Persisted-event bus for external consumers.
+   *  Created internally if not provided. */
+  liveEventBus?: AgentEventBus;
   systemPrompt?: string;
 }): AgentService {
   // ── Foundation ─────────────────────────────────────────────────
-  const eventBus = new InMemoryAgentEventBus();
+  const rawEventBus = deps.eventBus ?? new InMemoryAgentEventBus();
+  const liveEventBus = deps.liveEventBus ?? new InMemoryAgentEventBus();
   const abortRegistry = new AbortRegistry();
   const runStateManager = new RepositoryRunStateManager(deps.database);
   const eventSink = new RepositoryAgentEventSink(deps.database);
   const agentRunInitializer = new RepositoryAgentRunInitializer(deps.database);
-  eventBus.subscribe((event) => eventSink.persist(event));
+
+  // Wire: rawEventBus → persist → liveEventBus.
+  // Internal components emit to rawEventBus; the persist subscriber bridges
+  // persisted events to liveEventBus, which WebSocket broadcasters and
+  // external stream hooks consume. This ensures all externally visible
+  // events carry a real DB sequence (no sequence: -1 duplicates).
+  rawEventBus.subscribe(async (event) => {
+    if (event.sequence !== undefined) {
+      // Already persisted (e.g. atomically created with DB sequence) —
+      // forward directly to liveEventBus without re-persisting.
+      liveEventBus.publish(event);
+      return;
+    }
+    const persisted = await eventSink.persist(event);
+    if (persisted) liveEventBus.publish(persisted);
+  });
 
   // ── Context ────────────────────────────────────────────────────
   const contextBuilder = new ContextBuilder({
@@ -126,12 +148,15 @@ export function createAgentLoopService(deps: {
         ...skillCapabilities,
         ...workflows
           .filter((workflow) => workflow.enabled)
-          .map((workflow) => ({
-            id: `workflow.${workflow.id}`,
-            name: workflow.title,
-            description: workflowDescription(workflow.definition),
-            category: "workflow" as const,
-          })),
+          .map((workflow) => {
+            const descriptor = workflowToToolDescriptor(workflow);
+            return {
+              id: descriptor.id,
+              name: descriptor.name,
+              description: descriptor.description,
+              category: descriptor.category,
+            };
+          }),
       ];
     },
     listArtifacts: async (runId) => {
@@ -202,19 +227,13 @@ export function createAgentLoopService(deps: {
       const workflows = await deps.database.workflows.list();
       return [
         ...skillCapabilities,
-        ...workflows.map((workflow) => ({
-          id: `workflow.${workflow.id}`,
-          name: workflow.title,
-          description: workflowDescription(workflow.definition),
-          category: "workflow" as const,
-          enabled: workflow.enabled,
-          permissions: [],
-          defaultTimeoutMs: 60_000,
-          maxTimeoutMs: 300_000,
-          supportsAbort: false,
-          idempotent: false,
-          riskHints: { defaultRisk: "medium" as const },
-        })),
+        ...workflows.map((workflow) => {
+          const descriptor = workflowToToolDescriptor(workflow);
+          return {
+            ...descriptor,
+            permissions: [] as Permission[],
+          };
+        }),
       ];
     },
   });
@@ -233,152 +252,70 @@ export function createAgentLoopService(deps: {
   const planner = new RuleBasedPlanner();
 
   // ── Execution ──────────────────────────────────────────────────
-  const toolExecutor = {
-    async execute(params: {
-      runId: string;
-      toolCallId: string;
-      skillId: string;
-      name: string;
-      arguments: Record<string, unknown>;
-      timeoutMs: number;
-      signal: AbortSignal;
-    }) {
-      if (params.skillId.startsWith("workflow.")) {
-        if (!deps.workflowRuntime) {
-          return {
-            status: "failed" as const,
-            summary: "Workflow runtime is not configured for Agent execution.",
-            artifacts: [],
-            error: {
-              code: "AGENT_WORKFLOW_EXECUTION_FAILED",
-              message:
-                "Workflow runtime is not configured for Agent execution.",
-            },
-          };
-        }
-        const workflowId = params.skillId.slice("workflow.".length);
-        try {
-          const workflowRun = await deps.workflowRuntime.createRun(
-            {
-              ...params.arguments,
-              parentAgentRunId: params.runId,
-              toolCallId: params.toolCallId,
-            },
-            workflowId,
-            "approval_required",
-          );
-          return {
-            status: "completed" as const,
-            summary: `Workflow ${workflowId} started as ${workflowRun.id} with status ${workflowRun.status}.`,
-            content: JSON.stringify({
-              workflowRunId: workflowRun.id,
-              status: workflowRun.status,
-            }),
-            artifacts: [],
-          };
-        } catch (error) {
-          const message =
-            error instanceof Error ? error.message : String(error);
-          return {
-            status: "failed" as const,
-            summary: message,
-            artifacts: [],
-            error: {
-              code: "AGENT_WORKFLOW_EXECUTION_FAILED",
-              message,
-            },
-          };
-        }
-      }
-
-      if (!deps.skillRunner) {
-        return {
-          status: "failed" as const,
-          summary: "SkillRunner is not configured for Agent tool execution.",
-          artifacts: [],
-          error: {
-            code: "AGENT_TOOL_EXECUTION_FAILED",
-            message: "SkillRunner is not configured for Agent tool execution.",
-          },
-        };
-      }
-
-      const target = resolveCapability(
-        deps.skillRegistry.list(),
-        params.skillId,
-      );
-      if (!target) {
-        return {
-          status: "failed" as const,
-          summary: `No enabled skill capability found for ${params.skillId}.`,
-          artifacts: [],
-          error: {
-            code: "AGENT_TOOL_NOT_FOUND",
-            message: `No enabled skill capability found for ${params.skillId}.`,
-          },
-        };
-      }
-
-      const beforeArtifacts = new Set(
-        (await deps.database.artifacts.list(params.runId)).map(
-          (artifact) => artifact.id,
-        ),
-      );
-      const step: StepRecord = {
-        id: params.toolCallId,
-        runId: params.runId,
-        type: "skill",
-        name: target.capability.title,
-        status: "running",
-        skillId: target.skill.id,
-        capability: target.capability.name,
-        input: params.arguments,
-      };
-      await deps.database.steps.create(step);
-
-      try {
-        const output = await deps.skillRunner.execute(step);
-        await deps.database.steps.updateStatus(step.id, "completed", output);
-        const artifacts = (await deps.database.artifacts.list(params.runId))
-          .filter((artifact) => !beforeArtifacts.has(artifact.id))
-          .map(toArtifactRef);
-        return {
-          status: "completed" as const,
-          summary: summarizeToolOutput(output),
-          content: typeof output === "string" ? output : undefined,
-          artifacts,
-        };
-      } catch (error) {
-        const status: "cancelled" | "failed" = params.signal.aborted
-          ? "cancelled"
-          : "failed";
-        const message = error instanceof Error ? error.message : String(error);
-        await deps.database.steps.updateStatus(step.id, status, undefined, {
-          code:
-            status === "cancelled"
-              ? "AGENT_RUN_CANCELLED"
-              : "AGENT_TOOL_EXECUTION_FAILED",
-          message,
-        });
-        return {
-          status,
-          summary: message,
-          artifacts: [],
-          error: {
-            code:
-              status === "cancelled"
-                ? "AGENT_RUN_CANCELLED"
-                : "AGENT_TOOL_EXECUTION_FAILED",
-            message,
-          },
-        };
-      }
+  // Workflow executor: delegates to @sunpilot/workflow WorkflowToolExecutor.
+  const workflowToolExecutor = new WorkflowToolExecutor({
+    findWorkflow: (id) => deps.database.workflows.findById(id),
+    getRun: async (runId) =>
+      (await deps.database.runs.findById(runId)) ?? undefined,
+    createStep: async (step) => {
+      await deps.database.steps.create({
+        id: step.id,
+        runId: step.runId,
+        type: step.type as "skill" | "approval" | "builtin" | "manual",
+        name: step.name,
+        status: step.status as StepRecord["status"],
+        skillId: step.skillId,
+        input: step.input ?? {},
+      });
     },
-  };
+    updateStepStatus: (id, status, output, error) =>
+      deps.database.steps.updateStatus(
+        id,
+        status as "completed" | "failed" | "cancelled" | "interrupted",
+        output,
+        error,
+      ),
+  });
+
+  // Workflow executor adapter: bridges ToolExecutor interface
+  // to WorkflowToolExecutor from @sunpilot/workflow.
+  const workflowExecutor = new WorkflowToolExecutorAdapter(workflowToolExecutor);
+
+  // Skill executor: delegates to SkillToolExecutor in core.
+  const skillExecutor = new SkillToolExecutor({
+    listSkills: () => deps.skillRegistry.list(),
+    runSkill: async (step) => {
+      if (!deps.skillRunner) {
+        throw new Error(
+          "SkillRunner is not configured for Agent tool execution.",
+        );
+      }
+      return deps.skillRunner.execute(step);
+    },
+    createStep: async (step) => {
+      await deps.database.steps.create({
+        id: step.id,
+        runId: step.runId,
+        type: step.type as "skill" | "approval" | "builtin" | "manual",
+        name: step.name,
+        status: step.status as StepRecord["status"],
+        skillId: step.skillId,
+        input: step.input ?? {},
+      });
+    },
+    updateStepStatus: (id, status, output, error) =>
+      deps.database.steps.updateStatus(id, status, output, error),
+    listArtifacts: async (runId) => deps.database.artifacts.list(runId),
+  });
+
+  const toolExecutor = new ToolExecutorBridge({
+    skillExecutor,
+    workflowExecutor,
+  });
 
   const executionOrchestrator = new ExecutionOrchestrator({
     toolExecutor,
-    eventBus,
+    eventBus: rawEventBus,
     toolCalls: deps.database.toolCalls,
   });
 
@@ -388,7 +325,7 @@ export function createAgentLoopService(deps: {
   // ── Response ───────────────────────────────────────────────────
   const responseComposer = new ResponseComposer({
     llm: deps.llmProvider,
-    eventBus,
+    eventBus: rawEventBus,
     modelCalls: deps.database.modelCalls,
     saveMessage: async (input) => {
       try {
@@ -421,7 +358,7 @@ export function createAgentLoopService(deps: {
     reflectionEngine,
     responseComposer,
     runStateManager,
-    eventBus,
+    eventBus: rawEventBus,
     approvalRequestService,
     memoryWriter,
   });
@@ -430,7 +367,8 @@ export function createAgentLoopService(deps: {
   const config: AgentLoopServiceConfig = {
     loopEngine,
     abortRegistry,
-    eventBus,
+    eventBus: rawEventBus,
+    liveEventBus,
     runStateManager,
     approvalGate,
     approvalDecisionService,
@@ -494,30 +432,6 @@ export function createAgentLoopService(deps: {
   return new AgentService(config);
 }
 
-function resolveCapability(
-  skills: InstalledSkillRecord[],
-  requested: string,
-):
-  | {
-      skill: InstalledSkillRecord;
-      capability: InstalledSkillRecord["manifest"]["capabilities"][number];
-    }
-  | undefined {
-  const [skillId, capabilityName] = requested.includes(":")
-    ? requested.split(":", 2)
-    : [undefined, requested];
-
-  for (const skill of skills) {
-    if (!skill.enabled) continue;
-    if (skillId && skill.id !== skillId) continue;
-    const capability = skill.manifest.capabilities.find(
-      (item) => item.name === capabilityName,
-    );
-    if (capability) return { skill, capability };
-  }
-  return undefined;
-}
-
 function categoryFromCapability(
   capability: string,
 ):
@@ -538,26 +452,6 @@ function categoryFromCapability(
   if (capability.startsWith("workflow")) return "workflow";
   if (capability.startsWith("code")) return "code";
   return "custom";
-}
-
-function summarizeToolOutput(output: unknown): string {
-  if (typeof output === "string") return output;
-  if (output === undefined) return "Tool completed.";
-  try {
-    return JSON.stringify(output);
-  } catch {
-    return String(output);
-  }
-}
-
-function workflowDescription(definition: unknown): string {
-  if (definition && typeof definition === "object") {
-    const description = (definition as { description?: unknown }).description;
-    if (typeof description === "string" && description.trim()) {
-      return description;
-    }
-  }
-  return "Run a structured workflow.";
 }
 
 function normalizeCapabilityPermissions(permissions: string[]): Permission[] {
@@ -597,20 +491,6 @@ function normalizeCapabilityPermissions(permissions: string[]): Permission[] {
     }
   });
   return [...new Set(normalized)];
-}
-
-function toArtifactRef(artifact: ArtifactRecord): {
-  id: string;
-  name: string;
-  type: string;
-  version?: number;
-} {
-  return {
-    id: artifact.id,
-    name: artifact.name,
-    type: artifact.type,
-    version: artifact.version,
-  };
 }
 
 function toolResultSummary(result: unknown): string | undefined {

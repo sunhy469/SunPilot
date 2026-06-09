@@ -13,6 +13,9 @@ import type { AgentEventType } from '@sunpilot/protocol';
  * 订阅者调用规则：
  * - 同步订阅者：按注册顺序同步调用，异常被捕获并记录
  * - 异步订阅者：fire-and-forget，不阻塞 emit/publish 返回
+ * - 调用方如需等待异步订阅者完成（例如在退订 liveEventBus 前
+ *   确保 persist bridge 已将所有待处理事件发布到 liveEventBus），
+ *   可调用 flush() 等待所有 pending 异步监听器 settle。
  */
 
 export interface AgentEvent<P = Record<string, unknown>> {
@@ -45,12 +48,25 @@ export interface AgentEventBus {
    */
   subscribe(listener: AgentEventListener): () => void;
 
+  /**
+   * Wait for all currently pending async listeners to settle.
+   * After resolution, all events published before the flush() call
+   * have been processed by async subscribers (e.g. the persist bridge
+   * has published them to liveEventBus).
+   *
+   * New events published concurrently with flush() may or may not be
+   * covered — callers that need deterministic coverage should pause
+   * event emission before calling flush().
+   */
+  flush(): Promise<void>;
+
   /** Number of active subscribers. */
   readonly subscriberCount: number;
 }
 
 export class InMemoryAgentEventBus implements AgentEventBus {
   private listeners: AgentEventListener[] = [];
+  private pending: Set<Promise<void>> = new Set();
 
   emit<T extends Record<string, unknown>>(
     type: AgentEventType,
@@ -74,14 +90,29 @@ export class InMemoryAgentEventBus implements AgentEventBus {
       try {
         const result = listener(event);
         // Fire-and-forget async listeners; errors are logged but not thrown.
+        // Track pending promises so flush() can wait for them.
         if (result instanceof Promise) {
-          result.catch((err) => {
-            console.error('[AgentEventBus] async listener error:', err);
-          });
+          const tracked = result
+            .catch((err) => {
+              console.error('[AgentEventBus] async listener error:', err);
+            })
+            .finally(() => {
+              this.pending.delete(tracked);
+            });
+          this.pending.add(tracked);
         }
       } catch (err) {
         console.error('[AgentEventBus] sync listener error:', err);
       }
+    }
+  }
+
+  async flush(): Promise<void> {
+    // Drain all pending async listeners.  New listeners may be enqueued
+    // while we drain, so loop until the set is truly empty.
+    while (this.pending.size > 0) {
+      const snapshot = Array.from(this.pending);
+      await Promise.all(snapshot);
     }
   }
 

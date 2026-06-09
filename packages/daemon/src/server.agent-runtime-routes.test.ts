@@ -2,11 +2,12 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
-import type {
-  ApprovalRecord,
-  ArtifactRecord,
-  RunRecord,
-  SunPilotEvent,
+import {
+  AuditActor,
+  type ApprovalRecord,
+  type ArtifactRecord,
+  type RunRecord,
+  type SunPilotEvent,
 } from "@sunpilot/protocol";
 import { InMemoryDatabaseContext } from "@sunpilot/storage";
 import { createDaemon } from "./server.js";
@@ -278,7 +279,7 @@ describe("daemon Agent runtime REST routes", () => {
         statusHistory: [
           {
             nextStatus: "waiting_approval",
-            actor: "system",
+            actor: AuditActor.System,
             createdAt: "2026-06-06T00:00:01.000Z",
           },
         ],
@@ -313,7 +314,7 @@ describe("daemon Agent runtime REST routes", () => {
         expect.objectContaining({
           action: "approval.expired",
           target: "approval_expired",
-          actor: "daemon",
+          actor: AuditActor.Daemon,
         }),
       ]),
     );
@@ -356,12 +357,6 @@ describe("daemon Agent runtime REST routes", () => {
       status: "running",
       input: {},
     });
-    await db.jobs.create({
-      id: "job_executing",
-      runId: "run_executing",
-      status: "running",
-      payload: {},
-    });
     await db.runs.create({
       ...baseRun,
       id: "run_responding",
@@ -399,9 +394,6 @@ describe("daemon Agent runtime REST routes", () => {
     );
     await expect(db.steps.listByRunId("run_executing")).resolves.toEqual([
       expect.objectContaining({ id: "step_executing", status: "interrupted" }),
-    ]);
-    await expect(db.jobs.list("run_executing")).resolves.toEqual([
-      expect.objectContaining({ id: "job_executing", status: "interrupted" }),
     ]);
     await expect(db.runs.findById("run_responding")).resolves.toEqual(
       expect.objectContaining({
@@ -895,15 +887,10 @@ describe("daemon Agent runtime REST routes", () => {
     const response = await daemon.app.inject({
       method: "POST",
       url: "/v1/runs",
-      payload: { mode: "workflow", input: { message: "run workflow" } },
+      payload: { mode: "agent", input: { message: "test" } },
     });
 
-    expect(response.statusCode).toBe(410);
-    expect(response.json()).toEqual({
-      error: "legacy_runtime_removed",
-      message:
-        "POST /v1/runs has been removed. Start Agent runs through /v1/chat or WebSocket chat.send.",
-    });
+    expect(response.statusCode).toBe(404);
   });
 
   test("lists artifact metadata and streams artifact content through REST", async () => {

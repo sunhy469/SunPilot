@@ -1,6 +1,5 @@
 import type { AgentService } from "@sunpilot/core";
 import type { DatabaseContext } from "@sunpilot/storage";
-import type { RepositoryRuntimeStore } from "@sunpilot/core";
 import {
   approvalDecideSchema,
   chatSendSchema,
@@ -55,22 +54,10 @@ export interface JsonRpcRouterDeps {
     >
   >;
   database: DatabaseContext;
-  runtimeStore: RepositoryRuntimeStore;
 }
 
 /**
  * JSON-RPC 路由器 — daemon 的命令分发中枢。
- *
- * 职责：
- * - 将前端 WebSocket 发来的 JSON-RPC method 路由到对应的服务方法
- * - chat.send 是核心路由：参数校验 → AgentService.handleChatCommand → 流式事件通知
- * - 事件通知通过 ctx.notify 回调推回 WebSocket（server.ts 中绑定）
- *
- * 路由方法一览：
- * - chat.send / chat.stop  → AgentService
- * - run.cancel / run.resume / run.retry → AgentService
- * - approval.approve / approval.reject → AgentService
- * - run.subscribe / conversation.subscribe → 注册事件订阅过滤器
  */
 export class JsonRpcRouter {
   constructor(private readonly deps: JsonRpcRouterDeps) {}
@@ -187,7 +174,7 @@ export class JsonRpcRouter {
         const runId = params.runId ?? "*";
         ctx.runSubscriptions.add(runId);
         const events =
-          runId === "*" ? [] : await this.deps.runtimeStore.listEvents(runId);
+          runId === "*" ? [] : await this.deps.database.events.listByRunId(runId);
         return { result: { runId, events } };
       }
 

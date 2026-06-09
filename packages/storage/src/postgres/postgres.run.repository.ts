@@ -12,12 +12,12 @@ export class PostgresRunRepository implements RunRepository {
   async create(input: CreateRunInput): Promise<RunRecord> {
     const result = await this.pool.query(
       `INSERT INTO runs (
-         id, title, conversation_id, status, mode, workflow_id,
+         id, title, conversation_id, status, mode,
          user_id, goal, error, cancelled_at,
          created_at, updated_at, completed_at, input, context
        )
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10, $11, $12, $13, $14::jsonb, $15::jsonb)
-       RETURNING id, title, conversation_id, status, mode, workflow_id, user_id, goal, error,
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11, $12, $13::jsonb, $14::jsonb)
+       RETURNING id, title, conversation_id, status, mode, user_id, goal, error,
          created_at, updated_at, completed_at, cancelled_at, input, context`,
       [
         input.id,
@@ -25,7 +25,6 @@ export class PostgresRunRepository implements RunRepository {
         input.conversationId ?? null,
         input.status,
         input.mode,
-        input.workflowId ?? null,
         input.userId ?? null,
         input.goal ?? null,
         input.error === undefined ? null : JSON.stringify(input.error),
@@ -42,7 +41,7 @@ export class PostgresRunRepository implements RunRepository {
 
   async findById(id: string): Promise<RunRecord | null> {
     const result = await this.pool.query(
-      `SELECT id, title, conversation_id, status, mode, workflow_id, user_id, goal, error,
+      `SELECT id, title, conversation_id, status, mode, user_id, goal, error,
          created_at, updated_at, completed_at, cancelled_at, input, context
        FROM runs WHERE id = $1`,
       [id],
@@ -78,7 +77,7 @@ export class PostgresRunRepository implements RunRepository {
     }
     values.push(limit);
     const result = await this.pool.query(
-      `SELECT id, title, conversation_id, status, mode, workflow_id, user_id, goal, error,
+      `SELECT id, title, conversation_id, status, mode, user_id, goal, error,
          created_at, updated_at, completed_at, cancelled_at, input, context
        FROM runs
        ${conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : ""}
@@ -90,22 +89,28 @@ export class PostgresRunRepository implements RunRepository {
 
   async updateStatus(
     id: string,
-    status: RunStatus,
-    completedAt?: string,
-    error?: unknown,
+    input: {
+      status: RunStatus;
+      updatedAt?: string;
+      completedAt?: string;
+      cancelledAt?: string;
+      error?: unknown;
+    },
   ): Promise<void> {
     await this.pool.query(
       `UPDATE runs
        SET status = $1,
-           updated_at = NOW(),
-           completed_at = COALESCE($2, completed_at),
-           cancelled_at = CASE WHEN $1 = 'cancelled' THEN COALESCE($2, NOW()) ELSE cancelled_at END,
-           error = COALESCE($3::jsonb, error)
-       WHERE id = $4`,
+           updated_at = COALESCE($2, NOW()),
+           completed_at = COALESCE($3, completed_at),
+           cancelled_at = COALESCE($4, cancelled_at),
+           error = COALESCE($5::jsonb, error)
+       WHERE id = $6`,
       [
-        status,
-        completedAt ?? null,
-        error === undefined ? null : JSON.stringify(error),
+        input.status,
+        input.updatedAt ?? null,
+        input.completedAt ?? null,
+        input.cancelledAt ?? null,
+        input.error === undefined ? null : JSON.stringify(input.error),
         id,
       ],
     );
@@ -150,7 +155,6 @@ function mapRun(row: any): RunRecord {
     conversationId: row.conversation_id ?? undefined,
     status: row.status as RunStatus,
     mode: row.mode as RunMode,
-    workflowId: row.workflow_id ?? undefined,
     userId: row.user_id ?? undefined,
     goal: row.goal ?? undefined,
     error: row.error ?? undefined,

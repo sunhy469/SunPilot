@@ -32,7 +32,7 @@ export interface AgentLoopInput {
   userMessageId: string;
   userId?: string;
   message: string;
-  mode: "chat" | "agent" | "workflow";
+  mode: "chat" | "agent";
   attachments?: AttachmentRef[];
   client: {
     source: "web" | "cli" | "api";

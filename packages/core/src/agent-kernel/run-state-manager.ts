@@ -1,34 +1,11 @@
+import { AuditActor } from '@sunpilot/protocol';
 import type {
   AgentLoopStatus,
   AgentLoopInput,
   AgentLoopResult,
   ToolDecision,
 } from './loop-types.js';
-
-/**
- * Agent Loop 状态机的合法状态转换表。
- *
- * 每个状态可以转换到的一组"下一状态"。
- * 不在合法转换表中的转换会抛出 AGENT_RUN_STATE_CONFLICT 错误。
- * 终态（completed / cancelled / failed）没有合法后续转换。
- *
- * 架构文档 §9.5 包含完整的状态转换图。
- */
-const LEGAL_TRANSITIONS: Record<AgentLoopStatus, readonly AgentLoopStatus[]> = {
-  created: ['context_building', 'cancelled', 'failed'],
-  context_building: ['intent_routing', 'cancelled', 'failed'],
-  intent_routing: ['planning', 'tool_deciding', 'responding', 'cancelled', 'failed'],
-  planning: ['tool_deciding', 'waiting_approval', 'cancelled', 'failed'],
-  tool_deciding: ['waiting_approval', 'executing', 'responding', 'cancelled', 'failed'],
-  waiting_approval: ['executing', 'cancelled', 'failed'],
-  executing: ['observing', 'reflecting', 'responding', 'waiting_approval', 'cancelled', 'failed'],
-  observing: ['reflecting', 'responding', 'cancelled', 'failed'],
-  reflecting: ['tool_deciding', 'responding', 'cancelled', 'failed'],
-  responding: ['completed', 'cancelled', 'failed'],
-  completed: [],
-  cancelled: [],
-  failed: [],
-};
+import { LEGAL_TRANSITIONS } from './state/run-state-machine.js';
 
 export interface RunState {
   runId: string;
@@ -184,7 +161,7 @@ export class InMemoryRunStateManager implements RunStateManager {
       previousStatus,
       nextStatus,
       reason,
-      actor: 'system',
+      actor: AuditActor.System,
       createdAt: new Date().toISOString(),
     });
   }

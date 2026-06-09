@@ -1,5 +1,5 @@
 import { ZodError } from "zod";
-import { RuntimeError } from "@sunpilot/core";
+import { RuntimeError, type AgentEvent } from "@sunpilot/core";
 import {
   AGENT_ERROR_CODES,
   agentErrorToJsonRpcCode,
@@ -13,13 +13,6 @@ const AGENT_ERROR_CODE_SET = new Set<string>(AGENT_ERROR_CODES);
 
 /**
  * 将各类错误映射为 JSON-RPC 标准错误对象。
- *
- * 映射优先级：
- * 1. SyntaxError → JSON-RPC PARSE_ERROR
- * 2. ZodError → JSON-RPC INVALID_PARAMS
- * 3. 已知 AgentErrorCode → 通过 agentErrorToJsonRpcCode 映射
- * 4. RuntimeError → AGENT_DOMAIN_ERROR
- * 5. 其他 → INTERNAL_ERROR
  */
 export function rpcError(error: unknown): {
   code: number;
@@ -124,19 +117,14 @@ function normalizeAgentErrorCategory(category: unknown): AgentErrorCategory {
 }
 
 export function agentEventParams(
-  event:
-    | Pick<
-        SunPilotEvent,
-        "id" | "sequence" | "runId" | "conversationId" | "payload" | "createdAt"
-      >
-    | {
-        id: string;
-        sequence?: number;
-        runId?: string;
-        conversationId?: string;
-        payload: unknown;
-        createdAt: string;
-      },
+  event: {
+    id: string;
+    sequence?: number;
+    runId?: string;
+    conversationId?: string;
+    payload: unknown;
+    createdAt: string;
+  },
 ): {
   eventId: string;
   sequence: number;
@@ -147,7 +135,7 @@ export function agentEventParams(
 } {
   return {
     eventId: event.id,
-    sequence: event.sequence ?? 0,
+    sequence: event.sequence ?? -1,
     runId: event.runId,
     conversationId: event.conversationId,
     createdAt: event.createdAt,
@@ -159,30 +147,21 @@ export function agentEventParams(
 }
 
 /**
- * 将 SunPilotEvent 转换为 JSON-RPC 通知格式。
- *
- * 约定：
- * - agent.* 类型事件 → method 直接使用事件类型名（如 "agent.response.delta"）
- * - 非 agent.* 事件 → method 统一为 "agent.runtime.event"，原始事件放在 params.event 中
- *
- * 前端根据 method 字段区分事件类型并更新 UI。
+ * 将事件转换为 JSON-RPC 通知格式。
+ * 所有事件均为 agent.* 类型，method 直接使用事件类型名。
+ * 接受 AgentEvent（live 事件）或 SunPilotEvent（DB 事件）。
  */
-export function websocketNotificationForEvent(event: SunPilotEvent): {
+export function websocketNotificationForEvent(
+  event: AgentEvent | SunPilotEvent,
+): {
   jsonrpc: "2.0";
   method: string;
   params: unknown;
 } {
-  if (typeof event.type === "string" && event.type.startsWith("agent.")) {
-    return {
-      jsonrpc: "2.0",
-      method: event.type,
-      params: agentEventParams(event),
-    };
-  }
   return {
     jsonrpc: "2.0",
-    method: "agent.runtime.event",
-    params: { runId: event.runId, event },
+    method: event.type,
+    params: agentEventParams(event),
   };
 }
 

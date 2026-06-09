@@ -127,21 +127,24 @@ export class ExecutionOrchestrator implements ExecutionOrchestratorInterface {
     summary: ToolCallSummary;
     artifacts: ArtifactRef[];
   }> {
+    // Create tool call record once, before any retry attempt
+    const now = new Date().toISOString();
+    await this.deps.toolCalls?.create({
+      id: call.id,
+      runId,
+      skillId: call.skillId,
+      name: call.name,
+      arguments: call.arguments,
+      status: "running",
+      riskLevel: normalizeRiskLevel(call.riskLevel),
+      startedAt: now,
+    });
+
     let lastError: Error | undefined;
 
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
       try {
-        // Emit tool.started event
-        await this.deps.toolCalls?.create({
-          id: call.id,
-          runId,
-          skillId: call.skillId,
-          name: call.name,
-          arguments: call.arguments,
-          status: "running",
-          riskLevel: normalizeRiskLevel(call.riskLevel),
-          startedAt: new Date().toISOString(),
-        });
+        // Emit tool.started event for each attempt
         this.deps.eventBus.emit(
           "agent.tool.started",
           {

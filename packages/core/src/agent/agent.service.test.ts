@@ -12,6 +12,20 @@ function createService(
   } = {},
 ) {
   const eventBus = new InMemoryAgentEventBus();
+  const liveEventBus = new InMemoryAgentEventBus();
+  // Bridge raw → live (simulates the persist subscriber in composition-root).
+  // Uses an async listener to mirror the real RepositoryAgentEventSink.persist()
+  // behaviour — this is fire-and-forget by the bus, so without flush() the
+  // publish to liveEventBus could race with unsubLive() in handleChatCommand.
+  let syntheticSequence = 0;
+  eventBus.subscribe(async (event) => {
+    // Simulate async DB persist delay (at least one microtick).
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    liveEventBus.publish({
+      ...event,
+      sequence: event.sequence ?? ++syntheticSequence,
+    });
+  });
   const conversations = new InMemoryAgentConversationStore();
   const run =
     overrides.run ??
@@ -61,6 +75,7 @@ function createService(
     } as any,
     abortRegistry: new AbortRegistry(),
     eventBus,
+    liveEventBus,
     runStateManager: {
       createRun: async () => undefined,
       markCancelled: async (runId: string) => ({
@@ -86,7 +101,7 @@ function createService(
     ...overrides,
   });
 
-  return { service, conversations, eventBus };
+  return { service, conversations, eventBus, liveEventBus };
 }
 
 describe("AgentService", () => {
@@ -125,9 +140,9 @@ describe("AgentService", () => {
     ]);
     expect(events).toEqual([
       "user:hello",
-      `started:${response.message.id}`,
       "delta:hello from ",
       "delta:agent loop",
+      `started:${response.message.id}`,
       `assistant:${response.message.id}:hello from agent loop`,
     ]);
   });
@@ -404,5 +419,110 @@ describe("AgentService", () => {
     await expect(service.resumeRun("run_done")).rejects.toMatchObject({
       code: "AGENT_RUN_STATE_CONFLICT",
     });
+  });
+
+  test("normal agent.* events delivered via onEvent carry a real sequence (> 0)", async () => {
+    const observed: Array<{ type: string; sequence: number }> = [];
+    const { service } = createService();
+
+    await service.handleChatCommand(
+      { message: "seq check" },
+      { source: "api" },
+      {
+        onEvent(event) {
+          observed.push({
+            type: event.type,
+            sequence: event.sequence ?? -1,
+          });
+        },
+      },
+    );
+
+    // Every normal (non-error) agent.* event must have a real sequence.
+    const normal = observed.filter((e) => e.type !== "agent.error");
+    expect(normal.length).toBeGreaterThan(0);
+    for (const e of normal) {
+      expect(
+        e.sequence,
+        `event ${e.type} should have sequence > 0, got ${e.sequence}`,
+      ).toBeGreaterThan(0);
+    }
+  });
+
+  test("handleChatCommand does not miss live events when persist bridge is slow", async () => {
+    // This test simulates a slow async persist bridge (the real race condition).
+    // The bridge delays each publish by several ticks; flush() must wait for
+    // all pending persists before unsubLive(), otherwise events are lost.
+    const { service, eventBus, liveEventBus } = createService();
+    let resolveBarrier!: () => void;
+    const barrier = new Promise<void>((resolve) => {
+      resolveBarrier = resolve;
+    });
+
+    // Install a second, slower async listener on raw eventBus to simulate
+    // a persist that takes longer than the loop.
+    eventBus.subscribe(async (event) => {
+      await barrier; // held until we release it
+      liveEventBus.publish({
+        ...event,
+        sequence: event.sequence ?? 999,
+        type: `slow.${event.type}` as any,
+      });
+    });
+
+    const onEventCalls: Array<{ type: string }> = [];
+    let handleResolved = false;
+
+    const handlePromise = service
+      .handleChatCommand(
+        { message: "slow persist" },
+        { source: "web" },
+        {
+          onEvent(event) {
+            onEventCalls.push({ type: event.type });
+          },
+        },
+      )
+      .then((result) => {
+        handleResolved = true;
+        return result;
+      });
+
+    // Let the loop finish and flush() start waiting.
+    // The slow listener is blocked on the barrier, so flush() will not
+    // resolve until we release it.
+    await new Promise((resolve) => setTimeout(resolve, 5));
+
+    // handleChatCommand should NOT have resolved yet — it's waiting in flush()
+    // for the slow persist bridge to complete.
+    expect(handleResolved).toBe(false);
+
+    // Release the slow persist.
+    resolveBarrier();
+    const response = await handlePromise;
+
+    expect(response.status).toBe("completed");
+    // The slow-published events should have been delivered before handleChatCommand returned.
+    const slowEvents = onEventCalls.filter((e) => e.type.startsWith("slow."));
+    expect(slowEvents.length).toBeGreaterThan(0);
+  });
+
+  test("onDelta receives delta events via raw eventBus without waiting for persist", async () => {
+    // Verify that delta streaming is low-latency: deltas arrive during
+    // loop execution via the raw eventBus, not after persist.
+    const deltas: string[] = [];
+    const { service } = createService();
+
+    await service.handleChatCommand(
+      { message: "stream deltas" },
+      { source: "api" },
+      {
+        onDelta(delta) {
+          deltas.push(delta.delta);
+        },
+      },
+    );
+
+    expect(deltas).toEqual(["hello from ", "agent loop"]);
   });
 });
