@@ -4,7 +4,6 @@ import type {
   AuditRepository,
   ConversationRepository,
   EventRepository,
-  JobRepository,
   IdempotencyRepository,
   MemoryRepository,
   MessageRepository,
@@ -32,7 +31,6 @@ export interface DatabaseContext {
   memory: MemoryRepository;
   settings: SettingRepository;
   audit: AuditRepository;
-  jobs: JobRepository;
   idempotency: IdempotencyRepository;
   workflows: WorkflowRepository;
   skills: SkillRepository;

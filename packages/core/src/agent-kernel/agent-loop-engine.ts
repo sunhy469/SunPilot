@@ -74,277 +74,202 @@ export interface ApprovalResumeInput {
 export class AgentLoopEngine {
   constructor(private readonly deps: AgentLoopEngineDeps) {}
 
+  /**
+   * 主流程编排器 — 将 Agent Loop 各阶段委托给专用 private 方法。
+   *
+   * 流程：buildContextAndIntent → maybeCreatePlan → decideTools →
+   *       handleUseTool | handleNoTool | handleClarification | handleApprovalRequired
+   */
   async run(
     input: AgentLoopInput,
     signal: AbortSignal,
   ): Promise<AgentLoopResult> {
-    const { runId, conversationId } = input;
-
     try {
-      // ── 阶段 1：上下文构建 ──────────────────────────────────────
-      // 从多数据源（对话历史、记忆、制品、工具结果、技能目录）收集上下文，
-      // 应用 Token 预算后返回统一的 AgentContext。
-      await this.deps.runStateManager.markStatus(runId, "context_building");
-      this.deps.eventBus.emit(
-        "agent.context.started",
-        { runId },
-        { runId, conversationId },
-      );
-
-      const context = await this.deps.contextBuilder.build(input, signal);
-
-      this.deps.eventBus.emit(
-        "agent.context.completed",
-        {
-          runId,
-          tokenEstimate: context.tokenEstimate,
-          included: {
-            messages: context.messages.length,
-            memories: context.memories.length,
-            artifacts: context.artifacts.length,
-            toolResults: context.toolResults.length,
-          },
-        },
-        { runId, conversationId },
-      );
-
-      // ── 阶段 2：意图路由 ──────────────────────────────────────
-      // 优先规则匹配（快速），失败后降级到 LLM 轻量分类，
-      // 返回 RoutedIntent（类型、候选技能、是否需要规划/审批/工具）。
-      await this.deps.runStateManager.markStatus(runId, "intent_routing");
-      const intent = await this.deps.intentRouter.route(context, signal);
-
-      this.deps.eventBus.emit(
-        "agent.intent.detected",
-        {
-          runId,
-          intent: intent.type,
-          confidence: intent.confidence,
-          candidateSkills: intent.candidateSkills,
-        },
-        { runId, conversationId },
-      );
-
-      // ── 阶段 3：规划（仅在意图需要时） ─────────────────────────
-      // 当前使用 RuleBasedPlanner，根据意图类型生成步骤计划（tool/response/approval）。
-      // 规划结果可被后续 tool_deciding 阶段直接使用（跳过 skill 匹配）。
-      let plan;
-      if (intent.requiresPlanning) {
-        await this.deps.runStateManager.markStatus(runId, "planning");
-        plan = await this.deps.planner.createPlan(context, intent, signal);
-
-        this.deps.eventBus.emit(
-          "agent.plan.created",
-          {
-            runId,
-            plan: {
-              id: plan.id,
-              goal: plan.goal,
-              summary: plan.summary,
-              steps: plan.steps.length,
-            },
-          },
-          { runId, conversationId },
-        );
-      }
-
-      // ── 阶段 4：工具决策 ──────────────────────────────────────
-      // 基于意图、计划、可用技能三者综合判断：
-      // - use_tool：匹配到可用技能 → 进入权限检查/审批/执行分支
-      // - no_tool：无需工具 → 直接进入 LLM 回答阶段
-      // - ask_clarification：信息不足 → 返回澄清问题
-      // - require_approval：决策阶段即需审批 → 暂停等待
-      await this.deps.runStateManager.markStatus(runId, "tool_deciding");
-      const decision = await this.deps.toolDecisionEngine.decide(
-        { context, intent, plan },
+      const { context, intent } = await this.buildContextAndIntent(
+        input,
         signal,
       );
+      const plan = await this.maybeCreatePlan(input, context, intent, signal);
+      const decision = await this.decideTools(input, context, intent, plan, signal);
 
-      // ── 分支 A：使用工具 ──────────────────────────────────────
-      if (decision.type === "use_tool") {
-        // Emit tool selected events
-        for (const tc of decision.toolCalls) {
-          this.deps.eventBus.emit(
-            "agent.tool.selected",
-            {
-              runId,
-              toolCallId: tc.id,
-              skillId: tc.skillId,
-              name: tc.name,
-              riskLevel: tc.riskLevel,
-            },
-            { runId, conversationId },
-          );
-        }
-
-        // 权限检查：对每个工具调用评估是否允许/需审批/应拒绝
-        for (const tc of decision.toolCalls) {
-          const permDecision = await this.deps.permissionPolicy.evaluate({
-            userId: input.userId,
-            runId,
-            skillId: tc.skillId,
-            permissions: tc.permissions,
-            arguments: tc.arguments,
-            context,
-          });
-
-          if (!permDecision.allowed) {
-            throw Object.assign(
-              new Error(
-                `Permission denied for ${tc.name}: ${permDecision.reasons.join(", ")}`,
-              ),
-              { code: "AGENT_PERMISSION_DENIED", category: "permission" },
-            );
-          }
-
-          if (permDecision.requiresApproval) {
-            const approvalRiskLevel = maxRiskLevel(
-              tc.riskLevel,
-              permDecision.riskLevel,
-            );
-            await this.requestApproval({
-              runId,
-              conversationId,
-              toolCallId: tc.id,
-              title: `Approve ${tc.name}`,
-              description: `Run tool ${tc.name} with risk level ${approvalRiskLevel}`,
-              riskLevel: approvalRiskLevel,
-              requestedAction: {
-                skillId: tc.skillId,
-                arguments: tc.arguments,
-                permissions: tc.permissions,
-              },
-            });
-
-            return {
-              runId,
-              conversationId,
-              status: "waiting_approval",
-              artifacts: [],
-              toolCalls: [],
-            };
-          }
-        }
-
-        return this.executeToolDecision(
-          input,
-          context,
-          intent,
-          plan,
-          decision,
-          signal,
-        );
-      }
-
-      // ── 分支 B：无需工具 ─────────────────────────────────────
-      // 直接通过 LLM 生成纯文本回答（不涉及工具调用）。
-      if (decision.type === "no_tool") {
-        await this.deps.runStateManager.markStatus(runId, "responding");
-
-        const response = await this.deps.responseComposer.composeDirect(
-          { input, context, intent, plan },
-          signal,
-        );
-
-        this.deps.eventBus.emit(
-          "agent.response.completed",
-          {
-            runId,
-            conversationId,
-            messageId: response.messageId,
-          },
-          { runId, conversationId },
-        );
-
-        await this.writeMemories({
-          input,
-          context,
-          intent,
-          plan,
-          responseMessageId: response.messageId,
-        });
-
-        await this.deps.runStateManager.markStatus(runId, "completed");
-        this.deps.eventBus.emit(
-          "agent.run.completed",
-          {
-            runId,
-            assistantMessageId: response.messageId,
+      switch (decision.type) {
+        case "use_tool":
+          return this.handleUseTool(input, context, intent, plan, decision, signal);
+        case "no_tool":
+          return this.handleNoTool(input, context, intent, plan, signal);
+        case "ask_clarification":
+          return this.handleClarification(input, decision, signal);
+        case "require_approval":
+          return this.handleApprovalRequired(input, decision, signal);
+        default:
+          // Fallback: treat as no_tool
+          await this.deps.runStateManager.markStatus(input.runId, "completed");
+          return {
+            runId: input.runId,
+            conversationId: input.conversationId,
+            status: "completed",
             artifacts: [],
-            toolCalls: 0,
-          },
-          { runId, conversationId },
-        );
+            toolCalls: [],
+          };
+      }
+    } catch (error) {
+      return this.handleLoopError(input, error, signal);
+    }
+  }
 
-        return {
+  // ── Phase methods ──────────────────────────────────────────────────
+
+  /** 阶段 1+2：上下文构建 + 意图路由。 */
+  private async buildContextAndIntent(
+    input: AgentLoopInput,
+    signal: AbortSignal,
+  ): Promise<{ context: AgentContext; intent: RoutedIntent }> {
+    const { runId, conversationId } = input;
+
+    await this.deps.runStateManager.markStatus(runId, "context_building");
+    this.deps.eventBus.emit(
+      "agent.context.started",
+      { runId },
+      { runId, conversationId },
+    );
+
+    const context = await this.deps.contextBuilder.build(input, signal);
+
+    this.deps.eventBus.emit(
+      "agent.context.completed",
+      {
+        runId,
+        tokenEstimate: context.tokenEstimate,
+        included: {
+          messages: context.messages.length,
+          memories: context.memories.length,
+          artifacts: context.artifacts.length,
+          toolResults: context.toolResults.length,
+        },
+      },
+      { runId, conversationId },
+    );
+
+    await this.deps.runStateManager.markStatus(runId, "intent_routing");
+    const intent = await this.deps.intentRouter.route(context, signal);
+
+    this.deps.eventBus.emit(
+      "agent.intent.detected",
+      {
+        runId,
+        intent: intent.type,
+        confidence: intent.confidence,
+        candidateSkills: intent.candidateSkills,
+      },
+      { runId, conversationId },
+    );
+
+    return { context, intent };
+  }
+
+  /** 阶段 3：规划（仅在意图需要时）。 */
+  private async maybeCreatePlan(
+    input: AgentLoopInput,
+    context: AgentContext,
+    intent: RoutedIntent,
+    signal: AbortSignal,
+  ): Promise<AgentPlan | undefined> {
+    if (!intent.requiresPlanning) return undefined;
+
+    const { runId, conversationId } = input;
+    await this.deps.runStateManager.markStatus(runId, "planning");
+    const plan = await this.deps.planner.createPlan(context, intent, signal);
+
+    this.deps.eventBus.emit(
+      "agent.plan.created",
+      {
+        runId,
+        plan: {
+          id: plan.id,
+          goal: plan.goal,
+          summary: plan.summary,
+          steps: plan.steps.length,
+        },
+      },
+      { runId, conversationId },
+    );
+
+    return plan;
+  }
+
+  /** 阶段 4：工具决策。 */
+  private async decideTools(
+    input: AgentLoopInput,
+    context: AgentContext,
+    intent: RoutedIntent,
+    plan: AgentPlan | undefined,
+    signal: AbortSignal,
+  ): Promise<ToolDecision> {
+    await this.deps.runStateManager.markStatus(input.runId, "tool_deciding");
+    return this.deps.toolDecisionEngine.decide(
+      { context, intent, plan },
+      signal,
+    );
+  }
+
+  // ── Branch handlers ────────────────────────────────────────────────
+
+  /** 分支 A：使用工具 — 权限检查 → 审批或执行。 */
+  private async handleUseTool(
+    input: AgentLoopInput,
+    context: AgentContext,
+    intent: RoutedIntent,
+    plan: AgentPlan | undefined,
+    decision: ToolDecision & { type: "use_tool" },
+    signal: AbortSignal,
+  ): Promise<AgentLoopResult> {
+    const { runId, conversationId } = input;
+
+    for (const tc of decision.toolCalls) {
+      this.deps.eventBus.emit(
+        "agent.tool.selected",
+        {
           runId,
-          conversationId,
-          assistantMessageId: response.messageId,
-          status: "completed",
-          artifacts: [],
-          toolCalls: [],
-        };
+          toolCallId: tc.id,
+          skillId: tc.skillId,
+          name: tc.name,
+          riskLevel: tc.riskLevel,
+        },
+        { runId, conversationId },
+      );
+    }
+
+    for (const tc of decision.toolCalls) {
+      const permDecision = await this.deps.permissionPolicy.evaluate({
+        userId: input.userId,
+        runId,
+        skillId: tc.skillId,
+        permissions: tc.permissions,
+        arguments: tc.arguments,
+        context,
+      });
+
+      if (!permDecision.allowed) {
+        throw Object.assign(
+          new Error(
+            `Permission denied for ${tc.name}: ${permDecision.reasons.join(", ")}`,
+          ),
+          { code: "AGENT_PERMISSION_DENIED", category: "permission" },
+        );
       }
 
-      // ── 分支 C：请求澄清 ─────────────────────────────────────
-      // 当意图无法确定或信息不足时，向用户发问澄清。
-      if (decision.type === "ask_clarification") {
-        await this.deps.runStateManager.markStatus(runId, "responding");
-        const response = await this.deps.responseComposer.composeClarification({
-          input,
-          question: decision.question,
-          reason: decision.reason,
-        });
-
-        this.deps.eventBus.emit(
-          "agent.response.completed",
-          {
-            runId,
-            conversationId,
-            messageId: response.messageId,
-          },
-          { runId, conversationId },
-        );
-
-        await this.deps.runStateManager.markStatus(runId, "completed");
-        this.deps.eventBus.emit(
-          "agent.run.completed",
-          {
-            runId,
-            assistantMessageId: response.messageId,
-            artifacts: [],
-            toolCalls: 0,
-          },
-          { runId, conversationId },
-        );
-
-        return {
+      if (permDecision.requiresApproval) {
+        await this.requestApproval({
           runId,
           conversationId,
-          assistantMessageId: response.messageId,
-          status: "completed",
-          artifacts: [],
-          toolCalls: [],
-        };
-      }
-
-      // ── 分支 D：决策阶段即需审批 ──────────────────────────────
-      // 工具决策本身判断需审批（如高风险操作无法自动匹配时）。
-      if (decision.type === "require_approval") {
-        const approval = await this.requestApproval({
-          runId,
-          conversationId,
-          title: decision.approval.title,
-          description: decision.approval.description,
-          riskLevel: decision.approval.riskLevel as
-            | "low"
-            | "medium"
-            | "high"
-            | "critical",
+          toolCallId: tc.id,
+          title: `Approve ${tc.name}`,
+          description: `Run tool ${tc.name} with risk level ${maxRiskLevel(tc.riskLevel, permDecision.riskLevel)}`,
+          riskLevel: maxRiskLevel(tc.riskLevel, permDecision.riskLevel),
           requestedAction: {
-            skillId: "",
-            arguments: {},
-            permissions: [],
+            skillId: tc.skillId,
+            arguments: tc.arguments,
+            permissions: tc.permissions,
           },
         });
 
@@ -356,73 +281,172 @@ export class AgentLoopEngine {
           toolCalls: [],
         };
       }
+    }
 
-      // Fallback: treat as no_tool
-      await this.deps.runStateManager.markStatus(runId, "completed");
+    return this.executeToolDecision(input, context, intent, plan, decision, signal);
+  }
+
+  /** 分支 B：无需工具 — 直接 LLM 生成回复。 */
+  private async handleNoTool(
+    input: AgentLoopInput,
+    context: AgentContext,
+    intent: RoutedIntent,
+    plan: AgentPlan | undefined,
+    signal: AbortSignal,
+  ): Promise<AgentLoopResult> {
+    const { runId, conversationId } = input;
+
+    await this.deps.runStateManager.markStatus(runId, "responding");
+    const response = await this.deps.responseComposer.composeDirect(
+      { input, context, intent, plan },
+      signal,
+    );
+
+    this.deps.eventBus.emit(
+      "agent.response.completed",
+      { runId, conversationId, messageId: response.messageId },
+      { runId, conversationId },
+    );
+
+    await this.writeMemories({
+      input,
+      context,
+      intent,
+      plan,
+      responseMessageId: response.messageId,
+    });
+
+    await this.deps.runStateManager.markStatus(runId, "completed");
+    this.deps.eventBus.emit(
+      "agent.run.completed",
+      { runId, assistantMessageId: response.messageId, artifacts: [], toolCalls: 0 },
+      { runId, conversationId },
+    );
+
+    return {
+      runId,
+      conversationId,
+      assistantMessageId: response.messageId,
+      status: "completed",
+      artifacts: [],
+      toolCalls: [],
+    };
+  }
+
+  /** 分支 C：请求澄清 — 向用户发问。 */
+  private async handleClarification(
+    input: AgentLoopInput,
+    decision: ToolDecision & { type: "ask_clarification" },
+    signal: AbortSignal,
+  ): Promise<AgentLoopResult> {
+    const { runId, conversationId } = input;
+
+    await this.deps.runStateManager.markStatus(runId, "responding");
+    const response = await this.deps.responseComposer.composeClarification({
+      input,
+      question: decision.question,
+      reason: decision.reason,
+    });
+
+    this.deps.eventBus.emit(
+      "agent.response.completed",
+      { runId, conversationId, messageId: response.messageId },
+      { runId, conversationId },
+    );
+
+    await this.deps.runStateManager.markStatus(runId, "completed");
+    this.deps.eventBus.emit(
+      "agent.run.completed",
+      { runId, assistantMessageId: response.messageId, artifacts: [], toolCalls: 0 },
+      { runId, conversationId },
+    );
+
+    return {
+      runId,
+      conversationId,
+      assistantMessageId: response.messageId,
+      status: "completed",
+      artifacts: [],
+      toolCalls: [],
+    };
+  }
+
+  /** 分支 D：决策阶段即需审批。 */
+  private async handleApprovalRequired(
+    input: AgentLoopInput,
+    decision: ToolDecision & { type: "require_approval" },
+    signal: AbortSignal,
+  ): Promise<AgentLoopResult> {
+    await this.requestApproval({
+      runId: input.runId,
+      conversationId: input.conversationId,
+      title: decision.approval.title,
+      description: decision.approval.description,
+      riskLevel: decision.approval.riskLevel as RiskLevel,
+      requestedAction: { skillId: "", arguments: {}, permissions: [] },
+    });
+
+    return {
+      runId: input.runId,
+      conversationId: input.conversationId,
+      status: "waiting_approval",
+      artifacts: [],
+      toolCalls: [],
+    };
+  }
+
+  /** 异常处理：区分用户取消 vs 系统错误。 */
+  private async handleLoopError(
+    input: AgentLoopInput,
+    error: unknown,
+    signal: AbortSignal,
+  ): Promise<AgentLoopResult> {
+    const { runId, conversationId } = input;
+
+    if (signal.aborted) {
+      await this.deps.runStateManager.markCancelled(runId, "aborted by user");
+      this.deps.eventBus.emit(
+        "agent.run.cancelled",
+        { runId, reason: "aborted by user" },
+        { runId, conversationId },
+      );
       return {
         runId,
         conversationId,
-        status: "completed",
+        status: "cancelled",
         artifacts: [],
         toolCalls: [],
-      };
-    } catch (error) {
-      // 异常处理分两条路径：
-      // 1. 用户主动取消（signal.aborted）→ 状态为 cancelled，可恢复
-      // 2. 系统/业务错误 → 状态为 failed，可重试
-      if (signal.aborted) {
-        await this.deps.runStateManager.markCancelled(runId, "aborted by user");
-        this.deps.eventBus.emit(
-          "agent.run.cancelled",
-          { runId, reason: "aborted by user" },
-          { runId, conversationId },
-        );
-        return {
-          runId,
-          conversationId,
-          status: "cancelled",
-          artifacts: [],
-          toolCalls: [],
-        };
-      }
-
-      // Normalize and record error
-      const err = error instanceof Error ? error : new Error(String(error));
-      const agentError = {
-        code: (error as { code?: string }).code ?? "AGENT_INTERNAL_ERROR",
-        message: err.message,
-        category: (error as { category?: string }).category ?? "internal",
-        retryable: (error as { retryable?: boolean }).retryable ?? false,
-      };
-
-      await this.deps.runStateManager.markFailed(runId, error);
-      this.deps.eventBus.emit(
-        "agent.run.failed",
-        { runId, error: agentError },
-        { runId, conversationId },
-      );
-      this.deps.eventBus.emit(
-        "agent.error",
-        {
-          runId,
-          conversationId,
-          code: agentError.code,
-          message: agentError.message,
-          category: agentError.category,
-          retryable: agentError.retryable,
-        },
-        { runId, conversationId },
-      );
-
-      return {
-        runId,
-        conversationId,
-        status: "failed",
-        artifacts: [],
-        toolCalls: [],
-        error: agentError,
       };
     }
+
+    const err = error instanceof Error ? error : new Error(String(error));
+    const agentError = {
+      code: (error as { code?: string }).code ?? "AGENT_INTERNAL_ERROR",
+      message: err.message,
+      category: (error as { category?: string }).category ?? "internal",
+      retryable: (error as { retryable?: boolean }).retryable ?? false,
+    };
+
+    await this.deps.runStateManager.markFailed(runId, error);
+    this.deps.eventBus.emit(
+      "agent.run.failed",
+      { runId, error: agentError },
+      { runId, conversationId },
+    );
+    this.deps.eventBus.emit(
+      "agent.error",
+      { runId, conversationId, code: agentError.code, message: agentError.message, category: agentError.category, retryable: agentError.retryable },
+      { runId, conversationId },
+    );
+
+    return {
+      runId,
+      conversationId,
+      status: "failed",
+      artifacts: [],
+      toolCalls: [],
+      error: agentError,
+    };
   }
 
   /**
@@ -461,7 +485,7 @@ export class AgentLoopEngine {
       userId: undefined,
       message: run.goal ?? approval.title ?? approval.requestedAction.skillId,
       mode:
-        run.mode === "chat" || run.mode === "agent" || run.mode === "workflow"
+        run.mode === "chat" || run.mode === "agent"
           ? run.mode
           : "agent",
       attachments: [],

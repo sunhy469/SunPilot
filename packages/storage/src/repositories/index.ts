@@ -13,5 +13,4 @@ export type * from "./skill.repository.js";
 export type * from "./step.repository.js";
 export type * from "./tool-call.repository.js";
 export type * from "./workflow.repository.js";
-export type * from "./job.repository.js";
 export type * from "./idempotency.repository.js";

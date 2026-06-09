@@ -11,7 +11,7 @@ export const chatSendSchema = z.object({
   clientRequestId: z.string().optional(),
   conversationId: z.string().optional(),
   message: z.string().min(1, 'message is required'),
-  mode: z.enum(['chat', 'agent', 'workflow']).default('agent'),
+  mode: z.enum(['chat', 'agent']).default('agent'),
   attachments: z
     .array(
       z.object({
@@ -69,7 +69,7 @@ export interface ChatSendParams {
   clientRequestId?: string;
   conversationId?: string;
   message: string;
-  mode: 'chat' | 'agent' | 'workflow';
+  mode: 'chat' | 'agent';
   attachments: Array<{
     id: string;
     name: string;

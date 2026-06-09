@@ -1,0 +1,28 @@
+{
+  "name": "@sunpilot/api",
+  "version": "0.1.0",
+  "type": "module",
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "vitest run --passWithNoTests",
+    "lint": "eslint ."
+  },
+  "dependencies": {
+    "@sunpilot/core": "workspace:*",
+    "@sunpilot/protocol": "workspace:*",
+    "@sunpilot/storage": "workspace:*",
+    "fastify": "^5.3.3",
+    "zod": "^3.25.48"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.3",
+    "typescript": "^5.8.3",
+    "vitest": "^3.2.1"
+  }
+}

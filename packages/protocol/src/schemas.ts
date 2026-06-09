@@ -1,10 +1,11 @@
 import { z } from "zod";
+import { AuditActor } from "./audit.js";
 
-export const runModeSchema = z.enum(["chat", "agent", "workflow"]);
+export const runModeSchema = z.enum(["chat", "agent"]);
 
 export const approvalDecisionSchema = z.object({
   reason: z.string().optional(),
-  actor: z.string().default("local-user")
+  actor: z.string().default(AuditActor.LocalUser),
 });
 
 export const skillRiskSchema = z.enum(["low", "medium", "high", "critical"]);
@@ -56,7 +57,7 @@ export const agentChatSendSchema = z.object({
   clientRequestId: z.string().optional(),
   conversationId: z.string().optional(),
   message: z.string().min(1, "message is required"),
-  mode: z.enum(["chat", "agent", "workflow"]).default("agent"),
+  mode: z.enum(["chat", "agent"]).default("agent"),
   attachments: z
     .array(
       z.object({

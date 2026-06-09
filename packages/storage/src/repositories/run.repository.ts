@@ -16,9 +16,13 @@ export interface RunRepository {
   list(input?: ListRunsInput): Promise<RunRecord[]>;
   updateStatus(
     id: string,
-    status: RunStatus,
-    completedAt?: string,
-    error?: unknown,
+    input: {
+      status: RunStatus;
+      updatedAt?: string;
+      completedAt?: string;
+      cancelledAt?: string;
+      error?: unknown;
+    },
   ): Promise<void>;
   updateContext(id: string, context: Record<string, unknown>): Promise<void>;
 }

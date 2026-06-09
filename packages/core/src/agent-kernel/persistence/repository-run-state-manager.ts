@@ -6,22 +6,8 @@ import type {
   AgentLoopStatus,
 } from "../loop-types.js";
 import type { RunState, RunStateManager } from "../run-state-manager.js";
-
-const LEGAL_TRANSITIONS: Record<AgentLoopStatus, readonly AgentLoopStatus[]> = {
-  created: ["context_building", "cancelled", "failed"],
-  context_building: ["intent_routing", "cancelled", "failed"],
-  intent_routing: ["planning", "tool_deciding", "responding", "cancelled", "failed"],
-  planning: ["tool_deciding", "waiting_approval", "cancelled", "failed"],
-  tool_deciding: ["waiting_approval", "executing", "responding", "cancelled", "failed"],
-  waiting_approval: ["executing", "cancelled", "failed"],
-  executing: ["observing", "reflecting", "responding", "waiting_approval", "cancelled", "failed"],
-  observing: ["reflecting", "responding", "cancelled", "failed"],
-  reflecting: ["tool_deciding", "responding", "cancelled", "failed"],
-  responding: ["completed", "cancelled", "failed"],
-  completed: [],
-  cancelled: [],
-  failed: [],
-};
+import { LEGAL_TRANSITIONS, isTerminal } from "../state/run-state-machine.js";
+import { AuditActor } from "../audit/audit-actor.js";
 
 /**
  * RepositoryRunStateManager — PostgreSQL 持久化的 Run 状态管理器。
@@ -32,7 +18,7 @@ const LEGAL_TRANSITIONS: Record<AgentLoopStatus, readonly AgentLoopStatus[]> = {
  * 2. runs.context.statusHistory（JSON 数组，用于恢复状态历史）
  * 3. run_status_history 表（独立表，支持按 runId 查询变更历史）
  *
- * 状态转换验证规则与 InMemoryRunStateManager 共享 LEGAL_TRANSITIONS 表。
+ * 状态转换验证规则共享 run-state-machine.ts 中的 LEGAL_TRANSITIONS 表。
  */
 export class RepositoryRunStateManager implements RunStateManager {
   constructor(private readonly db: DatabaseContext) {}
@@ -61,7 +47,7 @@ export class RepositoryRunStateManager implements RunStateManager {
             previousStatus: undefined,
             nextStatus: "created",
             reason: "run created",
-            actor: "system",
+            actor: AuditActor.System,
             createdAt: now,
           },
         ],
@@ -72,7 +58,7 @@ export class RepositoryRunStateManager implements RunStateManager {
       runId: input.runId,
       nextStatus: "created",
       reason: "run created",
-      actor: "system",
+      actor: AuditActor.System,
       createdAt: now,
     });
     return mapRunToState(run);
@@ -98,11 +84,11 @@ export class RepositoryRunStateManager implements RunStateManager {
     }
 
     const now = new Date().toISOString();
-    await this.db.runs.updateStatus(
-      runId,
-      nextStatus,
-      isTerminal(nextStatus) ? now : undefined,
-    );
+    await this.db.runs.updateStatus(runId, {
+      status: nextStatus,
+      updatedAt: now,
+      ...(isTerminal(nextStatus) ? { completedAt: now } : {}),
+    });
     await this.db.runs.updateContext(runId, {
       ...run.context,
       agentStatus: nextStatus,
@@ -112,7 +98,7 @@ export class RepositoryRunStateManager implements RunStateManager {
           previousStatus: currentStatus,
           nextStatus,
           reason: reason ?? "state transition",
-          actor: "system",
+          actor: AuditActor.System,
           createdAt: now,
         },
       ],
@@ -122,7 +108,7 @@ export class RepositoryRunStateManager implements RunStateManager {
       previousStatus: currentStatus,
       nextStatus,
       reason: reason ?? "state transition",
-      actor: "system",
+      actor: AuditActor.System,
       createdAt: now,
     });
 
@@ -140,7 +126,12 @@ export class RepositoryRunStateManager implements RunStateManager {
     };
     const now = new Date().toISOString();
 
-    await this.db.runs.updateStatus(runId, "failed", now, agentError);
+    await this.db.runs.updateStatus(runId, {
+      status: "failed",
+      updatedAt: now,
+      completedAt: now,
+      error: agentError,
+    });
     await this.db.runs.updateContext(runId, {
       ...run.context,
       agentStatus: "failed",
@@ -150,7 +141,7 @@ export class RepositoryRunStateManager implements RunStateManager {
           previousStatus: run.status,
           nextStatus: "failed",
           reason: err.message,
-          actor: "system",
+          actor: AuditActor.System,
           createdAt: now,
         },
       ],
@@ -160,7 +151,7 @@ export class RepositoryRunStateManager implements RunStateManager {
       previousStatus: run.status,
       nextStatus: "failed",
       reason: err.message,
-      actor: "system",
+      actor: AuditActor.System,
       metadata: { error: agentError },
       createdAt: now,
     });
@@ -235,10 +226,6 @@ function normalizeError(error: unknown): RunState["error"] {
     category: typeof input.category === "string" ? input.category : undefined,
     retryable: typeof input.retryable === "boolean" ? input.retryable : undefined,
   };
-}
-
-function isTerminal(status: AgentLoopStatus): boolean {
-  return status === "completed" || status === "failed" || status === "cancelled";
 }
 
 function titleFromGoal(goal: string): string {

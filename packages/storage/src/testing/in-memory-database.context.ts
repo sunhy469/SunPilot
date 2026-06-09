@@ -1,14 +1,15 @@
-import type {
-  ApprovalRecord,
-  ArtifactRecord,
-  InstalledSkillRecord,
-  MemoryRecord,
-  RunRecord,
-  RunStatus,
-  StepRecord,
-  StepStatus,
-  SunPilotEvent,
-  WorkflowRecord,
+import {
+  AuditActor,
+  type ApprovalRecord,
+  type ArtifactRecord,
+  type InstalledSkillRecord,
+  type MemoryRecord,
+  type RunRecord,
+  type RunStatus,
+  type StepRecord,
+  type StepStatus,
+  type SunPilotEvent,
+  type WorkflowRecord,
 } from "@sunpilot/protocol";
 import type { DatabaseContext } from "../database/database.types.js";
 import type {
@@ -20,10 +21,6 @@ import type {
   CreateConversationInput,
   ListConversationsInput,
 } from "../repositories/conversation.repository.js";
-import type {
-  CreateJobInput,
-  JobRecord,
-} from "../repositories/job.repository.js";
 import type {
   CreateMessageInput,
   MessageRecord,
@@ -78,7 +75,6 @@ export class InMemoryDatabaseContext implements DatabaseContext {
   private readonly memoryRecords: MemoryRecord[] = [];
   private readonly settingRecords = new Map<string, SettingRecord>();
   private readonly auditRecords: AuditRecord[] = [];
-  private readonly jobRecords = new Map<string, JobRecord>();
   private readonly idempotencyRecords = new Map<string, IdempotencyRecord>();
   private readonly workflowRecords = new Map<string, WorkflowRecord>();
   private readonly skillRecords = new Map<string, InstalledSkillRecord>();
@@ -244,21 +240,26 @@ export class InMemoryDatabaseContext implements DatabaseContext {
         .slice(0, input.limit ?? 100),
     updateStatus: async (
       id: string,
-      status: RunStatus,
-      completedAt?: string,
-      error?: unknown,
+      input: {
+        status: RunStatus;
+        updatedAt?: string;
+        completedAt?: string;
+        cancelledAt?: string;
+        error?: unknown;
+      },
     ): Promise<void> => {
       const run = this.runRecords.get(id);
       if (!run) return;
       const now = new Date().toISOString();
       this.runRecords.set(id, {
         ...run,
-        status,
-        completedAt: completedAt ?? run.completedAt,
+        status: input.status,
+        updatedAt: input.updatedAt ?? now,
+        completedAt: input.completedAt ?? run.completedAt,
         cancelledAt:
-          status === "cancelled" ? (completedAt ?? now) : run.cancelledAt,
-        error: error === undefined ? run.error : error,
-        updatedAt: now,
+          input.cancelledAt ??
+          (input.status === "cancelled" ? now : run.cancelledAt),
+        error: input.error === undefined ? run.error : input.error,
       });
     },
     updateContext: async (
@@ -285,7 +286,7 @@ export class InMemoryDatabaseContext implements DatabaseContext {
         previousStatus: input.previousStatus,
         nextStatus: input.nextStatus,
         reason: input.reason,
-        actor: input.actor ?? "system",
+        actor: input.actor ?? AuditActor.System,
         metadata: input.metadata ?? {},
         createdAt: input.createdAt ?? new Date().toISOString(),
       };
@@ -625,66 +626,6 @@ export class InMemoryDatabaseContext implements DatabaseContext {
         .sort(byCreatedAt),
   };
 
-  readonly jobs = {
-    create: async (input: CreateJobInput): Promise<JobRecord> => {
-      const now = new Date().toISOString();
-      const job = {
-        ...input,
-        attempts: input.attempts ?? 0,
-        createdAt: now,
-        updatedAt: now,
-      };
-      this.jobRecords.set(job.id, job);
-      return job;
-    },
-    updateStatus: async (
-      runId: string,
-      status: string,
-      incrementAttempts = false,
-    ): Promise<void> => {
-      for (const job of this.jobRecords.values()) {
-        if (job.runId !== runId) continue;
-        this.jobRecords.set(job.id, {
-          ...job,
-          status,
-          attempts: incrementAttempts ? job.attempts + 1 : job.attempts,
-          updatedAt: new Date().toISOString(),
-        });
-      }
-    },
-    list: async (runId?: string): Promise<JobRecord[]> =>
-      [...this.jobRecords.values()]
-        .filter((job) => !runId || job.runId === runId)
-        .sort(byCreatedAt),
-    expireTimedOut: async (
-      now = new Date().toISOString(),
-    ): Promise<string[]> => {
-      const expiredRunIds: string[] = [];
-      for (const job of this.jobRecords.values()) {
-        if (
-          job.timeoutAt &&
-          job.timeoutAt <= now &&
-          ![
-            "completed",
-            "failed",
-            "cancelled",
-            "interrupted",
-            "timed_out",
-          ].includes(job.status)
-        ) {
-          this.jobRecords.set(job.id, {
-            ...job,
-            status: "timed_out",
-            attempts: job.attempts + 1,
-            updatedAt: now,
-          });
-          expiredRunIds.push(job.runId);
-        }
-      }
-      return expiredRunIds;
-    },
-  };
-
   readonly idempotency = {
     reserve: async (
       input: ReserveIdempotencyInput,
@@ -798,7 +739,6 @@ export class InMemoryDatabaseContext implements DatabaseContext {
     this.memoryRecords.length = 0;
     this.settingRecords.clear();
     this.auditRecords.length = 0;
-    this.jobRecords.clear();
     this.idempotencyRecords.clear();
     this.workflowRecords.clear();
     this.skillRecords.clear();

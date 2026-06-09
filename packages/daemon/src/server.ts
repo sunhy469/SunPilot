@@ -8,28 +8,29 @@ import { ZodError } from "zod";
 import {
   AgentService,
   createDefaultLlmProvider,
-  McpProviderStub,
+  InMemoryAgentEventBus,
   RepositoryApprovalExpiryService,
-  RepositoryRuntimeStore,
   RuntimeError,
-  SkillProvider,
-  SunPilotRuntime,
+  type AgentEventBus,
 } from "@sunpilot/core";
 import { SkillRegistry, SkillRunner } from "@sunpilot/skill-runner";
 import {
   createDatabaseContext,
   type DatabaseContext,
-  DuckDbAdapterStub,
   ensureSunPilotHome,
   getSunPilotPaths,
-  LanceDbAdapterStub,
 } from "@sunpilot/storage";
 import { WorkflowRegistry } from "@sunpilot/workflow";
 import { createAgentLoopService } from "./composition-root.js";
+import {
+  registerSunPilotApiRoutes,
+  type SunPilotApiDeps,
+} from "@sunpilot/api";
 import { registerDaemonMetricsRoutes } from "./metrics.js";
 import { recoverAgentRuntimeRuns } from "./recovery.js";
-import { registerDaemonRoutes } from "./routes.js";
 import { setupDaemonWebSocket } from "./ws.js";
+import { readSunPilotConfig, updateSunPilotConfig } from "@sunpilot/storage";
+import { AuditActor } from "@sunpilot/protocol";
 
 export interface DaemonOptions {
   port?: number;
@@ -45,6 +46,7 @@ export interface DaemonOptions {
     | "reject"
   >;
   database?: DatabaseContext;
+  eventBus?: AgentEventBus;
 }
 
 const DEFAULT_EXTERNAL_ORIGINS = [
@@ -91,13 +93,12 @@ export async function createDaemon(options: DaemonOptions = {}) {
   const paths = ensureSunPilotHome(getSunPilotPaths());
   const database = options.database ?? (await createDatabaseContext());
   const shouldCloseDatabase = !options.database;
-  const runtimeStore = new RepositoryRuntimeStore(database);
-  await runtimeStore.recoverInterrupted();
+
+  const eventBus = options.eventBus ?? new InMemoryAgentEventBus();
+
   const approvalExpiryService = new RepositoryApprovalExpiryService(database);
   await approvalExpiryService.expireStale();
   await recoverAgentRuntimeRuns(database);
-  const duckDb = new DuckDbAdapterStub(paths).initialize();
-  const lanceDb = new LanceDbAdapterStub(paths).initialize();
 
   const workflows = new WorkflowRegistry();
   for (const record of workflows.records()) {
@@ -110,11 +111,22 @@ export async function createDaemon(options: DaemonOptions = {}) {
   const skillRunner = new SkillRunner(
     {
       paths,
-      getRun: (id) => runtimeStore.getRun(id),
-      appendEvent: (event) => runtimeStore.appendEvent(event),
-      insertArtifact: (artifact) => runtimeStore.insertArtifact(artifact),
-      insertMemory: (memory) => runtimeStore.insertMemory(memory),
-      audit: (record) => runtimeStore.audit(record),
+      getRun: async (id) => (await database.runs.findById(id)) ?? undefined,
+      appendEvent: async (event) => {
+        await database.events.append(event);
+      },
+      insertArtifact: async (artifact) => {
+        await database.artifacts.create(artifact);
+      },
+      insertMemory: async (memory) => {
+        await database.memory.create(memory);
+      },
+      audit: async (record) => {
+        await database.audit.create({
+          ...record,
+          createdAt: new Date().toISOString(),
+        });
+      },
     },
     skillRegistry,
     {
@@ -122,12 +134,9 @@ export async function createDaemon(options: DaemonOptions = {}) {
       maxConcurrency: Number(process.env.SUNPILOT_SKILL_MAX_CONCURRENCY ?? 4),
     },
   );
-  const runtime = new SunPilotRuntime(runtimeStore, workflows, [
-    new SkillProvider(skillRegistry, skillRunner),
-    new McpProviderStub(),
-  ]);
 
   let chatAgent = options.chatAgent;
+  const liveEventBus = new InMemoryAgentEventBus();
   let chatAgentInit: Promise<AgentService> | undefined;
   const getChatAgent = async (): Promise<AgentService> => {
     if (chatAgent) return chatAgent as AgentService;
@@ -137,8 +146,9 @@ export async function createDaemon(options: DaemonOptions = {}) {
         database,
         skillRegistry,
         skillRunner,
-        workflowRuntime: runtime,
         llmProvider,
+        eventBus,
+        liveEventBus,
         systemPrompt: "You are SunPilot, a concise business agent assistant.",
       });
       return chatAgent as AgentService;
@@ -171,23 +181,44 @@ export async function createDaemon(options: DaemonOptions = {}) {
     }
   });
 
-  registerDaemonRoutes(app, {
+  const apiDeps: SunPilotApiDeps = {
     database,
     paths,
-    duckDb,
-    lanceDb,
-    runtime,
-    runtimeStore,
-    approvalExpiryService,
-    workflows,
-    skillRegistry,
     getChatAgent,
-  });
+    skills: {
+      reload: async () => skillRegistry.reload(),
+      list: () => skillRegistry.list(),
+      setEnabled: async (id: string, enabled: boolean) =>
+        skillRegistry.setEnabled(id, enabled),
+    },
+    workflows: {
+      reload: async () => {
+        for (const record of workflows.records()) {
+          await database.workflows.upsert(record);
+        }
+      },
+      list: async () => database.workflows.list(),
+      findById: async (id: string) => database.workflows.findById(id),
+    },
+    config: {
+      read: () => readSunPilotConfig(paths),
+      update: (input: unknown) =>
+        updateSunPilotConfig(
+          input as Parameters<typeof updateSunPilotConfig>[0],
+          paths,
+        ),
+    },
+  };
+  registerSunPilotApiRoutes(app, apiDeps);
 
   const ws = setupDaemonWebSocket({
     getChatAgent,
     database,
-    runtimeStore,
+    eventSubscribe: (listener) => {
+      return liveEventBus.subscribe((agentEvent) => {
+        listener(agentEvent);
+      });
+    },
     port,
     isAllowedOrigin: isAllowedLocalOrigin,
   });
@@ -233,20 +264,22 @@ export async function createDaemon(options: DaemonOptions = {}) {
           createdAt: new Date().toISOString(),
         }) + "\n",
       );
-      await runtimeStore.audit({
-        actor: "daemon",
+      await database.audit.create({
+        actor: AuditActor.Daemon,
         action: "daemon.start",
         target: `${host}:${port}`,
         payload: { host, port },
+        createdAt: new Date().toISOString(),
       });
       app.log.info({ host, port }, "SunPilot daemon started");
     },
     async stop() {
-      await runtimeStore.audit({
-        actor: "daemon",
+      await database.audit.create({
+        actor: AuditActor.Daemon,
         action: "daemon.stop",
         target: `${host}:${port}`,
         payload: { host, port },
+        createdAt: new Date().toISOString(),
       });
       ws.dispose();
       await app.close();

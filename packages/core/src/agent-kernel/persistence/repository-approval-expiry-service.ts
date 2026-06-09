@@ -1,4 +1,4 @@
-import type { ApprovalRecord } from "@sunpilot/protocol";
+import { AuditActor, type ApprovalRecord } from "@sunpilot/protocol";
 import type { DatabaseContext } from "@sunpilot/storage";
 import { RepositoryRunStateManager } from "./repository-run-state-manager.js";
 
@@ -39,7 +39,7 @@ export class RepositoryApprovalExpiryService {
       await this.db.audit.create({
         runId: expired.runId,
         stepId: expired.stepId,
-        actor: "daemon",
+        actor: AuditActor.Daemon,
         action: "approval.expired",
         target: expired.id,
         risk: expired.risk,

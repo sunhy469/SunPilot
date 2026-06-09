@@ -22,7 +22,7 @@ export interface BusinessWorkflow {
  *   每个 BusinessWorkflow 包含 match（匹配度评估）和 plan（生成执行计划）。
  *
  * Workflow 被 Agent 调用时通过 ToolDecisionEngine 选择（skillId 以 "workflow." 开头），
- * 然后由 composition-root 的 toolExecutor 桥接到 SunPilotRuntime.createRun。
+ * 然后由 composition-root 的 toolExecutor 作为 Agent tool call 在当前 run 内执行。
  */
 export class WorkflowRegistry {
   private readonly workflows = new Map<string, BusinessWorkflow>();

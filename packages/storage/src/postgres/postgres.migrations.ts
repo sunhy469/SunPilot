@@ -16,6 +16,7 @@ const migrationFiles = [
   "009_agent_idempotency.sql",
   "010_agent_observability.sql",
   "011_memory_core.sql",
+  "012_agent_runtime_cleanup.sql",
 ];
 const migrationLockKey = 7_290_317_373_001;
 

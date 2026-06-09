@@ -321,35 +321,10 @@ describe("createAgentLoopService", () => {
       createdAt: "2026-06-06T00:00:00.000Z",
       updatedAt: "2026-06-06T00:00:00.000Z",
     });
-    const workflowRuns: Array<{
-      input: unknown;
-      workflowId: string | undefined;
-      mode: string | undefined;
-    }> = [];
     const service = createAgentLoopService({
       database: db,
       skillRegistry: {
         list: () => [],
-      } as any,
-      workflowRuntime: {
-        async createRun(
-          input: unknown,
-          workflowId: string | undefined,
-          mode: string | undefined,
-        ) {
-          workflowRuns.push({ input, workflowId, mode });
-          return {
-            id: "run_workflow_child",
-            title: "Daily Close",
-            status: "completed",
-            mode: "workflow",
-            workflowId,
-            createdAt: "2026-06-06T00:00:00.000Z",
-            updatedAt: "2026-06-06T00:00:01.000Z",
-            input,
-            context: {},
-          };
-        },
       } as any,
       llmProvider: {
         id: "test",
@@ -367,16 +342,6 @@ describe("createAgentLoopService", () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     expect(result.status).toBe("completed");
-    expect(workflowRuns).toEqual([
-      {
-        workflowId: "daily.close",
-        mode: "approval_required",
-        input: expect.objectContaining({
-          message: "run workflow Daily Close",
-          parentAgentRunId: result.runId,
-        }),
-      },
-    ]);
     await expect(db.toolCalls.listByRunId(result.runId)).resolves.toEqual([
       expect.objectContaining({
         runId: result.runId,

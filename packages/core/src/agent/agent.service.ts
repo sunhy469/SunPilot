@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { notFound } from "../errors/index.js";
+import { AuditActor } from "@sunpilot/protocol";
 import type { IdempotencyRepository } from "@sunpilot/storage";
 import type { DatabaseContext } from "@sunpilot/storage";
 import { parseAgentChatRequest } from "./agent.schema.js";
@@ -29,6 +30,9 @@ export interface AgentLoopServiceConfig {
   loopEngine: AgentLoopEngine;
   abortRegistry: AbortRegistry;
   eventBus: AgentEventBus;
+  /** Persisted-event bus for external consumers (WebSocket, stream hooks).
+   *  Carries only events with a real DB sequence. */
+  liveEventBus?: AgentEventBus;
   runStateManager: RunStateManager;
   approvalGate: ApprovalGate;
   approvalDecisionService?: RepositoryApprovalDecisionService;
@@ -90,7 +94,7 @@ export class AgentService {
     input: {
       conversationId?: string;
       message: string;
-      mode?: "chat" | "agent" | "workflow";
+      mode?: "chat" | "agent";
       clientRequestId?: string;
       attachments?: Array<{
         id: string;
@@ -118,7 +122,7 @@ export class AgentService {
       onError?: (error: unknown) => void;
     },
   ): Promise<AgentLoopResult & { conversationId: string; messageId: string }> {
-    const { loopEngine, abortRegistry, runStateManager, eventBus } =
+    const { loopEngine, abortRegistry, runStateManager, eventBus, liveEventBus } =
       this.loopConfig;
 
     await this.assertConversationExists(input.conversationId);
@@ -160,17 +164,24 @@ export class AgentService {
     // 为本 run 创建 AbortSignal，用于用户取消或超时中断
     const signal = abortRegistry.create(runId);
 
-    // 订阅 EventBus → 将 Agent 内部事件转发到 streamHooks，
-    // 由 daemon 层的 JSON-RPC/WebSocket 推送给前端。
-    // 特别处理 agent.response.delta 事件，将增量文本推送到 onDelta 钩子。
-    const unsubscribe = eventBus.subscribe((event) => {
-      if (event.runId === runId) {
-        streamHooks?.onEvent?.(event);
-      }
+    // ── Event subscriptions ────────────────────────────────────
+    // liveEventBus carries only persisted events with real DB sequences.
+    // Normal agent.* events MUST have a real sequence — use liveEventBus
+    // for onEvent so the sender connection never sees sequence: -1 on
+    // replayable events.
+    const unsubLive = liveEventBus?.subscribe((event) => {
+      if (event.runId !== runId) return;
+      streamHooks?.onEvent?.(event);
+    }) ?? (() => {});
+
+    // Raw eventBus subscription — only for real-time delta streaming.
+    // Deltas are transient and must not wait for DB persist; they arrive
+    // here before the persist subscriber writes them to the database.
+    const unsub = eventBus.subscribe((event) => {
+      if (event.runId !== runId) return;
       if (
         streamHooks?.onDelta &&
-        event.type === "agent.response.delta" &&
-        event.runId === runId
+        event.type === "agent.response.delta"
       ) {
         const payload = event.payload as {
           conversationId: string;
@@ -236,7 +247,13 @@ export class AgentService {
 
       // 正常完成：清理 Abort 控制器和事件订阅
       abortRegistry.remove(runId);
-      unsubscribe();
+      // Wait for pending async listeners (notably the raw→persist→live bridge)
+      // to publish persisted events to liveEventBus before unsubscribing.
+      // Without this flush, a fast return could unsubLive() before the persist
+      // bridge completes, causing the current connection to miss events.
+      await eventBus.flush();
+      unsubLive();
+      unsub();
 
       const response = {
         ...result,
@@ -252,7 +269,11 @@ export class AgentService {
     } catch (error) {
       // 异常路径：清理 Abort 控制器和事件订阅
       abortRegistry.remove(runId);
-      unsubscribe();
+      // Flush pending persists before unsubscribing so the current connection
+      // receives any events that were emitted before the error.
+      await eventBus.flush();
+      unsubLive();
+      unsub();
 
       // 标记幂等性记录为失败（非幂等性错误仍可重试）
       await this.failIdempotency(idempotency?.id, error);
@@ -556,7 +577,7 @@ export class AgentService {
     }
     await db.audit.create({
       runId: input.newRunId,
-      actor: "agent",
+      actor: AuditActor.Agent,
       action: `run.${input.action}`,
       target: input.originalRunId,
       payload: {
@@ -683,7 +704,7 @@ export class AgentService {
     originalInput: {
       conversationId?: string;
       message: string;
-      mode?: "chat" | "agent" | "workflow";
+      mode?: "chat" | "agent";
       attachments?: Array<{
         id: string;
         name: string;
@@ -877,8 +898,8 @@ function isAttemptableStatus(status: unknown): boolean {
   );
 }
 
-function normalizeAttemptMode(mode: unknown): "chat" | "agent" | "workflow" {
-  return mode === "chat" || mode === "workflow" ? mode : "agent";
+function normalizeAttemptMode(mode: unknown): "chat" | "agent" {
+  return mode === "chat" ? mode : "agent";
 }
 
 function messageFromRun(run: { goal?: string; input?: unknown }): string {

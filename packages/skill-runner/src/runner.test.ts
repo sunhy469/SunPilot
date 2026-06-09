@@ -204,7 +204,7 @@ describe("SkillRunner execution controls", () => {
     await db.runs.create({
       id: "run_memory",
       title: "Memory run",
-      status: "running",
+      status: "created",
       mode: "agent",
       createdAt: "2026-06-04T00:00:00.000Z",
       updatedAt: "2026-06-04T00:00:00.000Z",
@@ -223,7 +223,7 @@ describe("SkillRunner execution controls", () => {
         metadata: { skillId: "test.slow", capability: "memory.write" }
       })
     ]);
-    expect(await db.events.listByRunId("run_memory")).toEqual(expect.arrayContaining([expect.objectContaining({ type: "memory.written", payload: expect.objectContaining({ key: "customer.note" }) })]));
+    expect(await db.events.listByRunId("run_memory")).toEqual(expect.arrayContaining([expect.objectContaining({ type: "agent.memory.written", payload: expect.objectContaining({ key: "customer.note" }) })]));
     expect(await db.audit.list("run_memory")).toEqual(expect.arrayContaining([expect.objectContaining({ action: "memory.write", target: "customer.note" })]));
   });
 
@@ -232,7 +232,7 @@ describe("SkillRunner execution controls", () => {
     await expect(runner.execute(eventStep("event", "skill.custom", { value: 42 }))).resolves.toEqual({ type: "skill.custom", payload: { value: 42 } });
 
     expect(await db.events.listByRunId("run_event")).toEqual([
-      expect.objectContaining({ type: "step.progress", payload: { type: "skill.custom", payload: { value: 42 } } })
+      expect.objectContaining({ type: "agent.tool.delta", payload: { type: "skill.custom", payload: { value: 42 } } })
     ]);
   });
 });

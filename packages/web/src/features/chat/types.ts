@@ -1,7 +1,7 @@
 export interface ChatSendParams {
   conversationId?: string;
   message: string;
-  mode?: "chat" | "agent" | "workflow";
+  mode?: "chat" | "agent";
   clientRequestId?: string;
   attachments?: Array<{
     id: string;
@@ -11,6 +11,28 @@ export interface ChatSendParams {
   }>;
 }
 
+// ── Wire event types (what comes over WebSocket) ────────────────────
+
+/** Raw wire envelope metadata carried in every WebSocket notification. */
+export interface AgentWireEnvelope<TPayload = Record<string, unknown>> {
+  eventId: string;
+  sequence: number;
+  runId?: string;
+  conversationId?: string;
+  createdAt: string;
+  payload: TPayload;
+}
+
+/** Wire-level event as received from the WebSocket. */
+export type AgentWireEvent = {
+  jsonrpc: "2.0";
+  method: string;
+  params: AgentWireEnvelope;
+};
+
+// ── UI event types (consumed by React components) ───────────────────
+
+/** Metadata extracted from the wire envelope for UI consumption. */
 export interface AgentSocketEnvelopeMetadata {
   id?: string;
   sequence?: number;
@@ -19,8 +41,11 @@ export interface AgentSocketEnvelopeMetadata {
   createdAt?: string;
 }
 
-/** Agent protocol events — the canonical event vocabulary. */
-export type AgentProtocolEvent = AgentSocketEnvelopeMetadata &
+/**
+ * Normalized UI event — components consume this, NOT the raw wire event.
+ * parseSocketPayload() is responsible for converting AgentWireEvent → AgentUiEvent.
+ */
+export type AgentUiEvent = AgentSocketEnvelopeMetadata &
   (
     | {
         method: "agent.run.created";
@@ -272,7 +297,7 @@ export type AgentProtocolEvent = AgentSocketEnvelopeMetadata &
   );
 
 export type ChatSocketEvent =
-  | AgentProtocolEvent
+  | AgentUiEvent
   | { method: "pong"; params: Record<string, never> };
 
 export type ChatStopParams = {
