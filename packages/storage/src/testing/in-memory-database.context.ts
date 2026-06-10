@@ -9,7 +9,6 @@ import {
   type StepRecord,
   type StepStatus,
   type SunPilotEvent,
-  type WorkflowRecord,
 } from "@sunpilot/protocol";
 import type { DatabaseContext } from "../database/database.types.js";
 import type {
@@ -76,7 +75,6 @@ export class InMemoryDatabaseContext implements DatabaseContext {
   private readonly settingRecords = new Map<string, SettingRecord>();
   private readonly auditRecords: AuditRecord[] = [];
   private readonly idempotencyRecords = new Map<string, IdempotencyRecord>();
-  private readonly workflowRecords = new Map<string, WorkflowRecord>();
   private readonly skillRecords = new Map<string, InstalledSkillRecord>();
 
   readonly conversations = {
@@ -683,19 +681,6 @@ export class InMemoryDatabaseContext implements DatabaseContext {
       ) ?? null,
   };
 
-  readonly workflows = {
-    upsert: async (input: WorkflowRecord): Promise<WorkflowRecord> => {
-      this.workflowRecords.set(input.id, input);
-      return input;
-    },
-    list: async (): Promise<WorkflowRecord[]> =>
-      [...this.workflowRecords.values()].sort((left, right) =>
-        left.id.localeCompare(right.id),
-      ),
-    findById: async (id: string): Promise<WorkflowRecord | null> =>
-      this.workflowRecords.get(id) ?? null,
-  };
-
   readonly skills = {
     upsert: async (
       input: InstalledSkillRecord,
@@ -740,7 +725,6 @@ export class InMemoryDatabaseContext implements DatabaseContext {
     this.settingRecords.clear();
     this.auditRecords.length = 0;
     this.idempotencyRecords.clear();
-    this.workflowRecords.clear();
     this.skillRecords.clear();
   }
 

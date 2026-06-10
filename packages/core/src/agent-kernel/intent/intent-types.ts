@@ -114,17 +114,17 @@ export const DEFAULT_INTENT_RULES: IntentRule[] = [
     candidateSkills: ["artifact.write"],
   },
   {
-    type: "workflow_execution",
+    type: "automation_execution",
     patterns: [
-      /\b(run|start|execute|launch)\s+(the\s+)?workflow\b/i,
-      /\bworkflow\s+(run|start|execute|launch)\b/i,
-      /\buse\s+(the\s+)?workflow\b/i,
+      /\b(run|start|execute|launch)\s+(the\s+)?(automation|workflow)\b/i,
+      /\b(automation|workflow)\s+(run|start|execute|launch)\b/i,
+      /\buse\s+(the\s+)?(automation|workflow)\b/i,
     ],
     requiresPlanning: false,
     requiresTool: true,
     requiresApproval: false,
     riskLevel: "medium",
-    candidateSkills: ["workflow"],
+    candidateSkills: [],
   },
   {
     type: "question_answering",

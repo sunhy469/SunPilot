@@ -302,13 +302,17 @@ export class ExecutionOrchestrator implements ExecutionOrchestratorInterface {
   }
 
   private categoryFromSkillId(skillId: string): string {
-    if (skillId.startsWith("filesystem.read")) return "filesystem.read";
-    if (skillId.startsWith("filesystem.write")) return "filesystem.write";
-    if (skillId.startsWith("filesystem")) return "filesystem.read";
-    if (skillId.startsWith("shell")) return "shell.execute";
-    if (skillId.startsWith("network")) return "network.request";
-    if (skillId.startsWith("artifact")) return "artifact.write";
-    if (skillId.startsWith("database")) return "database.write";
+    // Extract capability name for fully-qualified ids (<skill-id>:<capability>)
+    const capability = skillId.includes(":")
+      ? skillId.slice(skillId.lastIndexOf(":") + 1)
+      : skillId;
+    if (capability.startsWith("filesystem.read")) return "filesystem.read";
+    if (capability.startsWith("filesystem.write")) return "filesystem.write";
+    if (capability.startsWith("filesystem")) return "filesystem.read";
+    if (capability.startsWith("shell")) return "shell.execute";
+    if (capability.startsWith("network")) return "network.request";
+    if (capability.startsWith("artifact")) return "artifact.write";
+    if (capability.startsWith("database")) return "database.write";
     return "shell.execute"; // default conservative
   }
 

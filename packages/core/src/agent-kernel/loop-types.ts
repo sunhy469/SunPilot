@@ -80,7 +80,7 @@ export type IntentType =
   | "code_modification"
   | "file_operation"
   | "shell_operation"
-  | "workflow_execution"
+  | "automation_execution"
   | "artifact_generation"
   | "memory_update"
   | "diagnostics"
@@ -168,7 +168,7 @@ export interface AgentPlanStep {
   id: string;
   title: string;
   description: string;
-  type: "reasoning" | "tool" | "workflow" | "approval" | "response";
+  type: "reasoning" | "tool" | "automation" | "approval" | "response";
   skillId?: string;
   dependsOn: string[];
   input?: Record<string, unknown>;

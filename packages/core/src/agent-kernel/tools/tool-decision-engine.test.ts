@@ -89,14 +89,14 @@ describe("ToolDecisionEngine", () => {
     });
   });
 
-  test("selects a named workflow skill for workflow intent", async () => {
+  test("selects a named automation skill for automation intent", async () => {
     const decision = await new ToolDecisionEngine({
       listSkills: async () => [
         {
-          id: "workflow.daily.close",
+          id: "sunpilot.automation:daily.close",
           name: "Daily Close",
           description: "Close the daily business checklist.",
-          category: "workflow",
+          category: "automation",
           enabled: true,
           permissions: [],
           defaultTimeoutMs: 5_000,
@@ -112,18 +112,18 @@ describe("ToolDecisionEngine", () => {
           ...context,
           currentMessage: {
             id: "msg_user",
-            content: "run workflow Daily Close",
+            content: "run automation Daily Close",
             attachments: [],
           },
         },
         intent: {
-          type: "workflow_execution",
+          type: "automation_execution",
           confidence: 0.9,
           requiresPlanning: false,
           requiresTool: true,
           requiresApproval: false,
           riskLevel: "medium",
-          candidateSkills: ["workflow"],
+          candidateSkills: ["sunpilot.automation:daily.close"],
           reason: "test",
         },
       },
@@ -132,11 +132,11 @@ describe("ToolDecisionEngine", () => {
 
     expect(decision).toEqual({
       type: "use_tool",
-      reason: "Matched 1 workflow(s) for intent 'workflow_execution'",
+      reason: "Matched 1 skill(s) for intent 'automation_execution'",
       toolCalls: [
         expect.objectContaining({
-          skillId: "workflow.daily.close",
-          arguments: { message: "run workflow Daily Close" },
+          skillId: "sunpilot.automation:daily.close",
+          arguments: {},
           permissions: [],
           riskLevel: "medium",
           requiresApproval: false,
