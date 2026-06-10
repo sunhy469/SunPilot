@@ -20,7 +20,6 @@ import {
   ensureSunPilotHome,
   getSunPilotPaths,
 } from "@sunpilot/storage";
-import { WorkflowRegistry } from "@sunpilot/workflow";
 import { createAgentLoopService } from "./composition-root.js";
 import {
   registerSunPilotApiRoutes,
@@ -99,11 +98,6 @@ export async function createDaemon(options: DaemonOptions = {}) {
   const approvalExpiryService = new RepositoryApprovalExpiryService(database);
   await approvalExpiryService.expireStale();
   await recoverAgentRuntimeRuns(database);
-
-  const workflows = new WorkflowRegistry();
-  for (const record of workflows.records()) {
-    await database.workflows.upsert(record);
-  }
 
   const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
   const skillRegistry = new SkillRegistry(database, [paths.skills]);
@@ -191,15 +185,6 @@ export async function createDaemon(options: DaemonOptions = {}) {
       setEnabled: async (id: string, enabled: boolean) =>
         skillRegistry.setEnabled(id, enabled),
     },
-    workflows: {
-      reload: async () => {
-        for (const record of workflows.records()) {
-          await database.workflows.upsert(record);
-        }
-      },
-      list: async () => database.workflows.list(),
-      findById: async (id: string) => database.workflows.findById(id),
-    },
     config: {
       read: () => readSunPilotConfig(paths),
       update: (input: unknown) =>
@@ -226,7 +211,6 @@ export async function createDaemon(options: DaemonOptions = {}) {
   registerDaemonMetricsRoutes(app, {
     database,
     skillRegistry,
-    workflows,
     connectionRegistry: ws.connectionRegistry,
   });
 

@@ -25,11 +25,6 @@ export interface SunPilotApiDeps {
     list(): unknown[];
     setEnabled(id: string, enabled: boolean): Promise<unknown>;
   };
-  workflows: {
-    reload(): Promise<unknown>;
-    list(): Promise<unknown[]>;
-    findById(id: string): Promise<unknown | null>;
-  };
   config: {
     read(): unknown;
     update(input: unknown): unknown;

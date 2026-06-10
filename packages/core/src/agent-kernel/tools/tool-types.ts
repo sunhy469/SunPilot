@@ -19,7 +19,7 @@ export interface SkillSummary {
     | "web"
     | "memory"
     | "artifact"
-    | "workflow"
+    | "automation"
     | "custom";
   enabled: boolean;
   permissions: Permission[];
@@ -64,7 +64,7 @@ export const INTENT_SKILL_MAP: Record<string, string[]> = {
   code_modification: ["filesystem.read", "filesystem.write"],
   file_operation: ["filesystem.read", "filesystem.write"],
   shell_operation: ["shell.execute"],
-  workflow_execution: [],
+  automation_execution: [],
   artifact_generation: ["artifact.write"],
   memory_update: ["memory.write"],
   diagnostics: ["filesystem.read", "shell.execute"],

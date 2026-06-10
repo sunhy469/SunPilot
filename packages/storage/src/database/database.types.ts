@@ -14,7 +14,6 @@ import type {
   SettingRepository,
   StepRepository,
   ToolCallRepository,
-  WorkflowRepository,
 } from "../repositories/index.js";
 
 export interface DatabaseContext {
@@ -32,7 +31,6 @@ export interface DatabaseContext {
   settings: SettingRepository;
   audit: AuditRepository;
   idempotency: IdempotencyRepository;
-  workflows: WorkflowRepository;
   skills: SkillRepository;
   transaction?<T>(work: (database: DatabaseContext) => Promise<T>): Promise<T>;
   close(): Promise<void>;

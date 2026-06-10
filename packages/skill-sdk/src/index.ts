@@ -22,6 +22,32 @@ export interface SkillSecretApi {
   get(name: string): Promise<string | undefined>;
 }
 
+// ── HTTP ───────────────────────────────────────────────────────────────
+
+export type SkillHttpMethod = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
+
+export interface SkillHttpRequest {
+  method: SkillHttpMethod;
+  url: string;
+  headers?: Record<string, string>;
+  query?: Record<string, string | number | boolean | undefined>;
+  body?: unknown;
+  timeoutMs?: number;
+  responseType?: "json" | "text" | "arrayBuffer";
+}
+
+export interface SkillHttpResponse<TBody = unknown> {
+  status: number;
+  headers: Record<string, string>;
+  body: TBody;
+}
+
+export interface SkillHttpApi {
+  request<TBody = unknown>(
+    input: SkillHttpRequest,
+  ): Promise<SkillHttpResponse<TBody>>;
+}
+
 export interface SkillLogger {
   info(message: string, payload?: unknown): void;
   warn(message: string, payload?: unknown): void;
@@ -39,6 +65,7 @@ export interface SkillContext {
   files: SkillFileApi;
   memory: SkillMemoryApi;
   secrets: SkillSecretApi;
+  http: SkillHttpApi;
   logger: SkillLogger;
 }
 
