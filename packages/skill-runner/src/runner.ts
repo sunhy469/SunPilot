@@ -42,6 +42,41 @@ function normalizeSkillEvent(type: string, payload: unknown): { type: AgentEvent
   return { type: "agent.tool.delta", payload: { type, payload } };
 }
 
+function isNetworkAllowed(url: URL, allowedHosts: string[] | undefined): boolean {
+  if (!allowedHosts?.length) return false;
+  return allowedHosts.some((allowed) => {
+    const normalized = allowed.replace(/^https?:\/\//, "").replace(/\/$/, "");
+    return (
+      url.host === normalized ||
+      url.hostname === normalized ||
+      url.hostname.endsWith(`.${normalized}`)
+    );
+  });
+}
+
+function buildRequestBody(body: unknown): BodyInit | undefined {
+  if (body === undefined) return undefined;
+  if (typeof body === "string") return body;
+  if (body instanceof Uint8Array) return body;
+  return JSON.stringify(body);
+}
+
+function redactHeaders(headers: Record<string, string> | undefined): Record<string, string> {
+  const output: Record<string, string> = {};
+  for (const [key, value] of Object.entries(headers ?? {})) {
+    const lower = key.toLowerCase();
+    output[key] =
+      lower === "authorization" ||
+      lower === "cookie" ||
+      lower.includes("token") ||
+      lower.includes("key") ||
+      lower.includes("secret")
+        ? "[REDACTED]"
+        : value;
+  }
+  return output;
+}
+
 /**
  * SkillRunner — Skill 插件执行引擎。
  *
@@ -108,9 +143,7 @@ export class SkillRunner {
     if (installed.manifest.permissions.shell) {
       throw new Error("Permission denied: shell access is not allowed in MVP runner.");
     }
-    if ((installed.manifest.permissions.network?.allow?.length ?? 0) > 0) {
-      throw new Error("Permission denied: network access is not available in MVP runner.");
-    }
+    // Network access is controlled through ctx.http.request() with allow-list enforcement.
 
     const module = (await import(this.registry.entryUrl(installed))) as { default?: SkillDefinition };
     const definition = module.default;
@@ -231,6 +264,61 @@ export class SkillRunner {
           await db.audit({ runId: step.runId, stepId: step.id, actor: AuditActor.Daemon, action: "secret.read", target: "[REDACTED_NAME]", risk: capability.risk, payload: { skillId: step.skillId } });
           return process.env[name];
         }
+      },
+      http: {
+        request: async (request) => {
+          const url = new URL(request.url);
+          for (const [key, value] of Object.entries(request.query ?? {})) {
+            if (value !== undefined) url.searchParams.set(key, String(value));
+          }
+
+          if (!isNetworkAllowed(url, installed.manifest.permissions.network?.allow)) {
+            throw new Error(`Permission denied: network access is not allowed for ${url.host}`);
+          }
+
+          await db.audit({
+            runId: step.runId,
+            stepId: step.id,
+            actor: AuditActor.Daemon,
+            action: "network.request",
+            target: url.origin,
+            risk: capability.risk,
+            payload: {
+              skillId: step.skillId,
+              capability: step.capability,
+              method: request.method,
+              url: `${url.origin}${url.pathname}`,
+              headers: redactHeaders(request.headers),
+            },
+          });
+
+          const response = await fetch(url, {
+            method: request.method,
+            headers: {
+              ...(request.body && typeof request.body !== "string"
+                ? { "content-type": "application/json" }
+                : {}),
+              ...request.headers,
+            },
+            body: buildRequestBody(request.body),
+            signal: controller.signal,
+          });
+
+          const headers = Object.fromEntries(response.headers.entries());
+          const responseType = request.responseType ?? "json";
+          const body =
+            responseType === "arrayBuffer"
+              ? Buffer.from(await response.arrayBuffer())
+              : responseType === "text"
+                ? await response.text()
+                : await response.json();
+
+          return {
+            status: response.status,
+            headers,
+            body,
+          };
+        },
       },
       logger: {
         info(message, payload) { skillLog("info", message, payload); },

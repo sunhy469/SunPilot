@@ -11,7 +11,7 @@
  *   Tools:      ToolDecisionEngine（技能发现 + 意图匹配）
  *   Safety:     PermissionPolicy → ApprovalGate → ApprovalDecisionService
  *   Planner:    RuleBasedPlanner
- *   Execution:  toolExecutor（桥接 skill-runner + workflow executor）
+ *   Execution:  SkillToolExecutor（统一工具执行入口）
  *   Reflection: BasicReflectionEngine
  *   Response:   ResponseComposer（LLM 流式输出 + 消息持久化）
  *   Memory:     DefaultMemoryWriter（显式/隐式记忆提取 + 脱敏 + 去重）
@@ -19,8 +19,8 @@
  *   Service:    AgentService（门面，注入 Loop + Abort + 幂等 + 审批裁决）
  *
  * 工具执行：
- * - workflow.* skillId → WorkflowToolExecutor（作为 Agent tool 在当前 run 内执行）
- * - 其他 skillId → SkillRunner.execute（走 skill-runner 包直接执行）
+ * - 全部 skill 调用统一通过 SkillToolExecutor → SkillRunner 执行。
+ * - skill catalog 使用全限定格式：<skill-id>:<capability-name>。
  */
 import {
   type StepRecord,
@@ -33,8 +33,6 @@ import {
   DefaultMemoryWriter,
   ExecutionOrchestrator,
   SkillToolExecutor,
-  ToolExecutorBridge,
-  WorkflowToolExecutorAdapter,
   InMemoryAgentEventBus,
   IntentRouter,
   PermissionPolicy,
@@ -54,7 +52,6 @@ import {
 } from "@sunpilot/core";
 import type { DatabaseContext } from "@sunpilot/storage";
 import type { SkillRegistry } from "@sunpilot/skill-runner";
-import { WorkflowToolExecutor, workflowToToolDescriptor } from "@sunpilot/workflow";
 
 import type { LlmProvider } from "@sunpilot/core";
 
@@ -135,29 +132,16 @@ export function createAgentLoopService(deps: {
     },
     listSkills: async () => {
       const skills = deps.skillRegistry.list();
-      const skillCapabilities = skills.flatMap((s) =>
-        s.manifest.capabilities.map((capability) => ({
-          id: capability.name,
-          name: capability.title,
-          description: capability.description,
-          category: categoryFromCapability(capability.name),
-        })),
-      );
-      const workflows = await deps.database.workflows.list();
-      return [
-        ...skillCapabilities,
-        ...workflows
-          .filter((workflow) => workflow.enabled)
-          .map((workflow) => {
-            const descriptor = workflowToToolDescriptor(workflow);
-            return {
-              id: descriptor.id,
-              name: descriptor.name,
-              description: descriptor.description,
-              category: descriptor.category,
-            };
-          }),
-      ];
+      return skills
+        .filter((skill) => skill.enabled)
+        .flatMap((s) =>
+          s.manifest.capabilities.map((capability) => ({
+            id: capabilityToolId(s.id, capability.name),
+            name: capability.title,
+            description: capability.description,
+            category: categoryFromCapability(capability.name),
+          })),
+        );
     },
     listArtifacts: async (runId) => {
       const artifacts = await deps.database.artifacts.list(runId);
@@ -203,9 +187,9 @@ export function createAgentLoopService(deps: {
   const toolDecisionEngine = new ToolDecisionEngine({
     listSkills: async () => {
       const skills = deps.skillRegistry.list();
-      const skillCapabilities = skills.flatMap((s) =>
+      return skills.flatMap((s) =>
         s.manifest.capabilities.map((capability) => ({
-          id: capability.name,
+          id: capabilityToolId(s.id, capability.name),
           name: capability.title,
           description: capability.description,
           category: categoryFromCapability(capability.name),
@@ -224,17 +208,6 @@ export function createAgentLoopService(deps: {
           },
         })),
       );
-      const workflows = await deps.database.workflows.list();
-      return [
-        ...skillCapabilities,
-        ...workflows.map((workflow) => {
-          const descriptor = workflowToToolDescriptor(workflow);
-          return {
-            ...descriptor,
-            permissions: [] as Permission[],
-          };
-        }),
-      ];
     },
   });
 
@@ -252,35 +225,6 @@ export function createAgentLoopService(deps: {
   const planner = new RuleBasedPlanner();
 
   // ── Execution ──────────────────────────────────────────────────
-  // Workflow executor: delegates to @sunpilot/workflow WorkflowToolExecutor.
-  const workflowToolExecutor = new WorkflowToolExecutor({
-    findWorkflow: (id) => deps.database.workflows.findById(id),
-    getRun: async (runId) =>
-      (await deps.database.runs.findById(runId)) ?? undefined,
-    createStep: async (step) => {
-      await deps.database.steps.create({
-        id: step.id,
-        runId: step.runId,
-        type: step.type as "skill" | "approval" | "builtin" | "manual",
-        name: step.name,
-        status: step.status as StepRecord["status"],
-        skillId: step.skillId,
-        input: step.input ?? {},
-      });
-    },
-    updateStepStatus: (id, status, output, error) =>
-      deps.database.steps.updateStatus(
-        id,
-        status as "completed" | "failed" | "cancelled" | "interrupted",
-        output,
-        error,
-      ),
-  });
-
-  // Workflow executor adapter: bridges ToolExecutor interface
-  // to WorkflowToolExecutor from @sunpilot/workflow.
-  const workflowExecutor = new WorkflowToolExecutorAdapter(workflowToolExecutor);
-
   // Skill executor: delegates to SkillToolExecutor in core.
   const skillExecutor = new SkillToolExecutor({
     listSkills: () => deps.skillRegistry.list(),
@@ -308,13 +252,8 @@ export function createAgentLoopService(deps: {
     listArtifacts: async (runId) => deps.database.artifacts.list(runId),
   });
 
-  const toolExecutor = new ToolExecutorBridge({
-    skillExecutor,
-    workflowExecutor,
-  });
-
   const executionOrchestrator = new ExecutionOrchestrator({
-    toolExecutor,
+    toolExecutor: skillExecutor,
     eventBus: rawEventBus,
     toolCalls: deps.database.toolCalls,
   });
@@ -432,6 +371,10 @@ export function createAgentLoopService(deps: {
   return new AgentService(config);
 }
 
+function capabilityToolId(skillId: string, capabilityName: string): string {
+  return `${skillId}:${capabilityName}`;
+}
+
 function categoryFromCapability(
   capability: string,
 ):
@@ -441,7 +384,7 @@ function categoryFromCapability(
   | "web"
   | "memory"
   | "artifact"
-  | "workflow"
+  | "automation"
   | "custom" {
   if (capability.startsWith("filesystem")) return "filesystem";
   if (capability.startsWith("shell")) return "shell";
@@ -449,7 +392,7 @@ function categoryFromCapability(
     return "web";
   if (capability.startsWith("memory")) return "memory";
   if (capability.startsWith("artifact")) return "artifact";
-  if (capability.startsWith("workflow")) return "workflow";
+  if (capability.startsWith("automation")) return "automation";
   if (capability.startsWith("code")) return "code";
   return "custom";
 }

@@ -238,37 +238,6 @@ export interface RetrievedMemoryRecord extends MemoryRecord {
   relevance: number;
 }
 
-// ── Workflow ───────────────────────────────────────────────────────
-
-export interface WorkflowStepPlan {
-  id: string;
-  name: string;
-  type: "skill" | "approval" | "builtin" | "manual";
-  providerId?: string;
-  capability?: string;
-  input: unknown;
-  dependsOn?: string[];
-  risk?: SkillRisk;
-}
-
-export interface WorkflowPlan {
-  runTitle: string;
-  steps: WorkflowStepPlan[];
-  expectedArtifacts?: Array<{ name: string; type: ArtifactType }>;
-  riskSummary?: { risk: SkillRisk; reason: string };
-}
-
-export interface WorkflowRecord {
-  id: string;
-  title: string;
-  version: string;
-  source: string;
-  enabled: boolean;
-  definition: unknown;
-  createdAt: string;
-  updatedAt: string;
-}
-
 // ── Skill manifest ─────────────────────────────────────────────────
 
 export interface PermissionDeclaration {

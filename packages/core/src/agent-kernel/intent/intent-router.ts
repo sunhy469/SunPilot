@@ -101,7 +101,7 @@ export class IntentRouter implements IntentRouterInterface {
 - code_modification: fixing, refactoring, or editing existing code
 - file_operation: reading, writing, or managing files
 - shell_operation: running commands, builds, or tests
-- workflow_execution: running a multi-step workflow
+- automation_execution: running an automated multi-step task
 - artifact_generation: generating documents or reports
 - memory_update: saving or updating preferences/facts
 - diagnostics: debugging or troubleshooting
@@ -126,7 +126,7 @@ Respond with ONLY the category name, nothing else.`;
       "code_modification",
       "file_operation",
       "shell_operation",
-      "workflow_execution",
+      "automation_execution",
       "artifact_generation",
       "memory_update",
       "diagnostics",
@@ -197,7 +197,7 @@ Respond with ONLY the category name, nothing else.`;
           candidateSkills: ["shell.execute"],
           reason: "LLM classified as shell operation",
         };
-      case "workflow_execution":
+      case "automation_execution":
         return {
           type,
           confidence: 0.7,
@@ -205,8 +205,8 @@ Respond with ONLY the category name, nothing else.`;
           requiresTool: true,
           requiresApproval: false,
           riskLevel: "medium",
-          candidateSkills: ["workflow"],
-          reason: "LLM classified as workflow execution",
+          candidateSkills: [],
+          reason: "LLM classified as automation execution",
         };
       default:
         return {

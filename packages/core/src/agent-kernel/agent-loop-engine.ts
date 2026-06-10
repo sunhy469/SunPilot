@@ -787,9 +787,9 @@ export class AgentLoopEngine {
 function intentFromSkillId(skillId: string): RoutedIntent["type"] {
   if (skillId.startsWith("filesystem.")) return "file_operation";
   if (skillId.startsWith("shell.")) return "shell_operation";
-  if (skillId.startsWith("workflow.")) return "workflow_execution";
   if (skillId.startsWith("memory.")) return "memory_update";
   if (skillId.startsWith("artifact.")) return "artifact_generation";
+  if (skillId.includes(":") || skillId.startsWith("automation")) return "automation_execution";
   return "unknown";
 }
 

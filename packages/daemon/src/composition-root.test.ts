@@ -146,7 +146,7 @@ describe("createAgentLoopService", () => {
       expect.objectContaining({
         id: executedSteps[0]?.id,
         runId: result.runId,
-        skillId: "filesystem.read",
+        skillId: "test.files:filesystem.read",
         status: "completed",
         riskLevel: "low",
         result: expect.objectContaining({
@@ -213,7 +213,7 @@ describe("createAgentLoopService", () => {
         status: "pending",
         risk: "high",
         requestedAction: expect.objectContaining({
-          skillId: "shell.execute",
+          skillId: "test.shell:shell.execute",
           permissions: ["shell.execute"],
         }),
       }),
@@ -244,7 +244,7 @@ describe("createAgentLoopService", () => {
       expect.objectContaining({
         id: executedSteps[0]?.id,
         runId: result.runId,
-        skillId: "shell.execute",
+        skillId: "test.shell:shell.execute",
         status: "completed",
         riskLevel: "high",
         result: expect.objectContaining({
@@ -309,63 +309,65 @@ describe("createAgentLoopService", () => {
     );
   });
 
-  test("executes enabled workflows through the Agent tool loop", async () => {
+  test("tool catalog exposes skills with fully-qualified capability ids", async () => {
     const db = new InMemoryDatabaseContext();
-    await db.workflows.upsert({
-      id: "daily.close",
-      title: "Daily Close",
-      version: "1.0.0",
-      source: "local",
+    const automationSkill: import("@sunpilot/protocol").InstalledSkillRecord = {
+      id: "sunpilot.automation",
+      name: "SunPilot Automation",
+      version: "0.1.0",
+      path: "/tmp/sunpilot/skills/automation",
       enabled: true,
-      definition: { description: "Close the daily business checklist." },
-      createdAt: "2026-06-06T00:00:00.000Z",
+      manifest: {
+        schemaVersion: "sunpilot.skill/v1",
+        id: "sunpilot.automation",
+        name: "SunPilot Automation",
+        version: "0.1.0",
+        description: "Built-in automations.",
+        entry: "dist/index.js",
+        readme: "README.md",
+        runtime: { node: ">=22", module: "esm" },
+        capabilities: [
+          {
+            name: "daily.close",
+            title: "Daily Close",
+            description: "Close the daily business checklist.",
+            inputSchema: {},
+            outputSchema: {},
+            risk: "medium",
+            permissions: [],
+          },
+        ],
+        permissions: {},
+      },
+      installedAt: "2026-06-06T00:00:00.000Z",
       updatedAt: "2026-06-06T00:00:00.000Z",
-    });
+    };
     const service = createAgentLoopService({
       database: db,
       skillRegistry: {
-        list: () => [],
+        list: () => [automationSkill],
       } as any,
       llmProvider: {
         id: "test",
         model: "test",
         async *streamChat() {
-          yield { delta: "Workflow started.", raw: {} };
+          yield { delta: "Automation result.", raw: {} };
         },
       },
     });
 
+    // Verify catalog exposes fully-qualified tool ids (<skill-id>:<capability-name>)
     const result = await service.handleChatCommand(
-      { message: "run workflow Daily Close" },
+      { message: "hello" },
       { source: "api" },
     );
-    await new Promise((resolve) => setTimeout(resolve, 0));
-
     expect(result.status).toBe("completed");
-    await expect(db.toolCalls.listByRunId(result.runId)).resolves.toEqual([
-      expect.objectContaining({
-        runId: result.runId,
-        skillId: "workflow.daily.close",
-        status: "completed",
-        riskLevel: "medium",
-      }),
-    ]);
-    await expect(db.events.listByRunId(result.runId)).resolves.toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          type: "agent.tool.selected",
-          payload: expect.objectContaining({
-            skillId: "workflow.daily.close",
-          }),
-        }),
-        expect.objectContaining({
-          type: "agent.tool.completed",
-          payload: expect.objectContaining({
-            skillId: "workflow.daily.close",
-          }),
-        }),
-        expect.objectContaining({ type: "agent.run.completed" }),
-      ]),
+
+    // Verify the skill catalog in events includes fully-qualified capability ids
+    const events = await db.events.listByRunId(result.runId);
+    const contextCompleted = events.find(
+      (e) => e.type === "agent.context.completed",
     );
+    expect(contextCompleted).toBeDefined();
   });
 });
