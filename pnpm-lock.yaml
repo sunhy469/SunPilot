@@ -70,9 +70,6 @@ importers:
       '@sunpilot/storage':
         specifier: workspace:*
         version: link:../storage
-      '@sunpilot/workflow':
-        specifier: workspace:*
-        version: link:../workflow
     devDependencies:
       typescript:
         specifier: ^5.8.3
@@ -107,9 +104,6 @@ importers:
       '@sunpilot/web':
         specifier: workspace:*
         version: link:../web
-      '@sunpilot/workflow':
-        specifier: workspace:*
-        version: link:../workflow
       fastify:
         specifier: ^5.3.3
         version: 5.8.5
@@ -273,19 +267,6 @@ importers:
       sass:
         specifier: ^1.100.0
         version: 1.100.0
-      typescript:
-        specifier: ^5.8.3
-        version: 5.8.3
-      vitest:
-        specifier: ^3.2.1
-        version: 3.2.6(@types/node@22.19.19)(jsdom@26.1.0)(sass@1.100.0)(tsx@4.22.4)
-
-  packages/workflow:
-    dependencies:
-      '@sunpilot/protocol':
-        specifier: workspace:*
-        version: link:../protocol
-    devDependencies:
       typescript:
         specifier: ^5.8.3
         version: 5.8.3

@@ -28,7 +28,6 @@
     "@sunpilot/protocol": "workspace:*",
     "@sunpilot/skill-runner": "workspace:*",
     "@sunpilot/storage": "workspace:*",
-    "@sunpilot/workflow": "workspace:*",
     "fastify": "^5.3.3",
     "pino": "^9.7.0",
     "ws": "^8.18.2",

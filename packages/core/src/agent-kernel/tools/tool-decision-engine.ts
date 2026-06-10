@@ -19,8 +19,7 @@ export interface ToolDecisionEngineDeps {
  *   1. 如果有 Plan 且包含 tool 步骤 → 直接使用 Plan 中的工具调用
  *   2. 如果意图不需要工具（如 casual_chat）→ 返回 no_tool
  *   3. 匹配意图的候选技能到可用技能 → 返回 use_tool
- *   4. 无匹配且意图为 workflow_execution → 根据用户消息关键词匹配 Workflow
- *   5. 仍然无匹配 → 查找 INTENT_SKILL_MAP 中的兜底技能
+ *   4. 仍然无匹配 → 查找 INTENT_SKILL_MAP 中的兜底技能
  *
  * 当前 MVP 阶段以规则匹配为主，后续阶段将引入 LLM 生成工具调用参数。
  */
@@ -72,7 +71,7 @@ export class ToolDecisionEngine implements ToolDecisionEngineInterface {
     }
 
     // No tool needed for these intent types
-    if (!intent.requiresTool || intent.candidateSkills.length === 0) {
+    if (!intent.requiresTool) {
       return {
         type: "no_tool",
         reason: `Intent '${intent.type}' doesn't require tools`,
@@ -91,59 +90,31 @@ export class ToolDecisionEngine implements ToolDecisionEngineInterface {
       };
     }
 
-    // Match intent candidate skills to available skills
+    // Match intent candidate skills to available skills.
+    // Supports both fully-qualified ids (<skill-id>:<capability>) and
+    // unqualified capability names for backward compatibility.
     const matchedSkills = intent.candidateSkills
       .flatMap((candidateId) =>
         availableSkills.filter(
           (s) =>
             s.id === candidateId ||
+            capabilityNameFromToolId(s.id) === candidateId ||
             s.name.toLowerCase().includes(candidateId.toLowerCase()),
         ),
       )
       .filter((s, idx, arr) => arr.findIndex((x) => x.id === s.id) === idx); // dedupe
 
     if (matchedSkills.length === 0) {
-      if (intent.type === "workflow_execution") {
-        const workflowSkills = availableSkills.filter(
-          (skill) => skill.category === "workflow",
-        );
-        const message = context.currentMessage.content.toLowerCase();
-        const namedWorkflowSkills = workflowSkills.filter(
-          (skill) =>
-            message.includes(skill.id.toLowerCase()) ||
-            message.includes(skill.name.toLowerCase()),
-        );
-        const selectedWorkflowSkills =
-          namedWorkflowSkills.length > 0
-            ? namedWorkflowSkills
-            : workflowSkills.length === 1
-              ? workflowSkills
-              : [];
-        if (selectedWorkflowSkills.length > 0) {
-          return {
-            type: "use_tool",
-            toolCalls: selectedWorkflowSkills.map((skill) => ({
-              id: `tc_${crypto.randomUUID()}`,
-              skillId: skill.id,
-              name: skill.name,
-              arguments: { message: context.currentMessage.content },
-              permissions: skill.permissions,
-              reason: `Matched workflow for intent '${intent.type}'`,
-              riskLevel: skill.riskHints.defaultRisk,
-              requiresApproval:
-                skill.riskHints.defaultRisk === "high" ||
-                skill.riskHints.defaultRisk === "critical",
-              timeoutMs: Math.min(skill.defaultTimeoutMs, skill.maxTimeoutMs),
-            })),
-            reason: `Matched ${selectedWorkflowSkills.length} workflow(s) for intent '${intent.type}'`,
-          };
-        }
-      }
-
       // Check intent skill map for fallback
       const fallbackIds = INTENT_SKILL_MAP[intent.type] ?? [];
       const fallbackSkills = fallbackIds
-        .flatMap((id) => availableSkills.filter((s) => s.id === id))
+        .flatMap((id) =>
+          availableSkills.filter(
+            (s) =>
+              s.id === id ||
+              capabilityNameFromToolId(s.id) === id,
+          ),
+        )
         .filter((s, idx, arr) => arr.findIndex((x) => x.id === s.id) === idx);
 
       if (fallbackSkills.length === 0) {
@@ -195,6 +166,12 @@ export class ToolDecisionEngine implements ToolDecisionEngineInterface {
     const allSkills = await this.deps.listSkills();
     return allSkills.filter((skill) => skill.enabled);
   }
+}
+
+/** Extract the capability name portion from a fully-qualified tool id. */
+function capabilityNameFromToolId(toolId: string): string | undefined {
+  const separator = toolId.indexOf(":");
+  return separator >= 0 ? toolId.slice(separator + 1) : undefined;
 }
 
 function maxRisk(

@@ -7,4 +7,4 @@ packages/skills/fixtures/*/dist/
 *.db
 *.db-shm
 *.db-wal
-developer_docs/dev_docs/
+

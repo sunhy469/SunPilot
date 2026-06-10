@@ -67,14 +67,12 @@ export function registerDaemonMetricsRoutes(
   deps: {
     database: DatabaseContext;
     skillRegistry: SkillSummarySource;
-    workflows: { list(): unknown[] };
     connectionRegistry: ConnectionCounter;
   },
 ): void {
   const {
     database,
     skillRegistry,
-    workflows,
     connectionRegistry,
   } = deps;
 

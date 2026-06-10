@@ -34,10 +34,8 @@ export {
   type PermissionDecision,
 } from "./agent-kernel/safety/safety-types.js";
 export { ExecutionOrchestrator } from "./agent-kernel/execution/execution-orchestrator.js";
-export { ToolExecutorBridge } from "./agent-kernel/execution/tool-executor-bridge.js";
 export { SkillToolExecutor } from "./agent-kernel/execution/skill-tool-executor.js";
 export type { SkillToolExecutorDeps } from "./agent-kernel/execution/skill-tool-executor.js";
-export { WorkflowToolExecutorAdapter } from "./agent-kernel/execution/workflow-tool-executor-adapter.js";
 export * from "./agent-kernel/execution/execution-types.js";
 export { RepositoryAgentEventSink } from "./agent-kernel/persistence/agent-event-sink.js";
 export { RepositoryAgentRunInitializer } from "./agent-kernel/persistence/repository-agent-run-initializer.js";

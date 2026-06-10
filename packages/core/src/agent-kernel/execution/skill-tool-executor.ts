@@ -33,10 +33,10 @@ export interface SkillToolExecutorDeps {
 }
 
 /**
- * SkillToolExecutor — 执行非 workflow 的 skill 工具调用。
+ * SkillToolExecutor — 统一的 skill 工具执行器。
  *
  * 职责：
- * - 解析 skillId → 找到对应的 InstalledSkill + Capability
+ * - 解析 skillId（支持全限定格式 <skill-id>:<capability-name>）→ 找到对应的 InstalledSkill + Capability
  * - 创建 step 记录
  * - 委托给 skill-runner 执行
  * - 收集产物、更新 step 状态
@@ -135,13 +135,23 @@ function resolveCapability(
       capability: InstalledSkillRecord["manifest"]["capabilities"][number];
     }
   | undefined {
-  const [skillId, capabilityName] = requested.includes(":")
-    ? requested.split(":", 2)
-    : [undefined, requested];
+  const separator = requested.indexOf(":");
+  const skillId = separator >= 0 ? requested.slice(0, separator) : undefined;
+  const capabilityName =
+    separator >= 0 ? requested.slice(separator + 1) : requested;
 
+  if (skillId) {
+    const skill = skills.find((item) => item.enabled && item.id === skillId);
+    const capability = skill?.manifest.capabilities.find(
+      (item) => item.name === capabilityName,
+    );
+    return skill && capability ? { skill, capability } : undefined;
+  }
+
+  // Backward compatibility only. New tool calls should always use
+  // <skill-id>:<capability-name>.
   for (const skill of skills) {
     if (!skill.enabled) continue;
-    if (skillId && skill.id !== skillId) continue;
     const capability = skill.manifest.capabilities.find(
       (item) => item.name === capabilityName,
     );

@@ -16,8 +16,7 @@
   "dependencies": {
     "@sunpilot/protocol": "workspace:*",
     "@sunpilot/skill-runner": "workspace:*",
-    "@sunpilot/storage": "workspace:*",
-    "@sunpilot/workflow": "workspace:*"
+    "@sunpilot/storage": "workspace:*"
   },
   "devDependencies": {
     "typescript": "^5.8.3",

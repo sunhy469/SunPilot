@@ -67,7 +67,7 @@ export function registerSunPilotApiRoutes(
   app: FastifyInstance,
   deps: SunPilotApiDeps,
 ): void {
-  const { database, paths, getChatAgent, skills, workflows, config } = deps;
+  const { database, paths, getChatAgent, skills, config } = deps;
 
   // ── Health ─────────────────────────────────────────────────────────
   app.get("/healthz", async () => ({
@@ -82,7 +82,6 @@ export function registerSunPilotApiRoutes(
     config: config.read(),
     storage: {},
     skills: skills.list().length,
-    workflows: (await workflows.list()).length,
   }));
 
   // ── Config ─────────────────────────────────────────────────────────
@@ -408,20 +407,6 @@ export function registerSunPilotApiRoutes(
         limit: query.limit,
       }),
     };
-  });
-
-  // ── Workflows ──────────────────────────────────────────────────────
-  app.get("/v1/workflows", async () => database.workflows.list());
-  app.get<{ Params: { id: string } }>(
-    "/v1/workflows/:id",
-    async (request, reply) => {
-      const workflow = await workflows.findById(request.params.id);
-      return workflow ?? reply.code(404).send({ error: "not_found" });
-    },
-  );
-  app.post("/v1/workflows/reload", async () => {
-    await workflows.reload();
-    return database.workflows.list();
   });
 
   // ── Skills ─────────────────────────────────────────────────────────

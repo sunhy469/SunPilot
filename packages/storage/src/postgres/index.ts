@@ -17,4 +17,3 @@ export * from "./postgres.step.repository.js";
 export * from "./postgres.tool-call.repository.js";
 export * from "./postgres.idempotency.repository.js";
 export * from "./postgres.skill.repository.js";
-export * from "./postgres.workflow.repository.js";

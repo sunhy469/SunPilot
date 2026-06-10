@@ -65,13 +65,13 @@ describe("ContextBuilder", () => {
       listMessages: async () => [],
       listSkills: async () => [
         {
-          id: "workflow.daily-report",
+          id: "sunpilot.automation:daily-report.generate",
           name: "Daily Report",
           description: "Create the daily operations report",
-          category: "workflow",
+          category: "automation",
         },
         {
-          id: "artifact.write",
+          id: "test.artifact:artifact.write",
           name: "Write Artifact",
           description: "Create a file artifact",
           category: "artifact",
@@ -85,13 +85,13 @@ describe("ContextBuilder", () => {
 
     expect(context.availableSkills).toEqual([
       {
-        id: "workflow.daily-report",
+        id: "sunpilot.automation:daily-report.generate",
         name: "Daily Report",
         description: "Create the daily operations report",
-        category: "workflow",
+        category: "automation",
       },
       {
-        id: "artifact.write",
+        id: "test.artifact:artifact.write",
         name: "Write Artifact",
         description: "Create a file artifact",
         category: "artifact",

@@ -1,9 +1,12 @@
-import type { SkillDefinition } from "./index.js";
+import type { SkillDefinition, SkillHttpRequest, SkillHttpResponse } from "./index.js";
 import type { ArtifactRecord } from "@sunpilot/protocol";
 
 export interface TestSkillOptions {
   files?: Record<string, string>;
   secrets?: Record<string, string | undefined>;
+  http?: {
+    request(input: SkillHttpRequest): Promise<SkillHttpResponse>;
+  };
 }
 
 export async function testSkill(skill: SkillDefinition, capabilityName: string, input: unknown, options: TestSkillOptions = {}): Promise<unknown> {
@@ -51,6 +54,14 @@ export async function testSkill(skill: SkillDefinition, capabilityName: string, 
     },
     memory: { async write() {} },
     secrets: { async get(name: string) { return Object.hasOwn(options.secrets ?? {}, name) ? options.secrets?.[name] : process.env[name]; } },
+    http: {
+      async request<TBody = unknown>(request: SkillHttpRequest): Promise<SkillHttpResponse<TBody>> {
+        if (!options.http) {
+          throw new Error(`Test HTTP request not mocked: ${request.method} ${request.url}`);
+        }
+        return options.http.request(request) as Promise<SkillHttpResponse<TBody>>;
+      },
+    },
     logger: { info() {}, warn() {}, error() {} }
   });
   return capability.output.parse(result);

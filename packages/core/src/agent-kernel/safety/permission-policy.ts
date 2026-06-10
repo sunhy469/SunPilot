@@ -88,14 +88,18 @@ export class PermissionPolicy implements PermissionPolicyInterface {
   }
 
   private categoryFromSkillId(skillId: string): string {
-    if (skillId.startsWith('filesystem')) return 'filesystem';
-    if (skillId.startsWith('shell')) return 'shell';
-    if (skillId.startsWith('network') || skillId.startsWith('web'))
+    // Extract capability name for fully-qualified ids (<skill-id>:<capability>)
+    const capability = skillId.includes(':')
+      ? skillId.slice(skillId.lastIndexOf(':') + 1)
+      : skillId;
+    if (capability.startsWith('filesystem')) return 'filesystem';
+    if (capability.startsWith('shell')) return 'shell';
+    if (capability.startsWith('network') || capability.startsWith('web'))
       return 'network';
-    if (skillId.startsWith('database') || skillId.startsWith('db'))
+    if (capability.startsWith('database') || capability.startsWith('db'))
       return 'database';
-    if (skillId.startsWith('memory')) return 'memory';
-    if (skillId.startsWith('artifact')) return 'artifact';
+    if (capability.startsWith('memory')) return 'memory';
+    if (capability.startsWith('artifact')) return 'artifact';
     return 'custom';
   }
 }

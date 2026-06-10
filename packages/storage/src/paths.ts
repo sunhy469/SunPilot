@@ -29,10 +29,6 @@ export interface SunPilotConfig {
     directories: string[];
     autoReload: boolean;
   };
-  workflows: {
-    directories: string[];
-    autoReload: boolean;
-  };
   storage: {
     home: string;
   };
@@ -63,7 +59,6 @@ export function defaultSunPilotConfig(paths = getSunPilotPaths()): SunPilotConfi
     server: { host: "127.0.0.1", port: 3737 },
     security: { requireLocalToken: false, allowLan: false },
     skills: { directories: [paths.skills], autoReload: true },
-    workflows: { directories: [join(paths.home, "workflows")], autoReload: true },
     storage: { home: paths.home }
   };
 }
@@ -89,7 +84,6 @@ export function updateSunPilotConfig(patch: Partial<SunPilotConfig>, paths = get
       server: { ...current.server, ...patch.server },
       security: { ...current.security, ...patch.security },
       skills: { ...current.skills, ...patch.skills },
-      workflows: { ...current.workflows, ...patch.workflows },
       storage: { ...current.storage, ...patch.storage }
     },
     paths
@@ -146,10 +140,6 @@ function normalizeSunPilotConfig(input: Partial<SunPilotConfig>, paths: SunPilot
     skills: {
       directories: stringArray(input.skills?.directories, defaults.skills.directories),
       autoReload: input.skills?.autoReload ?? defaults.skills.autoReload
-    },
-    workflows: {
-      directories: stringArray(input.workflows?.directories, defaults.workflows.directories),
-      autoReload: input.workflows?.autoReload ?? defaults.workflows.autoReload
     },
     storage: {
       home: paths.home

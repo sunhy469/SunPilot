@@ -16,7 +16,6 @@ import { PostgresSettingRepository } from "./postgres.setting.repository.js";
 import { PostgresSkillRepository } from "./postgres.skill.repository.js";
 import { PostgresStepRepository } from "./postgres.step.repository.js";
 import { PostgresToolCallRepository } from "./postgres.tool-call.repository.js";
-import { PostgresWorkflowRepository } from "./postgres.workflow.repository.js";
 
 export class PostgresDatabaseContext implements DatabaseContext {
   readonly conversations: PostgresConversationRepository;
@@ -33,7 +32,6 @@ export class PostgresDatabaseContext implements DatabaseContext {
   readonly settings: PostgresSettingRepository;
   readonly audit: PostgresAuditRepository;
   readonly idempotency: PostgresIdempotencyRepository;
-  readonly workflows: PostgresWorkflowRepository;
   readonly skills: PostgresSkillRepository;
 
   constructor(
@@ -54,7 +52,6 @@ export class PostgresDatabaseContext implements DatabaseContext {
     this.settings = new PostgresSettingRepository(pool);
     this.audit = new PostgresAuditRepository(pool);
     this.idempotency = new PostgresIdempotencyRepository(pool);
-    this.workflows = new PostgresWorkflowRepository(pool);
     this.skills = new PostgresSkillRepository(pool);
   }
 
