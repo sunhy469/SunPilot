@@ -1,12 +1,22 @@
+import { Alert, Button, Tag, Space, Typography, Flex } from "antd";
 import { CheckOutlined, CloseOutlined } from "@ant-design/icons";
 import type { AgentApproval } from "../../../features/agent-runtime/api";
 import "./ApprovalStrip.css";
+
+const { Text } = Typography;
 
 interface ApprovalStripProps {
   approvals: AgentApproval[];
   onApprove: (approvalId: string) => void;
   onReject: (approvalId: string) => void;
 }
+
+const riskColor: Record<string, string> = {
+  low: "blue",
+  medium: "orange",
+  high: "red",
+  critical: "red",
+};
 
 export function ApprovalStrip({
   approvals = [],
@@ -17,37 +27,40 @@ export function ApprovalStrip({
   if (pending.length === 0) return null;
 
   return (
-    <div className="approval-strip" aria-label="Pending approvals">
+    <Flex vertical gap={8} className="approval-strip">
       {pending.map((approval) => (
-        <div className="approval-strip__item" key={approval.id}>
-          <div className="approval-strip__body">
-            <span className={`approval-strip__risk is-${approval.risk}`}>
-              {approval.risk}
-            </span>
-            <span className="approval-strip__title">{approval.title}</span>
-          </div>
-          <div className="approval-strip__actions">
-            <button
-              aria-label={`Approve ${approval.title}`}
-              className="approval-strip__button is-approve"
-              onClick={() => onApprove(approval.id)}
-              title="Approve"
-              type="button"
-            >
-              <CheckOutlined />
-            </button>
-            <button
-              aria-label={`Reject ${approval.title}`}
-              className="approval-strip__button is-reject"
-              onClick={() => onReject(approval.id)}
-              title="Reject"
-              type="button"
-            >
-              <CloseOutlined />
-            </button>
-          </div>
-        </div>
+        <Alert
+          key={approval.id}
+          type="warning"
+          showIcon
+          message={
+            <Space>
+              <Tag color={riskColor[approval.risk] ?? "default"}>{approval.risk}</Tag>
+              <Text>{approval.title}</Text>
+            </Space>
+          }
+          action={
+            <Space>
+              <Button
+                type="primary"
+                size="small"
+                icon={<CheckOutlined />}
+                onClick={() => onApprove(approval.id)}
+              >
+                Approve
+              </Button>
+              <Button
+                danger
+                size="small"
+                icon={<CloseOutlined />}
+                onClick={() => onReject(approval.id)}
+              >
+                Reject
+              </Button>
+            </Space>
+          }
+        />
       ))}
-    </div>
+    </Flex>
   );
 }

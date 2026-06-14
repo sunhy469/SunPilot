@@ -9,58 +9,16 @@
 
 .user-bubble {
   max-width: min(680px, calc(100% - 58px));
-  padding: 15px 18px;
-  border: 1px solid #bfdbfe;
-  border-radius: 20px 20px 6px 20px;
-  background: var(--sp-blue-soft);
-  color: var(--sp-text);
   font-size: 14px;
   line-height: 1.8;
-  box-shadow: 0 8px 20px rgba(37, 99, 235, 0.08);
 }
 
-.user-bubble p {
-  margin: 0;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-}
-
-.user-avatar {
-  width: 42px;
-  height: 42px;
-  border: 1px solid #fde68a;
-  border-radius: 14px;
-  background: var(--sp-yellow-soft);
-  color: var(--sp-ink);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 12px;
-  font-weight: 800;
-  flex-shrink: 0;
-  box-shadow: none;
-}
-
-.message-time {
-  width: 100%;
-  text-align: right;
-  font-size: 11px;
-  color: var(--sp-muted);
-  margin-top: 4px;
-}
-
-@media (max-width: 640px) {
+@media (max-width: 767px) {
   .message-row.user {
     gap: 10px;
   }
 
   .user-bubble {
     max-width: calc(100% - 48px);
-  }
-
-  .user-avatar {
-    width: 36px;
-    height: 36px;
-    border-radius: 13px;
   }
 }

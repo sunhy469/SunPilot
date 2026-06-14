@@ -1,4 +1,5 @@
 import { memo } from "react";
+import { Spin } from "antd";
 import type { ChatMessage } from "../../../features/conversations/types";
 import type { ChatViewState } from "../types";
 import { useAutoScroll } from "../hooks/useAutoScroll";
@@ -26,7 +27,7 @@ export function MessageList({
   const isStreaming = status === "streaming";
 
   return (
-    <section className="message-list" ref={scrollRef}>
+    <div className="message-list" ref={scrollRef}>
       <div className="message-inner">
         {messages.map((message, idx) => {
           const isLast = idx === messages.length - 1;
@@ -58,9 +59,11 @@ export function MessageList({
         })}
 
         {status === "loadingConversation" && (
-          <div className="message-list__loading">加载对话中...</div>
+          <div className="message-list__loading">
+            <Spin size="small" /> 加载对话中...
+          </div>
         )}
       </div>
-    </section>
+    </div>
   );
 }

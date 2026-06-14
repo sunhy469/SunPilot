@@ -14,15 +14,21 @@
   z-index: 1;
   border-top: 1px solid var(--sp-border);
   background: rgba(248, 250, 252, 0.9);
-  padding: 16px clamp(16px, 3vw, 34px) 20px;
+  padding: 16px clamp(12px, 3vw, 34px) 20px;
 }
 
 .chat-page__error-wrap {
-  padding: 0 clamp(16px, 3vw, 34px);
+  padding: 0 clamp(12px, 3vw, 34px);
   margin-bottom: 8px;
 }
 
-.offline-banner {
-  padding: 0 clamp(16px, 3vw, 34px);
-  margin-bottom: 8px;
+/* sm (≥576px): tighter padding on small screens */
+@media (max-width: 575px) {
+  .chat-composer-wrap {
+    padding: 12px 10px 16px;
+  }
+
+  .chat-page__error-wrap {
+    padding: 0 10px;
+  }
 }

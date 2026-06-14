@@ -4,7 +4,10 @@ import {
   FileOutlined,
   InfoCircleOutlined,
 } from "@ant-design/icons";
+import { Alert, Button, Typography } from "antd";
 import { RichCardShell } from "./RichCardShell";
+
+const { Paragraph, Text, Link } = Typography;
 
 export function SummaryCard({
   title,
@@ -17,7 +20,7 @@ export function SummaryCard({
 }) {
   return (
     <RichCardShell title={title} subtitle={subtitle}>
-      <p className="rich-card__text">{data.text}</p>
+      <Paragraph>{data.text}</Paragraph>
     </RichCardShell>
   );
 }
@@ -33,10 +36,12 @@ export function InfoCard({
 }) {
   return (
     <RichCardShell title={title} subtitle={subtitle} className="rich-card--info">
-      <div className="rich-callout">
-        <InfoCircleOutlined />
-        <p>{data.text}</p>
-      </div>
+      <Alert
+        type="info"
+        showIcon
+        icon={<InfoCircleOutlined />}
+        message={data.text}
+      />
     </RichCardShell>
   );
 }
@@ -52,10 +57,12 @@ export function ErrorCard({
 }) {
   return (
     <RichCardShell title={title} subtitle={subtitle} className="rich-card--error">
-      <div className="rich-callout">
-        <ExclamationCircleOutlined />
-        <p>{data.message ?? data.text ?? "发生未知错误"}</p>
-      </div>
+      <Alert
+        type="error"
+        showIcon
+        icon={<ExclamationCircleOutlined />}
+        message={data.message ?? data.text ?? "发生未知错误"}
+      />
     </RichCardShell>
   );
 }
@@ -76,26 +83,25 @@ export function FileCard({
           <FileOutlined />
         </div>
         <div className="rich-file__meta">
-          <strong>{data.fileName ?? title ?? "文件"}</strong>
-          {data.fileSize && <span>{data.fileSize}</span>}
+          <Text strong>{data.fileName ?? title ?? "文件"}</Text>
+          {data.fileSize && <Text type="secondary"> {data.fileSize}</Text>}
         </div>
         {data.href ? (
-          <a
-            className="rich-file__action sp-icon-button sp-icon-button--md sp-icon-button--muted"
-            href={data.href}
-            aria-label="下载"
-            download
-          >
-            <DownloadOutlined />
-          </a>
+          <Link href={data.href} download>
+            <Button
+              type="text"
+              icon={<DownloadOutlined />}
+              aria-label="下载"
+              size="small"
+            />
+          </Link>
         ) : (
-          <button
-            type="button"
-            className="rich-file__action sp-icon-button sp-icon-button--md sp-icon-button--muted"
+          <Button
+            type="text"
+            icon={<DownloadOutlined />}
             aria-label="下载"
-          >
-            <DownloadOutlined />
-          </button>
+            size="small"
+          />
         )}
       </div>
     </RichCardShell>

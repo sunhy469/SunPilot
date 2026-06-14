@@ -1,4 +1,7 @@
 import type { ReactNode } from "react";
+import { Card, Typography } from "antd";
+
+const { Text } = Typography;
 
 export function RichCardShell({
   title,
@@ -12,14 +15,20 @@ export function RichCardShell({
   children: ReactNode;
 }) {
   return (
-    <article className={`rich-card ${className}`.trim()}>
-      {(title || subtitle) && (
-        <header className="rich-card__header">
-          {title && <h3 className="rich-card__title">{title}</h3>}
-          {subtitle && <p className="rich-card__subtitle">{subtitle}</p>}
-        </header>
+    <Card
+      className={`rich-card ${className}`.trim()}
+      title={title || undefined}
+      size="small"
+      styles={{
+        header: subtitle ? { paddingBottom: 0 } : undefined,
+      }}
+    >
+      {subtitle && (
+        <Text type="secondary" style={{ display: "block", marginBottom: 12, marginTop: -4 }}>
+          {subtitle}
+        </Text>
       )}
       {children}
-    </article>
+    </Card>
   );
 }

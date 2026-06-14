@@ -1,13 +1,16 @@
 import type { ReactNode } from "react";
+import { Layout } from "antd";
 import "./AppShell.css";
+
+const { Content } = Layout;
 
 export function AppShell({ sidebar, children }: { sidebar: ReactNode; children: ReactNode }) {
   return (
-    <div className="app-shell">
-      <div className="app-frame">
-        {sidebar}
-        <main className="app-main">{children}</main>
-      </div>
-    </div>
+    <Layout className="app-shell" hasSider>
+      {sidebar}
+      <Layout>
+        <Content className="app-main">{children}</Content>
+      </Layout>
+    </Layout>
   );
 }
