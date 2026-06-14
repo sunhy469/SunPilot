@@ -12,9 +12,8 @@
 .chat-composer-wrap {
   position: relative;
   z-index: 1;
-  border-top: 1px solid var(--sp-border);
-  background: rgba(248, 250, 252, 0.9);
-  padding: 16px clamp(12px, 3vw, 34px) 20px;
+  background: transparent;
+  padding: 0 clamp(12px, 3vw, 34px) 18px;
 }
 
 .chat-page__error-wrap {
@@ -25,7 +24,7 @@
 /* sm (≥576px): tighter padding on small screens */
 @media (max-width: 575px) {
   .chat-composer-wrap {
-    padding: 12px 10px 16px;
+    padding: 0 10px 14px;
   }
 
   .chat-page__error-wrap {

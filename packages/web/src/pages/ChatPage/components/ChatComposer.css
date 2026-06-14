@@ -1,12 +1,10 @@
 .chat-composer {
-  max-width: 920px;
+  max-width: var(--chat-content-width, 920px);
   margin: 0 auto;
-  min-height: 64px;
   border: 1px solid var(--sp-border);
-  border-radius: 20px;
+  border-radius: 24px;
   background: var(--sp-paper);
-  padding: 12px 12px 12px 18px;
-  align-items: flex-end;
+  padding: 10px 12px;
   box-shadow: 0 18px 46px rgba(15, 23, 42, 0.09);
   transition:
     border-color 160ms ease,
@@ -14,27 +12,104 @@
 }
 
 .chat-composer:focus-within {
-  border-color: #93c5fd;
-  box-shadow: 0 20px 50px rgba(37, 99, 235, 0.14);
+  border-color: var(--sp-border);
+  box-shadow: 0 18px 46px rgba(15, 23, 42, 0.09);
 }
 
 .chat-composer--welcome {
-  min-height: 96px;
-  border-radius: 20px;
-  background: var(--sp-paper);
+  padding: 14px 16px;
 }
+
+/* ── Top layer: attachments ─────────────────────────────────────── */
+
+.chat-composer__attachments {
+  padding-bottom: 10px;
+}
+
+/* Image attachment card */
+.chat-composer__attachment-card {
+  position: relative;
+  cursor: pointer;
+  border-radius: 10px;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+
+.chat-composer__attachment-card:hover {
+  opacity: 0.92;
+}
+
+.chat-composer__attachment-remove {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 18px;
+  height: 18px;
+  min-width: 18px;
+  padding: 0;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.45);
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+
+.chat-composer__attachment-card:hover .chat-composer__attachment-remove,
+.chat-composer__attachment-file:hover .chat-composer__attachment-remove {
+  opacity: 1;
+}
+
+/* File attachment chip */
+.chat-composer__attachment-file {
+  position: relative;
+  padding: 8px 12px;
+  border-radius: 10px;
+  background: var(--sp-surface-soft);
+  border: 1px solid var(--sp-border-soft);
+}
+
+.chat-composer__attachment-file .chat-composer__attachment-remove {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  width: 18px;
+  height: 18px;
+  min-width: 18px;
+  padding: 0;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.45);
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* ── Middle layer: text input ───────────────────────────────────── */
 
 .chat-composer__input {
   flex: 1;
-  border: none;
-  outline: none;
+  border: none !important;
+  outline: none !important;
   resize: none;
   color: var(--sp-ink);
   font-size: 15px;
   line-height: 1.6;
-  background: transparent;
+  background: transparent !important;
   font-family: inherit;
-  min-height: 34px;
+  padding: 4px 0;
+  box-shadow: none !important;
+}
+
+.chat-composer__input:focus,
+.chat-composer__input.ant-input:focus,
+.chat-composer__input.ant-input-affix-wrapper-focused {
+  border: none !important;
+  outline: none !important;
+  box-shadow: none !important;
+  background: transparent !important;
 }
 
 .chat-composer__input::placeholder {
@@ -45,27 +120,71 @@
   opacity: 0.6;
 }
 
-/* sm (≥576px): slightly smaller on tablets */
+/* ── Bottom layer: controls ─────────────────────────────────────── */
+
+.chat-composer__controls {
+  padding-top: 6px;
+}
+
+.chat-composer__select {
+  min-width: 80px;
+  font-size: 14px;
+}
+
+/* Remove Select borders — blend into the composer */
+.chat-composer__select .ant-select-selector {
+  border: none !important;
+  background: transparent !important;
+  box-shadow: none !important;
+  padding: 0 4px;
+  font-size: 14px;
+}
+
+.chat-composer__select .ant-select-selection-item {
+  font-size: 14px;
+}
+
+.chat-composer__select .ant-select-selector:hover {
+  background: var(--sp-surface-soft) !important;
+  border-radius: 8px;
+}
+
+.chat-composer__select.ant-select-focused .ant-select-selector {
+  background: var(--sp-surface-soft) !important;
+  border-radius: 8px;
+}
+
+/* Remove Upload button outline */
+.chat-composer__controls .ant-upload .ant-btn {
+  border: none;
+  background: transparent;
+  box-shadow: none;
+}
+
+/* ── Responsive ─────────────────────────────────────────────────── */
+
 @media (max-width: 767px) {
   .chat-composer {
-    border-radius: 20px;
-    padding: 10px;
-    gap: 8px;
+    border-radius: 24px;
+    padding: 8px 10px;
   }
 
   .chat-composer__input {
     font-size: 14px;
   }
+
+  .chat-composer__select {
+    min-width: 64px;
+    font-size: 13px;
+  }
 }
 
-/* xs (<576px): compact on phones */
 @media (max-width: 575px) {
   .chat-composer {
-    min-height: 58px;
-    padding: 8px;
+    padding: 6px 8px;
   }
 
   .chat-composer--welcome {
-    min-height: 86px;
+    padding: 10px 12px;
   }
 }

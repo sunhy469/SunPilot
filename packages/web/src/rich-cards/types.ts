@@ -10,7 +10,13 @@ export type RichCardType =
   | "metric"
   | "timeline"
   | "code"
-  | "gallery";
+  | "gallery"
+  | "tool_result"
+  | "skill_result"
+  | "diagnostic"
+  | "status"
+  | "link_preview"
+;
 
 export interface RichCardView<TData = unknown> {
   id: string;
@@ -83,3 +89,63 @@ export interface GalleryCardData {
     caption?: string;
   }>;
 }
+
+// ── New card types ────────────────────────────────────────────────────
+
+export type ToolStatus = "running" | "completed" | "failed" | "pending";
+export type SkillStatus = "running" | "completed" | "failed" | "pending";
+export type StatusTone = "success" | "warning" | "error" | "info" | "neutral";
+
+export interface ToolResultCardData {
+  toolName: string;
+  status: ToolStatus;
+  toolCallId?: string;
+  summary?: string;
+  detail?: string;
+  artifacts?: string[];
+  error?: string;
+  durationMs?: number;
+  timestamp?: string;
+}
+
+export interface SkillResultCardData {
+  skillName: string;
+  status: SkillStatus;
+  skillId?: string;
+  steps?: Array<{
+    title: string;
+    description?: string;
+    status: "done" | "active" | "pending" | "error";
+  }>;
+  summary?: string;
+  detail?: string;
+  error?: string;
+  durationMs?: number;
+  timestamp?: string;
+}
+
+export interface DiagnosticCardData {
+  level: "info" | "warning" | "error" | "debug";
+  message: string;
+  source?: string;
+  code?: string;
+  stack?: string;
+  timestamp?: string;
+}
+
+export interface StatusCardData {
+  tone: StatusTone;
+  label: string;
+  message?: string;
+  icon?: boolean;
+}
+
+export interface LinkPreviewCardData {
+  url: string;
+  title?: string;
+  description?: string;
+  image?: string;
+  domain?: string;
+  favicon?: string;
+}
+

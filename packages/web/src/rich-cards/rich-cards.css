@@ -241,3 +241,564 @@
     grid-template-columns: 1fr;
   }
 }
+
+/* ═══════════════════════════════════════════════════════════════════════
+   Markdown Renderer
+   ═══════════════════════════════════════════════════════════════════════ */
+
+.markdown-renderer {
+  width: 100%;
+}
+
+.markdown-body {
+  font-size: 16px;
+  line-height: 1.75;
+  color: var(--sp-text);
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+
+/* Headings */
+.markdown-body h1,
+.markdown-body h2,
+.markdown-body h3,
+.markdown-body h4,
+.markdown-body h5,
+.markdown-body h6 {
+  margin: 1.2em 0 0.6em;
+  font-weight: 600;
+  line-height: 1.35;
+  color: var(--sp-ink);
+}
+
+.markdown-body h1 { font-size: 1.5em; }
+.markdown-body h2 { font-size: 1.3em; }
+.markdown-body h3 { font-size: 1.15em; }
+.markdown-body h4 { font-size: 1.05em; }
+
+.markdown-body h1:first-child,
+.markdown-body h2:first-child,
+.markdown-body h3:first-child {
+  margin-top: 0;
+}
+
+/* Paragraphs */
+.markdown-body p {
+  margin: 0.5em 0;
+}
+
+.markdown-body p:first-child {
+  margin-top: 0;
+}
+
+.markdown-body p:last-child {
+  margin-bottom: 0;
+}
+
+/* Bold, Italic, Strikethrough */
+.markdown-body strong { font-weight: 600; }
+.markdown-body em { font-style: italic; }
+.markdown-body del { text-decoration: line-through; opacity: 0.7; }
+
+/* Lists */
+.markdown-body ul,
+.markdown-body ol {
+  margin: 0.5em 0;
+  padding-left: 1.5em;
+}
+
+.markdown-body li {
+  margin: 0.25em 0;
+}
+
+.markdown-body ul ul,
+.markdown-body ol ol,
+.markdown-body ul ol,
+.markdown-body ol ul {
+  margin: 0.25em 0;
+}
+
+/* Blockquote */
+.md-blockquote {
+  margin: 0.75em 0;
+  padding: 8px 16px;
+  border-left: 3px solid var(--sp-blue);
+  background: var(--sp-blue-soft);
+  border-radius: 0 8px 8px 0;
+  color: #374151;
+}
+
+.md-blockquote p {
+  margin: 0.25em 0;
+}
+
+/* Horizontal Rule */
+.md-hr {
+  margin: 1em 0;
+  border: none;
+  border-top: 1px solid var(--sp-border);
+}
+
+/* ── Inline Code ──────────────────────────────────────────────────── */
+.md-inline-code {
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: #f1f5f9;
+  color: #e11d48;
+  font-size: 0.9em;
+  font-family: "SF Mono", "Fira Code", "Fira Mono", "Cascadia Code", Consolas, monospace;
+}
+
+/* ── Code Blocks ──────────────────────────────────────────────────── */
+.md-code-block {
+  margin: 0.75em 0;
+  border: 1px solid var(--sp-border);
+  border-radius: 12px;
+  overflow: hidden;
+  background: #0f172a;
+}
+
+.md-code-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 14px;
+  background: #1e293b;
+  border-bottom: 1px solid #334155;
+}
+
+.md-code-lang {
+  font-size: 12px !important;
+  color: #94a3b8 !important;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.md-code-copy-btn {
+  color: #94a3b8 !important;
+  font-size: 12px !important;
+}
+
+.md-code-copy-btn:hover {
+  color: #e2e8f0 !important;
+}
+
+.md-code-pre {
+  margin: 0;
+  padding: 14px 16px;
+  overflow: auto;
+  font-size: 13px;
+  line-height: 1.7;
+  color: #e2e8f0;
+  background: #0f172a;
+}
+
+.md-code-pre code {
+  font-family: "SF Mono", "Fira Code", "Fira Mono", "Cascadia Code", Consolas, monospace;
+  white-space: pre;
+}
+
+.md-code-collapsed {
+  max-height: 260px;
+  overflow: hidden;
+}
+
+.md-code-collapse-btn {
+  display: block;
+  width: 100%;
+  color: #94a3b8 !important;
+  border-top: 1px solid #1e293b !important;
+  border-radius: 0 !important;
+  padding: 6px !important;
+  font-size: 12px !important;
+}
+
+/* ── Tables ───────────────────────────────────────────────────────── */
+.md-table-wrapper {
+  margin: 0.75em 0;
+  overflow-x: auto;
+  border: 1px solid var(--sp-border);
+  border-radius: 12px;
+}
+
+.md-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.md-table thead {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+
+.md-table th {
+  padding: 10px 14px;
+  text-align: left;
+  font-weight: 600;
+  background: var(--sp-surface-soft);
+  border-bottom: 2px solid var(--sp-border);
+  white-space: nowrap;
+}
+
+.md-table td {
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--sp-border-soft);
+}
+
+.md-table tr:last-child td {
+  border-bottom: none;
+}
+
+.md-table tbody tr:hover {
+  background: #f8fafc;
+}
+
+/* ── Links ────────────────────────────────────────────────────────── */
+.md-link {
+  word-break: break-all;
+}
+
+/* ── Images ───────────────────────────────────────────────────────── */
+.md-image-wrap {
+  display: block;
+  margin: 0.75em 0;
+}
+
+.md-image {
+  max-width: 100%;
+  height: auto;
+  border-radius: 10px;
+  border: 1px solid var(--sp-border);
+}
+
+.md-image-alt {
+  display: block;
+  margin-top: 6px;
+  font-size: 12px !important;
+  text-align: center;
+}
+
+/* ── Task List Items ──────────────────────────────────────────────── */
+.md-task-item {
+  list-style: none !important;
+  margin-left: -1.5em;
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.md-task-checkbox {
+  flex-shrink: 0;
+  margin-top: 2px;
+  display: inline-flex;
+}
+
+.md-task-empty {
+  width: 16px;
+  height: 16px;
+  border: 1.5px solid var(--sp-border);
+  border-radius: 4px;
+  display: inline-block;
+}
+
+.md-task-checked .md-task-content {
+  text-decoration: line-through;
+  opacity: 0.65;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
+   Status Badge Widget
+   ═══════════════════════════════════════════════════════════════════════ */
+
+.status-badge--default {
+  font-size: 13px;
+  padding: 2px 10px;
+}
+
+.status-badge--small {
+  font-size: 11px;
+  padding: 0 8px;
+}
+
+.tool-status__name,
+.skill-status__name {
+  font-size: 13px;
+  font-weight: 500;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
+   Code Block Widget (standalone)
+   ═══════════════════════════════════════════════════════════════════════ */
+
+.code-block-widget {
+  border-radius: 12px;
+  overflow: hidden;
+}
+
+.code-block-widget--bordered {
+  border: 1px solid var(--sp-border);
+}
+
+.code-block-widget__header {
+  padding: 10px 14px;
+  background: #1e293b;
+  border-bottom: 1px solid #334155;
+}
+
+.code-block-widget__filename {
+  color: #e2e8f0 !important;
+  font-size: 13px;
+}
+
+.code-block-widget__lang {
+  font-size: 11px !important;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: #94a3b8 !important;
+}
+
+.code-block-widget__pre {
+  margin: 0;
+  padding: 14px 16px;
+  overflow: auto;
+  font-size: 13px;
+  line-height: 1.7;
+  color: #e2e8f0;
+  background: #0f172a;
+  font-family: "SF Mono", "Fira Code", "Fira Mono", "Cascadia Code", Consolas, monospace;
+}
+
+.code-block-widget__pre--collapsed {
+  max-height: 260px;
+  overflow: hidden;
+}
+
+.code-block-widget__collapse-btn {
+  display: block;
+  width: 100%;
+  padding: 8px !important;
+  color: #64748b !important;
+  border-top: 1px solid #e5e7eb;
+  border-radius: 0 !important;
+  font-size: 12px !important;
+}
+
+.code-block-widget-card {
+  margin: 8px 0;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
+   File Link Widget
+   ═══════════════════════════════════════════════════════════════════════ */
+
+.file-link-widget {
+  transition: box-shadow 0.15s ease, border-color 0.15s ease;
+}
+
+.file-link-widget:hover {
+  border-color: var(--sp-blue) !important;
+  box-shadow: 0 2px 8px rgba(37, 99, 235, 0.08);
+}
+
+.file-link-widget__icon {
+  flex-shrink: 0;
+  width: 40px;
+  height: 40px;
+  display: grid;
+  place-items: center;
+  border-radius: 10px;
+  background: var(--sp-surface);
+  border: 1px solid var(--sp-border);
+}
+
+.file-link-widget__name {
+  font-size: 14px;
+}
+
+.file-link-widget__actions {
+  flex-shrink: 0;
+}
+
+.file-link-card {
+  margin: 8px 0;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
+   Tool Result Card
+   ═══════════════════════════════════════════════════════════════════════ */
+
+.tool-result-card {
+  margin: 8px 0;
+}
+
+.tool-result__name {
+  font-size: 14px;
+}
+
+.tool-result__summary {
+  padding: 8px 12px;
+  background: rgba(255, 255, 255, 0.6);
+  border-radius: 8px;
+}
+
+.tool-result__error {
+  padding: 8px 12px;
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+  border-radius: 8px;
+}
+
+.tool-result__detail-content {
+  margin-top: 8px;
+  padding: 12px;
+  background: rgba(255, 255, 255, 0.6);
+  border-radius: 8px;
+  border: 1px solid var(--sp-border-soft);
+}
+
+.tool-result__detail-pre {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: "SF Mono", "Fira Code", Consolas, monospace;
+}
+
+.tool-result__artifacts {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--sp-border-soft);
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
+   Skill Result Card
+   ═══════════════════════════════════════════════════════════════════════ */
+
+.skill-result-card {
+  margin: 8px 0;
+}
+
+.skill-result__name {
+  font-size: 14px;
+}
+
+.skill-result__steps {
+  padding: 8px 0;
+}
+
+.skill-result__summary {
+  padding: 8px 12px;
+  background: rgba(255, 255, 255, 0.6);
+  border-radius: 8px;
+}
+
+.skill-result__error {
+  padding: 8px 12px;
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+  border-radius: 8px;
+}
+
+.skill-result__detail-pre {
+  margin: 8px 0 0;
+  padding: 12px;
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: rgba(255, 255, 255, 0.6);
+  border: 1px solid var(--sp-border-soft);
+  border-radius: 8px;
+  font-family: "SF Mono", "Fira Code", Consolas, monospace;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
+   Info Tip
+   ═══════════════════════════════════════════════════════════════════════ */
+
+.info-tip {
+  margin: 4px 0;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
+   Responsive — Markdown & Widgets
+   ═══════════════════════════════════════════════════════════════════════ */
+
+@media (max-width: 767px) {
+  .markdown-body {
+    font-size: 13px;
+    line-height: 1.75;
+  }
+
+  .md-code-header {
+    padding: 6px 10px;
+  }
+
+  .md-code-pre {
+    padding: 10px 12px;
+    font-size: 12px;
+  }
+
+  .md-table {
+    font-size: 12px;
+  }
+
+  .md-table th,
+  .md-table td {
+    padding: 6px 10px;
+  }
+
+  .file-link-widget {
+    flex-wrap: wrap;
+    padding: 10px 12px !important;
+  }
+
+  .file-link-widget__actions {
+    width: 100%;
+    justify-content: flex-end;
+  }
+
+  .code-block-widget__header {
+    flex-wrap: wrap;
+    gap: 6px;
+    padding: 8px 10px;
+  }
+
+  .code-block-widget__pre {
+    padding: 10px 12px;
+    font-size: 12px;
+  }
+
+  .tool-result-card .ant-card-body,
+  .skill-result-card .ant-card-body {
+    padding: 12px;
+  }
+}
+
+@media (max-width: 480px) {
+  .md-code-block {
+    border-radius: 8px;
+  }
+
+  .md-table-wrapper {
+    border-radius: 8px;
+    font-size: 11px;
+  }
+
+  .md-blockquote {
+    padding: 6px 12px;
+    font-size: 13px;
+  }
+
+  .status-badge--default {
+    font-size: 12px;
+  }
+
+  .file-link-widget__icon {
+    width: 32px;
+    height: 32px;
+  }
+}
