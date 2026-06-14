@@ -1,6 +1,9 @@
+import { useState, useCallback, useRef } from "react";
+import { Input, Button, Flex } from "antd";
 import { SendOutlined, StopOutlined } from "@ant-design/icons";
-import { useState, useCallback, useRef, useEffect } from "react";
 import "./ChatComposer.css";
+
+const { TextArea } = Input;
 
 export function ChatComposer({
   placeholder = "向 SunPilot 提问...",
@@ -22,7 +25,7 @@ export function ChatComposer({
   onStop?: () => void;
 }) {
   const [internalValue, setInternalValue] = useState("");
-  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const textareaRef = useRef<any>(null);
   const isControlled = value !== undefined;
   const currentValue = value ?? internalValue;
   const setCurrentValue = useCallback(
@@ -32,17 +35,6 @@ export function ChatComposer({
     },
     [isControlled, onChange],
   );
-
-  const adjustHeight = useCallback(() => {
-    const el = textareaRef.current;
-    if (!el) return;
-    el.style.height = "auto";
-    el.style.height = `${Math.min(el.scrollHeight, 120)}px`;
-  }, []);
-
-  useEffect(() => {
-    adjustHeight();
-  }, [currentValue, adjustHeight]);
 
   const handleSend = useCallback(() => {
     const text = currentValue.trim();
@@ -64,8 +56,8 @@ export function ChatComposer({
   const isWelcome = variant === "welcome";
 
   return (
-    <div className={`chat-composer${isWelcome ? " chat-composer--welcome" : ""}`}>
-      <textarea
+    <Flex gap={8} className={`chat-composer${isWelcome ? " chat-composer--welcome" : ""}`}>
+      <TextArea
         ref={textareaRef}
         className="chat-composer__input"
         aria-label="Message"
@@ -73,29 +65,31 @@ export function ChatComposer({
         value={currentValue}
         rows={isWelcome ? 2 : 1}
         disabled={disabled}
+        autoSize={{ minRows: 1, maxRows: 4 }}
         onChange={(e) => setCurrentValue(e.target.value)}
         onKeyDown={handleKeyDown}
       />
       {streaming && onStop ? (
-        <button
-          type="button"
-          className="composer-btn composer-btn--stop sp-icon-button sp-icon-button--lg sp-icon-button--accent"
+        <Button
+          type="primary"
+          danger
+          shape="circle"
+          size="large"
+          icon={<StopOutlined />}
           aria-label="Stop"
           onClick={onStop}
-        >
-          <StopOutlined />
-        </button>
+        />
       ) : (
-        <button
-          type="button"
-          className="composer-btn composer-btn--send sp-icon-button sp-icon-button--lg sp-icon-button--primary"
+        <Button
+          type="primary"
+          shape="circle"
+          size="large"
+          icon={<SendOutlined />}
           aria-label="Send"
           disabled={disabled || !currentValue.trim()}
           onClick={handleSend}
-        >
-          <SendOutlined />
-        </button>
+        />
       )}
-    </div>
+    </Flex>
   );
 }

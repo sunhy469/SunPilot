@@ -1,2 +1,25 @@
 .ant-layout { background: transparent; }
 .ant-btn { display: inline-flex; align-items: center; justify-content: center; }
+
+/* Responsive sidebar: when antd Sider collapses below lg (992px),
+   adjust padding and hide labels for compact mode */
+.ant-layout-sider-collapsed .logo-text,
+.ant-layout-sider-collapsed .recent-section,
+.ant-layout-sider-collapsed .user-footer .ant-typography,
+.ant-layout-sider-collapsed .ant-btn > span:not(.anticon) {
+  display: none;
+}
+
+/* Ensure content area fills remaining space */
+.ant-layout-content {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* Compact message cards on small screens */
+@media (max-width: 575px) {
+  .user-card.ant-card {
+    padding: 12px 14px;
+  }
+}

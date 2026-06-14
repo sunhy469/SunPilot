@@ -1,13 +1,14 @@
+import { Steps } from "antd";
 import { CheckCircleFilled, LoadingOutlined } from "@ant-design/icons";
 import type { ProgressCardData, ProgressStep } from "../types";
 import { RichCardShell } from "./RichCardShell";
 
-const statusIcon = (status: ProgressStep["status"]) => {
+const stepStatusIcon = (status: ProgressStep["status"]) => {
   switch (status) {
     case "done":
-      return <CheckCircleFilled className="rich-progress__icon is-done" />;
+      return <CheckCircleFilled style={{ color: "#10b981" }} />;
     case "active":
-      return <LoadingOutlined className="rich-progress__icon is-active" />;
+      return <LoadingOutlined style={{ color: "#2563eb" }} />;
     case "error":
       return <span className="rich-progress__dot is-error" />;
     case "pending":
@@ -27,23 +28,17 @@ export function ProgressCard({
 }) {
   return (
     <RichCardShell title={title} subtitle={subtitle}>
-      <div className="rich-progress">
-        {data.steps.map((step, idx) => (
-          <div key={`${step.title}-${idx}`} className="rich-progress__step">
-            {statusIcon(step.status)}
-            <div className="rich-progress__copy">
-              <span className={`rich-progress__label is-${step.status}`}>
-                {step.title}
-              </span>
-              {step.description && (
-                <span className="rich-progress__description">
-                  {step.description}
-                </span>
-              )}
-            </div>
-          </div>
-        ))}
-      </div>
+      <Steps
+        direction="vertical"
+        size="small"
+        current={data.steps.findIndex((s) => s.status !== "done")}
+        items={data.steps.map((step) => ({
+          title: step.title,
+          description: step.description,
+          status: step.status === "error" ? "error" : step.status === "done" ? "finish" : step.status === "active" ? "process" : "wait",
+          icon: stepStatusIcon(step.status),
+        }))}
+      />
     </RichCardShell>
   );
 }

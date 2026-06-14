@@ -1,4 +1,5 @@
 import { memo } from "react";
+import { Flex } from "antd";
 import type { RichCardView } from "./types";
 import { SummaryCard, InfoCard, ErrorCard, FileCard } from "./components/BasicCards";
 import { ChartCard } from "./components/ChartCard";
@@ -58,10 +59,10 @@ export const RichCardRenderer = memo(function RichCardRenderer({
   if (!cards || cards.length === 0) return null;
 
   return (
-    <div className="rich-cards-stack">
+    <Flex vertical gap={12} className="rich-cards-stack">
       {cards.map((card) => (
         <RichCard key={card.id} card={card} />
       ))}
-    </div>
+    </Flex>
   );
 });

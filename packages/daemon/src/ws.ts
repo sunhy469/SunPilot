@@ -61,7 +61,7 @@ export function setupDaemonWebSocket(deps: {
       sendJson(socket, notification),
   });
 
-  wsServer.on("connection", (socket, request) => {
+  wsServer.on("connection", (socket, _request) => {
     const connection = connectionRegistry.add(socket);
     const markActivity = bindIdleTimeout(socket);
     const notify = (notification: unknown) =>
@@ -71,7 +71,7 @@ export function setupDaemonWebSocket(deps: {
     });
     socket.on("message", async (raw) => {
       markActivity();
-      let message: { id?: string; method?: string; params?: any } = {};
+      let message: { id?: string; method?: string; params?: Record<string, unknown> } = {};
       try {
         message = JSON.parse(String(raw)) as typeof message;
         const response = await jsonRpcRouter.handle(message, {
