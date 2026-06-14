@@ -1,5 +1,5 @@
-import { Avatar, Typography, Space, Flex } from "antd";
-import { UserOutlined } from "@ant-design/icons";
+import { Typography, Flex, Button } from "antd";
+import { SettingOutlined } from "@ant-design/icons";
 import "./UserFooter.css";
 
 const { Text } = Typography;
@@ -7,12 +7,14 @@ const { Text } = Typography;
 export function UserFooter() {
   return (
     <Flex className="user-footer" align="center">
-      <Space>
-        <Avatar size="small" icon={<UserOutlined />} style={{ backgroundColor: "#2563eb" }}>
-          张
-        </Avatar>
-        <Text>张伟</Text>
-      </Space>
+      <Button
+        type="text"
+        size="small"
+        icon={<SettingOutlined />}
+        className="user-footer-btn"
+      >
+        <Text>设置</Text>
+      </Button>
     </Flex>
   );
 }

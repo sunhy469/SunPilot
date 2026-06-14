@@ -8,7 +8,6 @@ import { ChatHeader } from "./components/ChatHeader";
 import { WelcomeView } from "./components/WelcomeView";
 import { MessageList } from "./components/MessageList";
 import { ChatComposer } from "./components/ChatComposer";
-import { AgentTimeline } from "./components/AgentTimeline";
 import { ArtifactPanel } from "./components/ArtifactPanel";
 import { ApprovalStrip } from "./components/ApprovalStrip";
 import { OfflineBanner } from "./components/OfflineBanner";
@@ -62,7 +61,7 @@ export function ChatPage() {
               ? "插件"
               : active
                 ? conversationTitle(active.title)
-                : "新对话"
+                : ""
           }
         />
 
@@ -92,7 +91,6 @@ export function ChatPage() {
                   status={chat.chatViewState}
                 />
                 <div className="chat-composer-wrap">
-                  <AgentTimeline items={chat.timeline} />
                   <ArtifactPanel
                     artifacts={chat.artifacts}
                     selected={chat.selectedArtifact}

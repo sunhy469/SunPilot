@@ -4,6 +4,7 @@ export interface Conversation {
   id: string;
   title?: string;
   status: "active" | "archived";
+  kind?: "project" | "chat";
   createdAt: string;
   updatedAt: string;
 }

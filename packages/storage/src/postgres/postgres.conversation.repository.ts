@@ -14,17 +14,17 @@ export class PostgresConversationRepository implements ConversationRepository {
   ): Promise<ConversationRecord> {
     const id = input.id ?? `conv_${crypto.randomUUID()}`;
     const result = await this.pool.query(
-      `INSERT INTO conversations (id, title)
-       VALUES ($1, $2)
-       RETURNING id, title, status, created_at, updated_at`,
-      [id, input.title ?? null],
+      `INSERT INTO conversations (id, title, kind)
+       VALUES ($1, $2, $3)
+       RETURNING id, title, status, kind, created_at, updated_at`,
+      [id, input.title ?? null, input.kind ?? "chat"],
     );
     return mapConversation(result.rows[0]);
   }
 
   async findById(id: string): Promise<ConversationRecord | null> {
     const result = await this.pool.query(
-      "SELECT id, title, status, created_at, updated_at FROM conversations WHERE id = $1",
+      "SELECT id, title, status, kind, created_at, updated_at FROM conversations WHERE id = $1",
       [id],
     );
     return result.rows[0] ? mapConversation(result.rows[0]) : null;
@@ -37,7 +37,7 @@ export class PostgresConversationRepository implements ConversationRepository {
     const cursor = decodeConversationCursor(input.cursor);
     const result = cursor
       ? await this.pool.query(
-          `SELECT id, title, status, created_at, updated_at
+          `SELECT id, title, status, kind, created_at, updated_at
            FROM conversations
            WHERE updated_at < $1 OR (updated_at = $1 AND id < $2)
            ORDER BY updated_at DESC, id DESC
@@ -45,7 +45,7 @@ export class PostgresConversationRepository implements ConversationRepository {
           [cursor.updatedAt, cursor.id, limit],
         )
       : await this.pool.query(
-          `SELECT id, title, status, created_at, updated_at
+          `SELECT id, title, status, kind, created_at, updated_at
            FROM conversations
            ORDER BY updated_at DESC, id DESC
            LIMIT $1`,
@@ -96,6 +96,7 @@ function mapConversation(row: any): ConversationRecord {
     id: row.id,
     title: row.title ?? undefined,
     status: row.status,
+    kind: row.kind ?? "chat",
     createdAt: row.created_at.toISOString(),
     updatedAt: row.updated_at.toISOString(),
   };

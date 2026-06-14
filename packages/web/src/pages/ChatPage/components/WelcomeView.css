@@ -16,15 +16,6 @@
   text-align: center;
 }
 
-.welcome-logo {
-  width: clamp(96px, 16vw, 148px);
-  height: clamp(96px, 16vw, 148px);
-  object-fit: cover;
-  border-radius: 50%;
-  margin: 0 auto 18px;
-  box-shadow: 0 18px 42px rgba(37, 99, 235, 0.14);
-}
-
 /* md (≥768px): reduce title size */
 @media (max-width: 991px) {
   .ant-typography.welcome-view h2,
@@ -35,12 +26,6 @@
 
 /* sm (≥576px): compact on small screens */
 @media (max-width: 575px), (max-height: 620px) {
-  .welcome-logo {
-    width: 84px;
-    height: 84px;
-    margin-bottom: 14px;
-  }
-
   .welcome-view {
     padding: 18px 12px;
   }
