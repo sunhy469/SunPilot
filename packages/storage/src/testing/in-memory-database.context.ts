@@ -86,6 +86,7 @@ export class InMemoryDatabaseContext implements DatabaseContext {
         id: input.id ?? `conv_${crypto.randomUUID()}`,
         title: input.title,
         status: "active",
+        kind: input.kind ?? "chat",
         createdAt: now,
         updatedAt: now,
       };

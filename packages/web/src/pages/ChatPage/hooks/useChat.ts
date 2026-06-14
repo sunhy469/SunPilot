@@ -704,7 +704,16 @@ function timelineItemFromEvent(
   event: ChatSocketEvent | AgentEventRecord,
 ): AgentTimelineItem | undefined {
   const method = "method" in event ? event.method : event.type;
-  if (method === "pong" || method === "agent.response.delta") return undefined;
+  if (
+    method === "pong" ||
+    method === "agent.response.delta" ||
+    method === "agent.run.created" ||
+    method === "agent.run.completed" ||
+    method === "agent.context.started" ||
+    method === "agent.context.completed" ||
+    method === "agent.intent.detected"
+  )
+    return undefined;
   const params = ("method" in event ? event.params : event.payload) as Record<
     string,
     unknown
@@ -732,29 +741,8 @@ function timelineItemFromEvent(
   };
 
   switch (method) {
-    case "agent.run.created":
-      return { ...base, title: "Run created", tone: "working" };
-    case "agent.context.started":
-      return { ...base, title: "Context started", tone: "working" };
-    case "agent.context.completed":
-      return {
-        ...base,
-        title: "Context ready",
-        detail:
-          typeof params.tokenEstimate === "number"
-            ? `${params.tokenEstimate} tokens`
-            : undefined,
-        tone: "success",
-      };
-    case "agent.intent.detected":
-      return {
-        ...base,
-        title: `Intent: ${String(params.intent ?? "unknown")}`,
-        detail: Array.isArray(params.candidateSkills)
-          ? params.candidateSkills.join(", ")
-          : undefined,
-        tone: "neutral",
-      };
+    // run.created, context.*, intent.detected — filtered above
+    // (internal lifecycle events, not surfaced to the timeline)
     case "agent.plan.created": {
       const plan = params.plan as
         | { summary?: unknown; steps?: unknown }
@@ -858,8 +846,7 @@ function timelineItemFromEvent(
         detail: typeof params.scope === "string" ? params.scope : undefined,
         tone: "success",
       };
-    case "agent.run.completed":
-      return { ...base, title: "Run completed", tone: "success" };
+    // run.completed — filtered above
     case "agent.run.failed": {
       const error = params.error as { message?: unknown } | undefined;
       return {

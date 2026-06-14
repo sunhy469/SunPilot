@@ -4,6 +4,12 @@
   padding: 0 6px;
 }
 
+.user-footer-btn {
+  font-size: 15px;
+  justify-content: flex-start;
+  padding: 4px 8px;
+}
+
 @media (max-width: 991px) {
   .user-footer {
     justify-content: center;

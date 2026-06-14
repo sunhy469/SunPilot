@@ -2,6 +2,7 @@ export interface ConversationRecord {
   id: string;
   title?: string;
   status: "active" | "archived";
+  kind?: "project" | "chat";
   createdAt: string;
   updatedAt: string;
 }
@@ -9,6 +10,7 @@ export interface ConversationRecord {
 export interface CreateConversationInput {
   id?: string;
   title?: string;
+  kind?: "project" | "chat";
 }
 
 export interface ListConversationsInput {
