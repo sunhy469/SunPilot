@@ -244,9 +244,7 @@ describe("Web ChatPage", () => {
     expect(screen.getByText("Tool update: tool_1")).toBeInTheDocument();
     expect(screen.getByText("Approval expired")).toBeInTheDocument();
     expect(screen.getByText("Run interrupted")).toBeInTheDocument();
-    expect(
-      screen.getByRole("button", { name: /report.md/ }),
-    ).toBeInTheDocument();
+    expect(screen.getByText("report.md")).toBeInTheDocument();
   });
 
   test("renders a clean welcome state without opening a socket", async () => {

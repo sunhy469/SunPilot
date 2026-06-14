@@ -1,3 +1,4 @@
+import { Image, Typography } from "antd";
 import type {
   CodeCardData,
   GalleryCardData,
@@ -6,6 +7,8 @@ import type {
   VideoCardData,
 } from "../types";
 import { RichCardShell } from "./RichCardShell";
+
+const { Text, Paragraph } = Typography;
 
 export function VideoCard({
   title,
@@ -19,7 +22,7 @@ export function VideoCard({
   return (
     <RichCardShell title={title} subtitle={subtitle} className="rich-card--video">
       <video className="rich-video" src={data.src} poster={data.poster} controls />
-      {data.caption && <p className="rich-card__caption">{data.caption}</p>}
+      {data.caption && <Text type="secondary">{data.caption}</Text>}
     </RichCardShell>
   );
 }
@@ -38,9 +41,9 @@ export function MetricCard({
       <div className="rich-metrics">
         {data.metrics.map((metric) => (
           <div key={metric.label} className={`rich-metric is-${metric.tone ?? "blue"}`}>
-            <span>{metric.label}</span>
-            <strong>{metric.value}</strong>
-            {metric.change && <em>{metric.change}</em>}
+            <Text>{metric.label}</Text>
+            <Text strong>{metric.value}</Text>
+            {metric.change && <Text type="secondary">{metric.change}</Text>}
           </div>
         ))}
       </div>
@@ -64,9 +67,9 @@ export function TimelineCard({
           <div key={`${item.title}-${idx}`} className={`rich-timeline__item is-${item.status ?? "pending"}`}>
             <span className="rich-timeline__pin" />
             <div>
-              <strong>{item.title}</strong>
-              {item.time && <em>{item.time}</em>}
-              {item.description && <p>{item.description}</p>}
+              <Text strong>{item.title}</Text>
+              {item.time && <Text type="secondary"> {item.time}</Text>}
+              {item.description && <Paragraph>{item.description}</Paragraph>}
             </div>
           </div>
         ))}
@@ -87,8 +90,8 @@ export function CodeCard({
   return (
     <RichCardShell title={title} subtitle={subtitle} className="rich-card--code">
       <div className="rich-code__bar">
-        <span>{data.fileName ?? "snippet"}</span>
-        {data.language && <b>{data.language}</b>}
+        <Text>{data.fileName ?? "snippet"}</Text>
+        {data.language && <Text strong> {data.language}</Text>}
       </div>
       <pre className="rich-code"><code>{data.code}</code></pre>
     </RichCardShell>
@@ -106,14 +109,16 @@ export function GalleryCard({
 }) {
   return (
     <RichCardShell title={title} subtitle={subtitle}>
-      <div className="rich-gallery">
-        {data.images.map((image) => (
-          <figure key={image.src}>
-            <img src={image.src} alt={image.alt ?? ""} />
-            {image.caption && <figcaption>{image.caption}</figcaption>}
-          </figure>
-        ))}
-      </div>
+      <Image.PreviewGroup>
+        <div className="rich-gallery">
+          {data.images.map((image) => (
+            <div key={image.src} className="rich-gallery__item">
+              <Image src={image.src} alt={image.alt ?? ""} />
+              {image.caption && <Text type="secondary" className="rich-gallery__caption">{image.caption}</Text>}
+            </div>
+          ))}
+        </div>
+      </Image.PreviewGroup>
     </RichCardShell>
   );
 }

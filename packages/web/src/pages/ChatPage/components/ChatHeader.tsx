@@ -1,21 +1,22 @@
+import { Typography, Button, Space } from "antd";
 import { DownOutlined, MoreOutlined } from "@ant-design/icons";
 import "./ChatHeader.css";
 
+const { Text } = Typography;
+
 export function ChatHeader({ title }: { title: string }) {
   return (
-    <header className="chat-header">
-      <div className="chat-title">
-        <span className="chat-title-text">{title}</span>
+    <div className="chat-header">
+      <Space className="chat-title">
+        <Text strong>{title}</Text>
         <DownOutlined className="chat-title-arrow" />
-      </div>
-      <button
-        type="button"
-        className="chat-header-more sp-icon-button sp-icon-button--md sp-icon-button--warm"
+      </Space>
+      <Button
+        type="text"
+        icon={<MoreOutlined />}
         aria-label="设置"
-        title="设置"
-      >
-        <MoreOutlined />
-      </button>
-    </header>
+        size="small"
+      />
+    </div>
   );
 }

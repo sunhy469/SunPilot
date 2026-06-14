@@ -6,12 +6,9 @@ export * from "./agent-kernel/loop-types.js";
 export * from "./agent-kernel/agent-loop-engine.js";
 export {
   LEGAL_TRANSITIONS,
-  canTransition,
-  assertLegalTransition,
   isTerminal,
 } from "./agent-kernel/state/run-state-machine.js";
-export { AUDIT_ACTORS, AuditActor } from "./agent-kernel/audit/audit-actor.js";
-export type { AuditActor as AuditActorType } from "./agent-kernel/audit/audit-actor.js";
+export { AuditActor } from "./agent-kernel/audit/audit-actor.js";
 export { ContextBuilder } from "./agent-kernel/context/context-builder.js";
 export { TokenBudgeter } from "./agent-kernel/context/context-budgeter.js";
 export * from "./agent-kernel/context/context-types.js";

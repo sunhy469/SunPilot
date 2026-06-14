@@ -1,8 +1,12 @@
+import { Card, Button, List, Typography, Descriptions, Space } from "antd";
+import { CloseOutlined, FileTextOutlined } from "@ant-design/icons";
 import type {
   AgentArtifactPreview,
   AgentArtifactSelection,
 } from "../hooks/useChat";
 import "./ArtifactPanel.css";
+
+const { Text, Paragraph } = Typography;
 
 interface ArtifactPanelProps {
   artifacts: AgentArtifactPreview[];
@@ -20,49 +24,62 @@ export function ArtifactPanel({
   if (artifacts.length === 0) return null;
 
   return (
-    <section className="artifact-panel" aria-label="Artifacts">
-      <div className="artifact-panel__list">
-        {artifacts.map((artifact) => (
-          <button
-            className="artifact-panel__item"
-            key={artifact.id}
-            type="button"
-            onClick={() => onOpen(artifact.id)}
+    <div className="artifact-panel">
+      <List
+        size="small"
+        className="artifact-panel__list"
+        dataSource={artifacts}
+        renderItem={(artifact) => (
+          <List.Item
+            actions={[
+              <Button
+                key="open"
+                type="link"
+                size="small"
+                onClick={() => onOpen(artifact.id)}
+              >
+                查看
+              </Button>
+            ]}
           >
-            <span className="artifact-panel__name">{artifact.name}</span>
-            <span className="artifact-panel__meta">
-              {artifact.type ?? "artifact"}
-              {artifact.version ? ` v${artifact.version}` : ""}
-            </span>
-          </button>
-        ))}
-      </div>
+            <List.Item.Meta
+              avatar={<FileTextOutlined />}
+              title={artifact.name}
+              description={
+                <Text type="secondary">
+                  {artifact.type ?? "artifact"}
+                  {artifact.version ? ` v${artifact.version}` : ""}
+                </Text>
+              }
+            />
+          </List.Item>
+        )}
+      />
       {selected && (
-        <div className="artifact-panel__detail">
-          <div className="artifact-panel__detail-head">
-            <div>
-              <div className="artifact-panel__title">
-                {selected.artifact.name}
-              </div>
-              <div className="artifact-panel__meta">
-                {selected.artifact.type}
-                {selected.artifact.version
-                  ? ` v${selected.artifact.version}`
-                  : ""}
-              </div>
-            </div>
-            <button
-              className="artifact-panel__close"
-              type="button"
+        <Card
+          className="artifact-panel__detail"
+          title={selected.artifact.name}
+          extra={
+            <Button
+              type="text"
+              size="small"
+              icon={<CloseOutlined />}
               onClick={onClose}
               aria-label="Close artifact"
-            >
-              x
-            </button>
-          </div>
-          <pre className="artifact-panel__content">{selected.content}</pre>
-        </div>
+            />
+          }
+        >
+          <Descriptions size="small" column={1}>
+            <Descriptions.Item label="类型">{selected.artifact.type}</Descriptions.Item>
+            {selected.artifact.version && (
+              <Descriptions.Item label="版本">v{selected.artifact.version}</Descriptions.Item>
+            )}
+          </Descriptions>
+          <Paragraph>
+            <pre className="artifact-panel__content">{selected.content}</pre>
+          </Paragraph>
+        </Card>
       )}
-    </section>
+    </div>
   );
 }

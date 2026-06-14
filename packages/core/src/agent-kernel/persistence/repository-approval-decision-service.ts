@@ -1,4 +1,4 @@
-import { AuditActor, type ApprovalRecord } from "@sunpilot/protocol";
+import type { ApprovalRecord } from "@sunpilot/protocol";
 import type { DatabaseContext } from "@sunpilot/storage";
 import type { AgentEvent } from "../agent-event-bus.js";
 import type { RiskLevel } from "../loop-types.js";
@@ -73,7 +73,7 @@ export class RepositoryApprovalDecisionService {
       await database.audit.create({
         runId: decided.runId,
         stepId: decided.stepId,
-        actor: decidedBy ?? AuditActor.User,
+        actor: decidedBy ?? "user",
         action: `approval.${status}`,
         target: approvalId,
         risk: decided.risk,

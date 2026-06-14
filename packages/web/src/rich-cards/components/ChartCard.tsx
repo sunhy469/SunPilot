@@ -1,5 +1,8 @@
+import { Progress, Typography } from "antd";
 import type { ChartCardData } from "../types";
 import { RichCardShell } from "./RichCardShell";
+
+const { Text } = Typography;
 
 export function ChartCard({
   title,
@@ -29,17 +32,15 @@ export function ChartCard({
         <div className="rich-bars">
           {data.items.map((item) => (
             <div key={item.label} className="rich-bars__row">
-              <span className="rich-bars__label">{item.label}</span>
-              <span className="rich-bars__track">
-                <span
-                  className="rich-bars__fill"
-                  style={{
-                    width: `${Math.min(100, (item.value / total) * 100)}%`,
-                    background: item.color ?? "#1f7aff",
-                  }}
-                />
-              </span>
-              <strong>{item.value}%</strong>
+              <Text className="rich-bars__label">{item.label}</Text>
+              <Progress
+                percent={Math.min(100, (item.value / total) * 100)}
+                strokeColor={item.color ?? "#1f7aff"}
+                size="small"
+                showInfo={false}
+                style={{ flex: 1, margin: "0 8px" }}
+              />
+              <Text strong>{item.value}%</Text>
             </div>
           ))}
         </div>
@@ -50,8 +51,8 @@ export function ChartCard({
             {data.items.map((item) => (
               <div key={item.label} className="rich-chart__legend-item">
                 <span style={{ background: item.color ?? "#1f7aff" }} />
-                <b>{item.label}</b>
-                <em>{item.value}%</em>
+                <Text strong>{item.label}</Text>
+                <Text type="secondary">{item.value}%</Text>
               </div>
             ))}
           </div>

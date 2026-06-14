@@ -1,5 +1,4 @@
 .sidebar {
-  width: var(--sidebar-width, 168px);
   background: rgba(255, 255, 255, 0.92);
   border-right: 1px solid var(--sp-border);
   padding: clamp(14px, 2vw, 24px);
@@ -13,8 +12,7 @@
   display: flex;
   align-items: center;
   gap: 10px;
-  font-weight: 800;
-  color: var(--sp-ink);
+  margin-bottom: 20px;
 }
 
 .logo-mark {
@@ -30,38 +28,32 @@
   font-size: 18px;
 }
 
-.new-chat-button {
-  margin: 24px 0 22px;
-}
-
-@media (max-width: 900px) {
-  .sidebar {
-    padding: 14px 10px;
-  }
-
+/* lg (≥992px): sidebar fully visible */
+/* md (≥768px): sidebar compact */
+@media (max-width: 991px) {
   .logo-row {
     justify-content: center;
+    margin-bottom: 16px;
   }
 
-  .logo-text,
-  .new-chat-button {
-    font-size: 0;
+  .logo-text {
+    display: none;
   }
 
-  .new-chat-button::before {
-    content: "+";
-    font-size: 24px;
-    line-height: 1;
+  .logo-mark {
+    width: 36px;
+    height: 36px;
   }
 }
 
-@media (max-width: 420px) {
+/* sm (≥576px): sidebar minimal */
+@media (max-width: 575px) {
   .sidebar {
     padding: 12px 8px;
   }
 
   .logo-mark {
-    width: 34px;
-    height: 34px;
+    width: 32px;
+    height: 32px;
   }
 }

@@ -2,6 +2,7 @@
   min-height: 56px;
   display: flex;
   align-items: center;
+  justify-content: space-between;
   padding: 0 clamp(16px, 3vw, 34px);
   border-bottom: 1px solid var(--sp-border);
   flex-shrink: 0;
@@ -13,31 +14,11 @@
 .chat-title {
   font-size: 18px;
   font-weight: 750;
-  color: var(--sp-ink);
-  display: flex;
-  align-items: center;
-  gap: 6px;
   min-width: 0;
 }
 
-@media (max-width: 640px) {
+@media (max-width: 767px) {
   .chat-title {
     font-size: 16px;
   }
-}
-
-.chat-title-text {
-  max-width: min(54vw, 560px);
-  overflow: hidden;
-  white-space: nowrap;
-  text-overflow: ellipsis;
-}
-
-.chat-title-arrow {
-  font-size: 10px;
-  color: var(--sp-muted);
-}
-
-.chat-header-more {
-  margin-left: auto;
 }

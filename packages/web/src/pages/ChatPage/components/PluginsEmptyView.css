@@ -24,33 +24,16 @@
 
 .plugins-empty-view__kicker {
   margin: 0 0 8px;
-  color: var(--sp-blue);
-  font-size: 13px;
-  font-weight: 750;
+  display: block;
 }
 
-.plugins-empty-view h1 {
-  margin: 0;
-  color: var(--sp-ink);
-  font-size: 34px;
-  font-weight: 800;
-}
-
-.plugins-empty-view p:last-child {
-  max-width: 520px;
-  margin: 14px auto 0;
-  color: var(--sp-muted);
-  font-size: 14px;
-  line-height: 1.8;
-}
-
-@media (max-width: 640px) {
-  .plugins-empty-view h1 {
-    font-size: 26px;
+@media (max-width: 767px) {
+  .plugins-empty-view__inner .ant-typography h4 {
+    font-size: 22px;
   }
 }
 
-@media (max-width: 420px), (max-height: 620px) {
+@media (max-width: 575px), (max-height: 620px) {
   .plugins-empty-view {
     padding: 18px 12px;
   }
