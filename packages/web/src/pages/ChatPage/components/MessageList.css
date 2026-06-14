@@ -13,6 +13,28 @@
   padding-bottom: 10px;
 }
 
+.message-list::-webkit-scrollbar {
+  width: 6px;
+}
+
+.message-list::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.message-list::-webkit-scrollbar-thumb {
+  background: #e5e7eb;
+  border-radius: 3px;
+}
+
+.message-list::-webkit-scrollbar-thumb:hover {
+  background: #d1d5db;
+}
+
+.message-list {
+  scrollbar-width: thin;
+  scrollbar-color: #e5e7eb transparent;
+}
+
 .message-list__loading {
   text-align: center;
   color: var(--sp-muted);

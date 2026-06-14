@@ -19,9 +19,9 @@ export function AppProviders({ children }: { children: ReactNode }) {
           colorTextSecondary: "#6b7280",
           colorTextTertiary: "#9ca3af",
 
-          borderRadius: 12,
-          borderRadiusLG: 16,
-          borderRadiusSM: 8,
+          borderRadius: 16,
+          borderRadiusLG: 20,
+          borderRadiusSM: 10,
 
           boxShadow: "0 18px 48px rgba(15, 23, 42, 0.08)",
           fontSize: 14,
@@ -30,7 +30,7 @@ export function AppProviders({ children }: { children: ReactNode }) {
         },
         components: {
           Button: {
-            borderRadius: 12,
+            borderRadius: 16,
             controlHeight: 40,
             fontWeight: 500,
           },
@@ -39,11 +39,11 @@ export function AppProviders({ children }: { children: ReactNode }) {
             controlHeight: 40,
           },
           Card: {
-            borderRadiusLG: 16,
+            borderRadiusLG: 20,
             paddingLG: 16,
           },
           Menu: {
-            itemBorderRadius: 8,
+            itemBorderRadius: 10,
             itemSelectedBg: "#eef5ff",
             itemSelectedColor: "#1677ff",
             itemHoverBg: "#f4f8ff",

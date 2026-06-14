@@ -1,12 +1,13 @@
-.sidebar-nav {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
+.sidebar-nav .ant-btn {
+  justify-content: flex-start;
+  font-size: 15px;
+  padding: 4px 8px;
 }
 
 @media (max-width: 991px) {
   .sidebar-nav .ant-btn {
     justify-content: center;
     padding: 0 8px;
+    font-size: 14px;
   }
 }

@@ -1,16 +1,7 @@
 .message-row.assistant {
   display: flex;
   align-items: flex-start;
-  gap: 14px;
   margin-bottom: 26px;
-}
-
-.assistant-avatar {
-  width: 42px;
-  height: 42px;
-  border-radius: 50%;
-  flex-shrink: 0;
-  box-shadow: 0 8px 18px rgba(37, 99, 235, 0.14);
 }
 
 .assistant-content {
@@ -18,29 +9,25 @@
   min-width: 0;
 }
 
-.assistant-meta {
-  margin-bottom: 8px;
-}
-
 .assistant-text {
-  font-size: 14px;
-  line-height: 1.85;
+  font-size: 16px;
+  line-height: 1.75;
   color: var(--sp-text);
-  max-width: 760px;
 }
 
-.assistant-text-content {
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
+/* ── Action row (copy / like / dislike / time) ───────────────────── */
+
+.assistant-actions {
+  margin-top: 10px;
+  padding-top: 6px;
+}
+
+.assistant-actions .message-time {
+  white-space: nowrap;
 }
 
 @media (max-width: 767px) {
-  .message-row.assistant {
-    gap: 10px;
-  }
-
-  .assistant-avatar {
-    width: 36px;
-    height: 36px;
+  .assistant-text {
+    max-width: 100%;
   }
 }

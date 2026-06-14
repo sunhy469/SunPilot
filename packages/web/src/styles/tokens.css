@@ -28,9 +28,9 @@
   --sp-control-md: 44px;
   --sp-control-lg: 48px;
   --sp-control-xl: 56px;
-  --sp-radius-sm: 10px;
+  --sp-radius-sm: 12px;
   --sp-radius-md: 16px;
-  --sp-radius-lg: 18px;
+  --sp-radius-lg: 20px;
   --sp-control-border: 1px solid var(--sp-border);
   --sp-control-shadow: 0 8px 18px rgba(37, 99, 235, 0.12);
   --sp-control-shadow-hover: 0 12px 24px rgba(37, 99, 235, 0.16);

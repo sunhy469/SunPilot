@@ -1,6 +1,6 @@
 .recent-section {
-  margin-top: 24px;
-  padding-top: 18px;
+  margin-top: 18px;
+  padding-top: 14px;
   border-top: 1px solid var(--sp-border-soft);
   flex: 1;
   min-height: 0;
@@ -8,12 +8,39 @@
 }
 
 .recent-title {
-  margin-bottom: 10px;
-  padding: 0 6px;
+  cursor: pointer;
+  margin-bottom: 6px;
+  margin-top: 10px;
+  padding: 4px 6px;
+  border-radius: 6px;
+  user-select: none;
+  font-size: 14px;
+}
+
+.recent-title:hover {
+  background: var(--sp-surface-soft);
+}
+
+.recent-title:first-child {
+  margin-top: 0;
 }
 
 .recent-item {
+  justify-content: flex-start !important;
+  font-size: 15px;
+  padding: 4px 8px;
+}
+
+/* Force single-line ellipsis on the button's text span */
+.recent-item > span {
+  display: block;
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
+  text-align: left;
+}
+
+.recent-item--active {
+  background: #f1f5f9 !important;
+  border-radius: 8px;
 }
