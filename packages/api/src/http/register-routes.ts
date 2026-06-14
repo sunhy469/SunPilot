@@ -5,16 +5,11 @@ import {
   approvalDecisionSchema,
   AuditActor,
   type ArtifactRecord,
-  type MemoryRecord,
 } from "@sunpilot/protocol";
 import {
   parseAgentChatRequest,
   RuntimeError,
 } from "@sunpilot/core";
-import {
-  readSunPilotConfig,
-  updateSunPilotConfig,
-} from "@sunpilot/storage";
 import type { SunPilotApiDeps } from "../composition/api-deps.js";
 import {
   listRunsQuerySchema,
@@ -67,7 +62,7 @@ export function registerSunPilotApiRoutes(
   app: FastifyInstance,
   deps: SunPilotApiDeps,
 ): void {
-  const { database, paths, getChatAgent, skills, config } = deps;
+  const { database, getChatAgent, skills, config } = deps;
 
   // ── Health ─────────────────────────────────────────────────────────
   app.get("/healthz", async () => ({

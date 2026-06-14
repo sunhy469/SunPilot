@@ -79,11 +79,20 @@ export function createAgentLoopService(deps: {
   // persisted events to liveEventBus, which WebSocket broadcasters and
   // external stream hooks consume. This ensures all externally visible
   // events carry a real DB sequence (no sequence: -1 duplicates).
+  //
+  // agent.response.delta is NOT persisted — it is a high-frequency transient
+  // streaming event whose content is already captured by the final saved
+  // message. Skipping it prevents the async fire-and-forget persist from
+  // delivering response tokens out of order to liveEventBus.
   rawEventBus.subscribe(async (event) => {
     if (event.sequence !== undefined) {
       // Already persisted (e.g. atomically created with DB sequence) —
       // forward directly to liveEventBus without re-persisting.
       liveEventBus.publish(event);
+      return;
+    }
+    if (event.type === "agent.response.delta") {
+      // Transient streaming event — skip persist, delivered via onDelta instead
       return;
     }
     const persisted = await eventSink.persist(event);
@@ -447,3 +456,4 @@ function toolResultContent(result: unknown): string | undefined {
   const content = (result as { content?: unknown }).content;
   return typeof content === "string" ? content : undefined;
 }
+

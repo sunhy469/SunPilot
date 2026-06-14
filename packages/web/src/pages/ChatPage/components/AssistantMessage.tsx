@@ -1,10 +1,14 @@
 import type { ReactNode } from "react";
+import { Avatar, Typography, Tag, Space } from "antd";
+import { RobotOutlined } from "@ant-design/icons";
 import type { ChatMessage } from "../../../features/conversations/types";
 import { assistantDisplayName } from "../../../features/chat/model";
 import { formatTime } from "../../../shared/utils/formatTime";
 import { StreamingCursor } from "./StreamingCursor";
 import { TypingDots } from "./TypingDots";
 import "./AssistantMessage.css";
+
+const { Text, Paragraph } = Typography;
 
 export function AssistantMessage({
   message,
@@ -19,28 +23,33 @@ export function AssistantMessage({
 
   return (
     <div className="message-row assistant">
-      <img className="assistant-avatar" src="/logo.png" alt="SunPilot logo" />
+      <Avatar
+        size="small"
+        src="/logo.png"
+        icon={<RobotOutlined />}
+        className="assistant-avatar"
+      />
 
       <div className="assistant-content">
-        <div className="assistant-meta">
-          <span className="assistant-name">{assistantDisplayName}</span>
+        <Space size={8} className="assistant-meta">
+          <Text strong>{assistantDisplayName}</Text>
           {message.createdAt && (
-            <span className="message-time">
+            <Text type="secondary" className="message-time">
               {formatTime(message.createdAt)}
-            </span>
+            </Text>
           )}
           {isStreaming && hasContent && (
-            <span className="streaming-badge">生成中</span>
+            <Tag color="processing">生成中</Tag>
           )}
-        </div>
+        </Space>
 
         <div className="assistant-text">
           {!hasContent && isStreaming ? <TypingDots /> : null}
           {hasContent && (
-            <>
-              <span className="assistant-text-content">{message.content}</span>
+            <Paragraph style={{ margin: 0 }}>
+              <Text className="assistant-text-content">{message.content}</Text>
               {isStreaming && <StreamingCursor />}
-            </>
+            </Paragraph>
           )}
         </div>
 

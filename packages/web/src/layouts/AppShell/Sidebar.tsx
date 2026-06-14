@@ -3,7 +3,12 @@ import { conversationTitle } from "../../features/conversations/model";
 import { SidebarNav } from "./SidebarNav";
 import { RecentConversations } from "./RecentConversations";
 import { UserFooter } from "./UserFooter";
+import { Layout, Button, Typography, Image } from "antd";
+import { PlusOutlined } from "@ant-design/icons";
 import "./Sidebar.css";
+
+const { Sider } = Layout;
+const { Text } = Typography;
 
 export function Sidebar({
   conversations,
@@ -21,19 +26,29 @@ export function Sidebar({
   onOpenPlugins: () => void;
 }) {
   return (
-    <aside className="sidebar">
+    <Sider
+      className="sidebar"
+      width={260}
+      breakpoint="lg"
+      collapsedWidth={72}
+      collapsible
+      trigger={null}
+      defaultCollapsed={false}
+    >
       <div className="logo-row">
-        <img className="logo-mark" src="/logo.png" alt="SunPilot logo" />
-        <span className="logo-text">SunPilot</span>
+        <Image className="logo-mark" src="/logo.png" alt="SunPilot logo" preview={false} />
+        <Text className="logo-text" strong>SunPilot</Text>
       </div>
 
-      <button
-        className="new-chat-button sp-button sp-button--accent sp-button--block sp-button--lg"
-        type="button"
+      <Button
+        type="primary"
+        size="large"
+        block
+        icon={<PlusOutlined />}
         onClick={onNewChat}
       >
-        + 新建对话
-      </button>
+        新建对话
+      </Button>
 
       <SidebarNav
         active={activePanel === "plugins"}
@@ -49,6 +64,6 @@ export function Sidebar({
       />
 
       <UserFooter />
-    </aside>
+    </Sider>
   );
 }
