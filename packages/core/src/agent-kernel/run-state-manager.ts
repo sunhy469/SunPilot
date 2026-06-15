@@ -5,7 +5,7 @@ import type {
   AgentLoopResult,
   ToolDecision,
 } from './loop-types.js';
-import { LEGAL_TRANSITIONS } from './state/run-state-machine.js';
+import { isTerminal, LEGAL_TRANSITIONS } from './state/run-state-machine.js';
 
 export interface RunState {
   runId: string;
@@ -94,6 +94,16 @@ export class InMemoryRunStateManager implements RunStateManager {
 
     // Allow same-status transitions (idempotent)
     if (current.status === nextStatus) return current;
+
+    // Terminal states cannot transition further. If we're already in a
+    // terminal state, log and return — don't throw, because the caller
+    // may be an async path that doesn't know the run already ended.
+    if (isTerminal(current.status as AgentLoopStatus)) {
+      console.warn(
+        `[RunStateManager] run ${runId} is already terminal (${current.status}), ignoring transition to ${nextStatus}`,
+      );
+      return current;
+    }
 
     // Validate transition
     const allowed = LEGAL_TRANSITIONS[current.status];
