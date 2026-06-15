@@ -20,6 +20,15 @@ export interface RunState {
     category?: string;
     retryable?: boolean;
   };
+  /** Persisted task state for multi-turn resume/retry support. */
+  taskState?: {
+    goal: string;
+    completedSteps: string[];
+    pendingSteps: string[];
+    gatheredFacts: Record<string, unknown>;
+    openQuestions: string[];
+    iteration: number;
+  };
   createdAt: string;
   updatedAt: string;
   completedAt?: string;
@@ -33,6 +42,11 @@ export interface RunStateManager {
   markCompleted(runId: string, result: AgentLoopResult): Promise<RunState>;
   markCancelled(runId: string, reason?: string): Promise<RunState>;
   getRun(runId: string): Promise<RunState | undefined>;
+  /** Persist task state for multi-turn resume/retry. */
+  saveTaskState(
+    runId: string,
+    taskState: NonNullable<RunState["taskState"]>,
+  ): Promise<void>;
 }
 
 /**
@@ -147,6 +161,16 @@ export class InMemoryRunStateManager implements RunStateManager {
 
   async getRun(runId: string): Promise<RunState | undefined> {
     return this.runs.get(runId);
+  }
+
+  async saveTaskState(
+    runId: string,
+    taskState: NonNullable<RunState["taskState"]>,
+  ): Promise<void> {
+    const current = this.runs.get(runId);
+    if (!current) return; // run may have completed/cleaned up
+    current.taskState = taskState;
+    this.runs.set(runId, current);
   }
 
   /** Write to run_status_history (in-memory for now, DB-backed in Phase 6). */

@@ -12,6 +12,8 @@ export interface ModelCallRecord {
   costEstimate?: number;
   status: ModelCallStatus;
   error?: unknown;
+  /** Optional metadata including context snapshot for observability. */
+  metadata?: Record<string, unknown>;
   createdAt: string;
 }
 
@@ -27,6 +29,8 @@ export interface CreateModelCallInput {
   costEstimate?: number;
   status?: ModelCallStatus;
   error?: unknown;
+  /** Optional metadata (e.g., context snapshot for observability). */
+  metadata?: Record<string, unknown>;
   createdAt?: string;
 }
 

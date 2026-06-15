@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { existsSync, readFileSync, realpathSync, rmSync } from "node:fs";
-import { spawn } from "node:child_process";
+import { execSync, spawn } from "node:child_process";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
@@ -103,50 +103,83 @@ export async function runLauncher(deps: LauncherDeps = {}): Promise<number> {
     return true;
   }
 
+  function killDaemon(): boolean {
+    let killed = false;
+    const kill = deps.killImpl ?? process.kill;
+
+    // 1) Try PID file first
+    const pidFile = paths.pidFile;
+    if ((deps.existsImpl ?? existsSync)(pidFile)) {
+      const pid = Number((deps.readFileImpl ?? readFileSync)(pidFile, "utf8"));
+      try { kill(pid, "SIGTERM"); killed = true; } catch { /* stale */ }
+      (deps.rmImpl ?? rmSync)(pidFile, { force: true });
+    }
+
+    // 2) Fallback: scan for daemon processes by command-line pattern
+    if (!killed) {
+      try {
+        const out = execSync(
+          "ps -eo pid,args --no-headers 2>/dev/null || ps -eo pid,comm -o args 2>/dev/null",
+          { encoding: "utf8", timeout: 5000 },
+        );
+        for (const line of out.split(/\r?\n/)) {
+          if (
+            line.includes("@sunpilot/daemon") ||
+            line.includes("packages/daemon/dist/main.js")
+          ) {
+            const pid = Number(line.trim().split(/\s+/)[0]);
+            if (pid > 0 && pid !== process.pid) {
+              try { kill(pid, "SIGTERM"); killed = true; } catch { /* skip */ }
+            }
+          }
+        }
+      } catch { /* ps unavailable */ }
+    }
+    return killed;
+  }
+
+  function startDaemon(): Promise<number> {
+    const daemonMain = (
+      deps.resolveDaemonMainImpl ??
+      (() => require.resolve("@sunpilot/daemon/main"))
+    )();
+    const daemonArgs = [daemonMain, "--foreground", "--port", String(port)];
+    const child = (deps.spawnImpl ?? spawn)(process.execPath, daemonArgs, {
+      cwd: deps.cwd ?? process.cwd(),
+      detached: !parsed.foreground,
+      stdio: parsed.foreground ? "inherit" : "ignore",
+      env: { ...env, SUNPILOT_PORT: String(port) },
+    });
+    if (parsed.foreground) {
+      return new Promise<number>((resolve) => {
+        child.once("exit", (code) => resolve(code ?? 0));
+      });
+    }
+    child.unref();
+    log(`SunPilot daemon starting at ${baseUrl}`);
+    return Promise.resolve(0);
+  }
+
   switch (command) {
     case "start": {
       if (await status()) {
+        log("SunPilot daemon is already running.");
         return 0;
       }
-      const daemonMain = (
-        deps.resolveDaemonMainImpl ??
-        (() => require.resolve("@sunpilot/daemon/main"))
-      )();
-      const daemonArgs = [daemonMain, "--foreground", "--port", String(port)];
-      const child = (deps.spawnImpl ?? spawn)(process.execPath, daemonArgs, {
-        cwd: deps.cwd ?? process.cwd(),
-        detached: !parsed.foreground,
-        stdio: parsed.foreground ? "inherit" : "ignore",
-        env: { ...env, SUNPILOT_PORT: String(port) },
-      });
-      if (parsed.foreground) {
-        return await new Promise<number>((resolve) => {
-          child.once("exit", (code) => resolve(code ?? 0));
-        });
-      }
-      child.unref();
-      log(`SunPilot daemon starting at ${baseUrl}`);
-      return 0;
+      return await startDaemon();
     }
     case "stop": {
-      if ((deps.existsImpl ?? existsSync)(paths.pidFile)) {
-        const pid = Number(
-          (deps.readFileImpl ?? readFileSync)(paths.pidFile, "utf8"),
-        );
-        try {
-          (deps.killImpl ?? process.kill)(pid, "SIGTERM");
-          (deps.rmImpl ?? rmSync)(paths.pidFile, { force: true });
-          log("SunPilot daemon stop signal sent.");
-        } catch {
-          (deps.rmImpl ?? rmSync)(paths.pidFile, { force: true });
-          log(
-            "SunPilot daemon pid file exists, but the process is not running.",
-          );
-        }
-      } else {
-        log("SunPilot daemon pid file was not found.");
-      }
+      const killed = killDaemon();
+      log(killed ? "SunPilot daemon stopped." : "SunPilot daemon was not running.");
       return 0;
+    }
+    case "restart": {
+      log("Stopping SunPilot daemon...");
+      killDaemon();
+      // Wait for the port to free up before starting
+      await new Promise((r) => setTimeout(r, 1000));
+      log("Starting SunPilot daemon...");
+      return await startDaemon();
     }
     case "status":
       return (await status()) ? 0 : 1;
@@ -165,7 +198,7 @@ export async function runLauncher(deps: LauncherDeps = {}): Promise<number> {
       return 0;
     }
     default:
-      log("Usage: sun <start|stop|status|doctor|logs|open>");
+      log("Usage: sun <start|stop|restart|status|doctor|logs|open>");
       return command === "help" ? 0 : 1;
   }
 }

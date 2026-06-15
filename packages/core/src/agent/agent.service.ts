@@ -3,9 +3,7 @@ import { notFound } from "../errors/index.js";
 import { AuditActor } from "@sunpilot/protocol";
 import type { IdempotencyRepository } from "@sunpilot/storage";
 import type { DatabaseContext } from "@sunpilot/storage";
-import { parseAgentChatRequest } from "./agent.schema.js";
 import type {
-  AgentChatHooks,
   AgentChatResponse,
   AgentConversation,
   AgentMessage,
@@ -50,6 +48,14 @@ export interface AgentLoopServiceConfig {
       conversationId: string;
       role: string;
       content: string;
+      attachments?: Array<{
+        id: string;
+        name: string;
+        type: string;
+        sizeBytes?: number;
+        url?: string;
+        storageKey?: string;
+      }>;
     }): Promise<AgentMessage>;
     listMessages(conversationId: string): Promise<AgentMessage[]>;
   };
@@ -77,6 +83,235 @@ export class AgentService {
   // ── Agent Loop 主路径 ────────────────────────────────────────────
 
   /**
+   * WebSocket fast-ack entry point.
+   *
+   * Creates the conversation, user message, and run record synchronously,
+   * returns { accepted: true, runId, conversationId, messageId } immediately,
+   * then executes the Agent Loop in the background via queueMicrotask.
+   *
+   * All progress is streamed through agent.* events on the event bus —
+   * the caller should subscribe to liveEventBus for updates.
+   *
+   * This is the recommended entry point for WebSocket chat.send.
+   * Use handleChatCommand() for synchronous REST or test callers.
+   */
+  async startChatCommand(
+    input: {
+      conversationId?: string;
+      message: string;
+      mode?: "chat" | "agent";
+      permissionMode?: "ask" | "auto" | "full";
+      clientRequestId?: string;
+      attachments?: Array<{
+        id: string;
+        name: string;
+        type: string;
+        sizeBytes?: number;
+        url?: string;
+        storageKey?: string;
+      }>;
+    },
+    ctx: {
+      source: "web" | "cli" | "api";
+      connectionId?: string;
+      userId?: string;
+    },
+    streamHooks?: {
+      onUserMessage?: (
+        message: AgentChatResponse["message"],
+      ) => void | Promise<void>;
+      onEvent?: (event: AgentEvent) => void;
+      onDelta?: (delta: {
+        conversationId: string;
+        messageId: string;
+        delta: string;
+      }) => void;
+      onCompleted?: (result: AgentLoopResult) => void;
+      onError?: (error: unknown) => void;
+    },
+  ): Promise<{
+    accepted: true;
+    runId: string;
+    conversationId: string;
+    messageId: string;
+  }> {
+    const { loopEngine, abortRegistry, runStateManager, eventBus, liveEventBus } =
+      this.loopConfig;
+
+    await this.assertConversationExists(input.conversationId);
+
+    const shouldCreateConversation = !input.conversationId;
+    const conversationId =
+      input.conversationId ?? `conv_${crypto.randomUUID()}`;
+
+    const runId = `run_${crypto.randomUUID()}`;
+    const userMessageId = `msg_${crypto.randomUUID()}`;
+
+    const loopInput: AgentLoopInput = {
+      runId,
+      conversationId,
+      userMessageId,
+      userId: ctx.userId,
+      message: input.message,
+      mode: input.mode ?? "agent",
+      permissionMode: input.permissionMode,
+      attachments: input.attachments,
+      client: {
+        source: ctx.source,
+        connectionId: ctx.connectionId,
+      },
+    };
+
+    // Idempotency check
+    const idempotency = input.clientRequestId
+      ? await this.reserveIdempotency(
+          input.clientRequestId,
+          input,
+          loopInput,
+          ctx,
+        )
+      : undefined;
+    if (idempotency?.replay) {
+      // Return the replay data immediately
+      return {
+        accepted: true,
+        runId: idempotency.replay.runId,
+        conversationId: idempotency.replay.conversationId,
+        messageId: idempotency.replay.messageId,
+      };
+    }
+
+    // Create abort signal for this run
+    const signal = abortRegistry.create(runId);
+
+    // Subscribe to events for streaming hooks
+    const unsubLive = liveEventBus?.subscribe((event) => {
+      if (event.runId !== runId) return;
+      streamHooks?.onEvent?.(event);
+    }) ?? (() => {});
+
+    const unsub = eventBus.subscribe((event) => {
+      if (event.runId !== runId) return;
+      if (
+        streamHooks?.onDelta &&
+        event.type === "agent.response.delta"
+      ) {
+        const payload = event.payload as {
+          conversationId: string;
+          messageId: string;
+          delta: string;
+        };
+        streamHooks.onDelta({
+          conversationId: payload.conversationId,
+          messageId: payload.messageId,
+          delta: payload.delta,
+        });
+      }
+    });
+
+    // Create conversation if needed
+    if (shouldCreateConversation && this.loopConfig.conversations) {
+      await this.loopConfig.conversations.createConversation({
+        id: conversationId,
+      });
+    }
+
+    // Persist run initial state
+    const initialized = this.loopConfig.agentRunInitializer
+      ? await this.loopConfig.agentRunInitializer.createRunWithCreatedEvent(
+          loopInput,
+        )
+      : undefined;
+    if (!initialized) {
+      await runStateManager.createRun(loopInput);
+    }
+
+    // Persist user message with attachments
+    if (this.loopConfig.conversations) {
+      const userMessage = await this.loopConfig.conversations.createMessage({
+        id: userMessageId,
+        conversationId,
+        role: "user",
+        content: input.message,
+        attachments: input.attachments?.map((a) => ({
+          id: a.id,
+          name: a.name,
+          type: a.type,
+          sizeBytes: a.sizeBytes,
+          url: a.url,
+          storageKey: a.storageKey,
+        })),
+      });
+      await streamHooks?.onUserMessage?.(userMessage);
+    }
+
+    // Publish run.created event
+    if (initialized) {
+      eventBus.publish(initialized.event);
+    } else {
+      eventBus.emit(
+        "agent.run.created",
+        {
+          runId,
+          conversationId,
+          mode: loopInput.mode,
+          goal: input.message,
+        },
+        { runId, conversationId },
+      );
+    }
+
+    // ── Execute Agent Loop in background ───────────────────────────
+    queueMicrotask(() => {
+      void (async () => {
+        try {
+          const result = await loopEngine.run(loopInput, signal);
+          abortRegistry.remove(runId);
+          await eventBus.flush();
+          unsubLive();
+          unsub();
+
+          const response = {
+            ...result,
+            conversationId,
+            messageId: result.assistantMessageId ?? userMessageId,
+          };
+          await this.completeIdempotency(idempotency?.id, response);
+          streamHooks?.onCompleted?.(result);
+        } catch (error) {
+          abortRegistry.remove(runId);
+          await eventBus.flush();
+          unsubLive();
+          unsub();
+
+          await this.failIdempotency(idempotency?.id, error);
+          await runStateManager.markFailed(runId, error);
+          eventBus.emit(
+            "agent.error",
+            {
+              runId,
+              conversationId,
+              code: "AGENT_INTERNAL_ERROR",
+              message: error instanceof Error ? error.message : String(error),
+              category: "internal",
+              retryable: false,
+            },
+            { runId, conversationId },
+          );
+          streamHooks?.onError?.(error);
+        }
+      })();
+    });
+
+    return {
+      accepted: true,
+      runId,
+      conversationId,
+      messageId: userMessageId,
+    };
+  }
+
+  /**
    * 通过完整 Agent Loop 处理一次聊天命令。
    * 这是架构文档 §0.3 定义的唯一标准入口。
    *
@@ -95,12 +330,15 @@ export class AgentService {
       conversationId?: string;
       message: string;
       mode?: "chat" | "agent";
+      permissionMode?: "ask" | "auto" | "full";
       clientRequestId?: string;
       attachments?: Array<{
         id: string;
         name: string;
         type: string;
         sizeBytes?: number;
+        url?: string;
+        storageKey?: string;
       }>;
     },
     ctx: {
@@ -141,6 +379,7 @@ export class AgentService {
       userId: ctx.userId,
       message: input.message,
       mode: input.mode ?? "agent",
+      permissionMode: input.permissionMode,
       attachments: input.attachments,
       client: {
         source: ctx.source,
@@ -214,13 +453,21 @@ export class AgentService {
         await runStateManager.createRun(loopInput);
       }
 
-      // 持久化用户消息
+      // 持久化用户消息（含附件引用）
       if (this.loopConfig.conversations) {
         const userMessage = await this.loopConfig.conversations.createMessage({
           id: userMessageId,
           conversationId,
           role: "user",
           content: input.message,
+          attachments: input.attachments?.map((a) => ({
+            id: a.id,
+            name: a.name,
+            type: a.type,
+            sizeBytes: a.sizeBytes,
+            url: a.url,
+            storageKey: a.storageKey,
+          })),
         });
         await streamHooks?.onUserMessage?.(userMessage);
       }
@@ -431,13 +678,20 @@ export class AgentService {
 
   /**
    * 拒绝一个待审批的请求。
-   * 拒绝后 Run 将保持 waiting_approval 状态，允许用户手动取消。
+   *
+   * 拒绝策略 (rejectionStrategy):
+   *   - "cancel": 取消 run（默认，原行为是保持 waiting_approval）
+   *   - "interrupt": 中断 run，允许用户后续重试
+   *   - "continue_without_tool": 跳过被拒绝的工具，继续 agent loop
+   *
+   * 拒绝后根据策略转换 run 状态，不再无限期保持在 waiting_approval。
    */
   async reject(
     approvalId: string,
     decidedBy?: string,
     reason?: string,
-  ): Promise<{ rejected: boolean }> {
+    rejectionStrategy: "cancel" | "interrupt" | "continue_without_tool" = "interrupt",
+  ): Promise<{ rejected: boolean; runId: string; strategy: string }> {
     const approval = this.loopConfig.approvalDecisionService
       ? await this.loopConfig.approvalDecisionService.reject(
           approvalId,
@@ -449,6 +703,62 @@ export class AgentService {
           decidedBy,
           reason,
         );
+
+    const run = await this.loopConfig.runStateManager.getRun(approval.runId);
+    const conversationId = run?.conversationId;
+
+    // Transition run state based on rejection strategy
+    switch (rejectionStrategy) {
+      case "cancel":
+        await this.loopConfig.runStateManager.markCancelled(
+          approval.runId,
+          reason ?? "approval rejected — cancelled by user",
+        );
+        this.loopConfig.abortRegistry.abort(approval.runId);
+        break;
+      case "continue_without_tool":
+        // Continue the agent loop without the rejected tool.
+        // Fire-and-forget in background: rebuilds context, reflects,
+        // and responds to the user explaining the tool was skipped.
+        await this.loopConfig.runStateManager.markStatus(
+          approval.runId,
+          "responding",
+          reason ?? "approval rejected — continuing without tool",
+        );
+        queueMicrotask(() => {
+          const signal = this.loopConfig.abortRegistry.create(approval.runId);
+          this.loopConfig.loopEngine
+            .continueAfterRejection(
+              {
+                runId: approval.runId,
+                conversationId: conversationId ?? "",
+                userId: decidedBy,
+                originalMessage: run?.goal ?? reason ?? "Continue without tool",
+                mode:
+                  run?.mode === "chat" || run?.mode === "agent"
+                    ? run.mode
+                    : "agent",
+              },
+              signal,
+            )
+            .catch(() => {
+              // Best effort — errors handled internally by loop engine
+            })
+            .finally(() => {
+              this.loopConfig.abortRegistry.remove(approval.runId);
+            });
+        });
+        break;
+      case "interrupt":
+      default:
+        await this.loopConfig.runStateManager.markStatus(
+          approval.runId,
+          "interrupted",
+          reason ?? "approval rejected by user",
+        );
+        break;
+    }
+
     if (hasPersistedApprovalEvent(approval)) {
       this.loopConfig.eventBus.publish(approval.event);
     } else {
@@ -459,11 +769,17 @@ export class AgentService {
           approvalId: approval.approvalId,
           decidedBy: approval.decidedBy,
           reason: approval.reason,
+          strategy: rejectionStrategy,
         },
-        { runId: approval.runId },
+        { runId: approval.runId, conversationId },
       );
     }
-    return { rejected: true };
+
+    return {
+      rejected: true,
+      runId: approval.runId,
+      strategy: rejectionStrategy,
+    };
   }
 
   /**
@@ -601,77 +917,6 @@ export class AgentService {
     });
   }
 
-  // ── Compatibility adapter ────────────────────────────────────────
-
-  /**
-   * @deprecated Use handleChatCommand() instead.
-   * Kept for older REST callers, but always routes through the Agent Loop.
-   */
-  async chat(
-    input: unknown,
-    hooks: AgentChatHooks = {},
-  ): Promise<AgentChatResponse> {
-    const request = parseAgentChatRequest(input);
-    let assistantContent = "";
-    const result = await this.handleChatCommand(
-      {
-        conversationId: request.conversationId,
-        message: request.message,
-        mode: "agent",
-      },
-      { source: "api" },
-      {
-        onUserMessage: (message) => hooks.onUserMessage?.(message),
-        onEvent: (event) => {
-          if (event.type !== "agent.response.started") return;
-          const payload = event.payload as { messageId?: string };
-          if (!payload.messageId) return;
-          const started = {
-            conversationId: event.conversationId ?? resultConversationId(event),
-            messageId: payload.messageId,
-          };
-          return hooks.onAssistantStarted?.(started);
-        },
-        onDelta: (delta) => {
-          assistantContent += delta.delta;
-          return hooks.onAssistantDelta?.(delta);
-        },
-      },
-    );
-
-    const assistant = await this.findAssistantMessage(
-      result.conversationId,
-      result.messageId,
-      assistantContent,
-    );
-    await hooks.onAssistantMessage?.(assistant);
-
-    return {
-      conversationId: result.conversationId,
-      message: assistant,
-    };
-  }
-
-  private async findAssistantMessage(
-    conversationId: string,
-    messageId: string,
-    fallbackContent: string,
-  ): Promise<AgentChatResponse["message"]> {
-    if (this.loopConfig.conversations) {
-      const messages =
-        await this.loopConfig.conversations.listMessages(conversationId);
-      const message = messages.find((item) => item.id === messageId);
-      if (message) return message;
-    }
-    return {
-      id: messageId,
-      conversationId,
-      role: "assistant",
-      content: fallbackContent,
-      createdAt: new Date().toISOString(),
-    };
-  }
-
   async assertConversationExists(
     conversationId: string | undefined,
   ): Promise<AgentConversation | undefined> {
@@ -710,6 +955,8 @@ export class AgentService {
         name: string;
         type: string;
         sizeBytes?: number;
+        url?: string;
+        storageKey?: string;
       }>;
     },
     input: AgentLoopInput,
@@ -877,11 +1124,6 @@ function normalizeIdempotencyError(error: unknown): {
     retryable: false,
     message: String(error),
   };
-}
-
-function resultConversationId(event: AgentEvent): string {
-  const payload = event.payload as { conversationId?: string };
-  return event.conversationId ?? payload.conversationId ?? "";
 }
 
 function hasPersistedApprovalEvent(

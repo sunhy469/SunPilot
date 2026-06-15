@@ -1,6 +1,16 @@
 import { useCallback, useEffect, useRef } from "react";
 
-export function useAutoScroll(deps: unknown[]) {
+/**
+ * Auto-scroll hook for chat message lists.
+ *
+ * During streaming (isStreaming=true), uses instant scrollTop assignment
+ * to avoid jank from repeated smooth-scroll animations. After streaming
+ * completes, uses smooth behavior for a polished final scroll.
+ */
+export function useAutoScroll(
+  deps: unknown[],
+  isStreaming = false,
+) {
   const containerRef = useRef<HTMLDivElement>(null);
   const userScrolledRef = useRef(false);
 
@@ -10,6 +20,7 @@ export function useAutoScroll(deps: unknown[]) {
     return distanceToBottom < 120;
   }, []);
 
+  // Track user scroll intent
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
@@ -22,17 +33,23 @@ export function useAutoScroll(deps: unknown[]) {
     return () => container.removeEventListener("scroll", handleScroll);
   }, [shouldAutoScroll]);
 
+  // Auto-scroll on content change
   useEffect(() => {
     const container = containerRef.current;
     if (!container || userScrolledRef.current) return;
 
-    // Use scrollTop for JSDOM compatibility (scrollTo not available on elements in JSDOM)
     if (typeof container.scrollTo === "function") {
-      container.scrollTo({ top: container.scrollHeight, behavior: "smooth" });
+      container.scrollTo({
+        top: container.scrollHeight,
+        // Instant during streaming to avoid animation jank;
+        // smooth on completion for polished feel.
+        behavior: isStreaming ? "instant" : "smooth",
+      });
     } else {
+      // JSDOM fallback (scrollTo not available on elements)
       container.scrollTop = container.scrollHeight;
     }
-  }, deps);
+  }, deps); // eslint-disable-line react-hooks/exhaustive-deps
 
   return containerRef;
 }

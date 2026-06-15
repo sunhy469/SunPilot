@@ -37,6 +37,15 @@ export interface MemoryWriteInput {
   responseMessageId?: string;
   observation?: AgentObservation;
   reflection?: AgentReflection;
+  /** When true, force a conversation summary even if goal is not yet achieved.
+   *  Set when token budget is strained or many turns have passed. */
+  forceSummary?: boolean;
+  /** Rolling summary message range. Tracks which messages are covered
+   *  by the summary so ContextBuilder can exclude them from raw history. */
+  messageRange?: {
+    fromMessageId: string;
+    toMessageId: string;
+  };
 }
 
 export interface MemoryWriteResult {

@@ -187,6 +187,8 @@ export interface MemoryRecord {
   confidence?: number;
   importance?: number;
   metadata: Record<string, unknown>;
+  /** Semantic embedding vector for pgvector similarity search. */
+  embedding?: number[];
   createdAt: string;
   updatedAt?: string;
   lastAccessedAt?: string;
@@ -231,6 +233,8 @@ export interface MemorySearchInput {
   types?: MemoryType[];
   includeDeleted?: boolean;
   limit?: number;
+  /** Query embedding vector for semantic similarity search (pgvector). */
+  embedding?: number[];
 }
 
 export interface RetrievedMemoryRecord extends MemoryRecord {

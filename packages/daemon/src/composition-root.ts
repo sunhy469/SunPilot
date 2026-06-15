@@ -31,7 +31,9 @@ import {
   BasicReflectionEngine,
   ContextBuilder,
   DefaultMemoryWriter,
+  DefaultToolArgumentBuilder,
   ExecutionOrchestrator,
+  LlmEmbeddingService,
   SkillToolExecutor,
   InMemoryAgentEventBus,
   IntentRouter,
@@ -53,6 +55,10 @@ import {
 import type { DatabaseContext } from "@sunpilot/storage";
 import type { SkillRegistry } from "@sunpilot/skill-runner";
 
+import {
+  createDefaultEmbeddingProvider,
+  type OpenAICompatibleEmbeddingProvider,
+} from "@sunpilot/core";
 import type { LlmProvider } from "@sunpilot/core";
 
 export function createAgentLoopService(deps: {
@@ -99,6 +105,32 @@ export function createAgentLoopService(deps: {
     if (persisted) liveEventBus.publish(persisted);
   });
 
+  // ── Embedding ───────────────────────────────────────────────────
+  // Try to create a real embedding provider from environment config.
+  // Falls back to keyword/hash embedding when no API key is configured.
+  let embeddingProvider: OpenAICompatibleEmbeddingProvider | undefined;
+  try {
+    embeddingProvider = createDefaultEmbeddingProvider();
+  } catch {
+    // No API key configured — will use fallback
+  }
+
+  const embeddingService = new LlmEmbeddingService({
+    llm: deps.llmProvider,
+    embeddingProvider,
+  });
+
+  // Log embedding mode at startup so operators know what's active
+  if (embeddingService.hasRealProvider) {
+    console.log(
+      `[embedding] REAL provider active — model=${embeddingProvider!.model}, dims=${embeddingProvider!.dimensions}`,
+    );
+  } else {
+    console.warn(
+      "[embedding] FALLBACK mode — using keyword/hash vectors. Set SUNPILOT_LLM_API_KEY to enable semantic embeddings.",
+    );
+  }
+
   // ── Context ────────────────────────────────────────────────────
   const contextBuilder = new ContextBuilder({
     listMessages: async (conversationId, limit) => {
@@ -108,17 +140,34 @@ export function createAgentLoopService(deps: {
         id: m.id,
         role: m.role,
         content: m.content,
+        attachments: Array.isArray(m.metadata?.attachments)
+          ? (m.metadata.attachments as Array<{
+              id: string;
+              name: string;
+              type: string;
+              sizeBytes?: number;
+              url?: string;
+              storageKey?: string;
+            }>)
+          : undefined,
         createdAt: m.createdAt,
       }));
     },
     searchMemories: async (input) => {
       try {
+        // Use provided embedding or generate from query for hybrid search
+        const queryEmbedding =
+          input.embedding ??
+          (input.query.trim()
+            ? await embeddingService.embed(input.query).catch(() => undefined)
+            : undefined);
         const memories = await deps.database.memory.search({
           query: input.query,
           runId: input.runId,
           conversationId: input.conversationId,
           userId: input.userId,
           limit: input.limit ?? 10,
+          embedding: queryEmbedding,
         });
         return memories.map((memory) => ({
           id: memory.id,
@@ -134,6 +183,7 @@ export function createAgentLoopService(deps: {
           scope: memory.scope,
           scopeId: memory.scopeId,
           score: memory.score,
+          metadata: memory.metadata as Record<string, unknown> | undefined,
         }));
       } catch {
         return [];
@@ -173,6 +223,7 @@ export function createAgentLoopService(deps: {
         status: toolCall.status,
         summary: toolResultSummary(toolCall.result),
         content: toolResultContent(toolCall.result),
+        structured: toolResultStructured(toolCall.result),
       }));
     },
     systemPrompt: {
@@ -185,6 +236,7 @@ export function createAgentLoopService(deps: {
         "Cite memory sources when using remembered information.",
       ],
     },
+    embedText: async (text: string) => embeddingService.embed(text),
   });
 
   // ── Intent ─────────────────────────────────────────────────────
@@ -193,6 +245,12 @@ export function createAgentLoopService(deps: {
   });
 
   // ── Tools ──────────────────────────────────────────────────────
+  // Shared argument builder — used by both ToolDecisionEngine (build)
+  // and ExecutionOrchestrator (repair loop).
+  const toolArgBuilder = new DefaultToolArgumentBuilder({
+    llm: deps.llmProvider,
+  });
+
   const toolDecisionEngine = new ToolDecisionEngine({
     listSkills: async () => {
       const skills = deps.skillRegistry.list();
@@ -208,6 +266,11 @@ export function createAgentLoopService(deps: {
           maxTimeoutMs: 300_000,
           supportsAbort: true,
           idempotent: false,
+          inputSchema:
+            typeof capability.inputSchema === "object" &&
+            capability.inputSchema !== null
+              ? (capability.inputSchema as Record<string, unknown>)
+              : undefined,
           riskHints: {
             defaultRisk: capability.risk as
               | "low"
@@ -218,6 +281,8 @@ export function createAgentLoopService(deps: {
         })),
       );
     },
+    llm: deps.llmProvider,
+    argumentBuilder: toolArgBuilder,
   });
 
   // ── Safety ─────────────────────────────────────────────────────
@@ -265,10 +330,13 @@ export function createAgentLoopService(deps: {
     toolExecutor: skillExecutor,
     eventBus: rawEventBus,
     toolCalls: deps.database.toolCalls,
+    argumentBuilder: toolArgBuilder,
   });
 
   // ── Reflection ─────────────────────────────────────────────────
-  const reflectionEngine = new BasicReflectionEngine();
+  const reflectionEngine = new BasicReflectionEngine({
+    llm: deps.llmProvider,
+  });
 
   // ── Response ───────────────────────────────────────────────────
   const responseComposer = new ResponseComposer({
@@ -277,11 +345,22 @@ export function createAgentLoopService(deps: {
     modelCalls: deps.database.modelCalls,
     saveMessage: async (input) => {
       try {
+        // Generate embedding for semantic message search (best-effort)
+        let embedding: number[] | undefined;
+        if (input.content.trim()) {
+          try {
+            embedding = await embeddingService.embed(input.content);
+          } catch {
+            // Embedding generation failed — save without semantic index
+          }
+        }
         await deps.database.messages.create({
           id: input.id,
           conversationId: input.conversationId,
           role: input.role as "system" | "user" | "assistant",
           content: input.content,
+          metadata: input.metadata,
+          embedding,
         });
       } catch {
         // Best effort
@@ -292,6 +371,7 @@ export function createAgentLoopService(deps: {
   // ── Memory ────────────────────────────────────────────────────
   const memoryWriter = new DefaultMemoryWriter({
     repository: deps.database.memory,
+    embeddingService,
   });
 
   // ── Loop Engine ────────────────────────────────────────────────
@@ -349,17 +429,41 @@ export function createAgentLoopService(deps: {
         };
       },
       createMessage: async (input) => {
+        // Generate embedding for semantic message search (best-effort).
+        // Covers user, system, and assistant messages — the unified path
+        // that was previously missing embedding for non-assistant roles.
+        let embedding: number[] | undefined;
+        if (input.content.trim()) {
+          try {
+            embedding = await embeddingService.embed(input.content);
+          } catch {
+            // Embedding unavailable — save without semantic index
+          }
+        }
         const msg = await deps.database.messages.create({
           id: input.id,
           conversationId: input.conversationId,
           role: input.role as "system" | "user" | "assistant",
           content: input.content,
+          attachments: input.attachments,
+          embedding,
         });
+        const metadata = msg.metadata as {
+          attachments?: Array<{
+            id: string;
+            name: string;
+            type: string;
+            sizeBytes?: number;
+            url?: string;
+            storageKey?: string;
+          }>;
+        };
         return {
           id: msg.id,
           conversationId: msg.conversationId,
           role: msg.role,
           content: msg.content,
+          attachments: metadata.attachments,
           createdAt: msg.createdAt,
         };
       },
@@ -371,6 +475,16 @@ export function createAgentLoopService(deps: {
           conversationId: m.conversationId,
           role: m.role,
           content: m.content,
+          attachments: Array.isArray(m.metadata?.attachments)
+            ? (m.metadata.attachments as Array<{
+                id: string;
+                name: string;
+                type: string;
+                sizeBytes?: number;
+                url?: string;
+                storageKey?: string;
+              }>)
+            : undefined,
           createdAt: m.createdAt,
         }));
       },
@@ -455,5 +569,15 @@ function toolResultContent(result: unknown): string | undefined {
   if (!result || typeof result !== "object") return undefined;
   const content = (result as { content?: unknown }).content;
   return typeof content === "string" ? content : undefined;
+}
+
+function toolResultStructured(
+  result: unknown,
+): Record<string, unknown> | undefined {
+  if (!result || typeof result !== "object") return undefined;
+  const structured = (result as { structured?: unknown }).structured;
+  return structured && typeof structured === "object"
+    ? (structured as Record<string, unknown>)
+    : undefined;
 }
 

@@ -23,6 +23,7 @@ import {
 import { createAgentLoopService } from "./composition-root.js";
 import {
   registerSunPilotApiRoutes,
+  createOssClient,
   type SunPilotApiDeps,
 } from "@sunpilot/api";
 import { registerDaemonMetricsRoutes } from "./metrics.js";
@@ -193,6 +194,7 @@ export async function createDaemon(options: DaemonOptions = {}) {
           paths,
         ),
     },
+    oss: createOssClient() ?? undefined,
   };
   registerSunPilotApiRoutes(app, apiDeps);
 

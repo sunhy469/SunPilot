@@ -20,6 +20,11 @@
   padding: 14px 16px;
 }
 
+.chat-composer--drag-over {
+  border-color: #93c5fd;
+  background: rgba(37, 99, 235, 0.04);
+}
+
 /* ── Top layer: attachments ─────────────────────────────────────── */
 
 .chat-composer__attachments {
@@ -161,12 +166,53 @@
   box-shadow: none;
 }
 
+/* ── Upload progress bar ────────────────────────────────────────── */
+
+.chat-composer__upload-progress {
+  height: 3px;
+  margin: 4px 0 2px;
+  background: var(--sp-border);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.chat-composer__upload-progress-bar {
+  height: 100%;
+  background: var(--sp-blue);
+  border-radius: 2px;
+  transition: width 200ms ease;
+}
+
+/* ── Status bar ──────────────────────────────────────────────────── */
+
+.chat-composer__status-bar {
+  display: flex;
+  align-items: center;
+  padding: 3px 4px 1px;
+  min-height: 20px;
+}
+
 /* ── Responsive ─────────────────────────────────────────────────── */
 
+/* Tablet (≥768px, <992px) */
+@media (max-width: 991px) {
+  .chat-composer {
+    max-width: 100%;
+    border-radius: 20px;
+    padding: 8px 10px;
+  }
+
+  .chat-composer__input {
+    font-size: 15px;
+  }
+}
+
+/* Small tablet & large phones (≥576px, <768px) */
 @media (max-width: 767px) {
   .chat-composer {
-    border-radius: 24px;
-    padding: 8px 10px;
+    border-radius: 18px;
+    padding: 7px 9px;
+    box-shadow: 0 8px 24px rgba(15, 23, 42, 0.06);
   }
 
   .chat-composer__input {
@@ -177,14 +223,32 @@
     min-width: 64px;
     font-size: 13px;
   }
+
+  .chat-composer__controls {
+    padding-top: 4px;
+  }
 }
 
+/* Phone (<576px) */
 @media (max-width: 575px) {
   .chat-composer {
+    border-radius: 16px;
     padding: 6px 8px;
+    margin: 0 4px;
   }
 
   .chat-composer--welcome {
     padding: 10px 12px;
+    margin: 0;
+  }
+
+  .chat-composer__input {
+    font-size: 14px;
+    line-height: 1.5;
+  }
+
+  .chat-composer__attachment-card {
+    width: 56px;
+    height: 56px;
   }
 }

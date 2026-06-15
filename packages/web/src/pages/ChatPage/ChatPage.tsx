@@ -115,6 +115,8 @@ export function ChatPage() {
                     placeholder="向 SunPilot 继续提问..."
                     disabled={false}
                     streaming={chat.chatViewState === "streaming"}
+                    sendState={chat.sendState}
+                    onSendStateChange={chat.setSendState}
                     onSend={chat.send}
                     onStop={chat.stop}
                   />

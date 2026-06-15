@@ -150,7 +150,7 @@ describe("createAgentLoopService", () => {
         status: "completed",
         riskLevel: "low",
         result: expect.objectContaining({
-          summary: '{"content":"file contents"}',
+          summary: "file contents",
         }),
       }),
     ]);
@@ -248,7 +248,7 @@ describe("createAgentLoopService", () => {
         status: "completed",
         riskLevel: "high",
         result: expect.objectContaining({
-          summary: '{"content":"build passed"}',
+          summary: "build passed",
         }),
       }),
     ]);

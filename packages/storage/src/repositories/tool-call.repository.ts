@@ -18,6 +18,8 @@ export interface ToolCallRecord {
   riskLevel: "low" | "medium" | "high" | "critical";
   approvalId?: string;
   error?: unknown;
+  /** Audit metadata: repair history, argument sources, validation results. */
+  metadata?: Record<string, unknown>;
   startedAt?: string;
   completedAt?: string;
   createdAt: string;
@@ -33,6 +35,8 @@ export interface CreateToolCallInput {
   status?: ToolCallStatus;
   riskLevel?: "low" | "medium" | "high" | "critical";
   approvalId?: string;
+  /** Audit metadata: argument sources, repair history, schema used. */
+  metadata?: Record<string, unknown>;
   startedAt?: string;
   createdAt?: string;
 }

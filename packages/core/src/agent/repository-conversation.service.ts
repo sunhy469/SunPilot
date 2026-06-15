@@ -17,10 +17,32 @@ export class RepositoryAgentConversationStore implements AgentConversationStore 
   }
 
   async createMessage(input: CreateAgentMessageInput): Promise<AgentMessage> {
-    return this.db.messages.create(input);
+    const record = await this.db.messages.create({
+      id: input.id,
+      conversationId: input.conversationId,
+      role: input.role,
+      content: input.content,
+      attachments: input.attachments,
+    });
+    return {
+      id: record.id,
+      conversationId: record.conversationId,
+      role: record.role,
+      content: record.content,
+      createdAt: record.createdAt,
+      attachments: record.metadata?.attachments as AgentMessage["attachments"],
+    };
   }
 
   async listMessages(conversationId: string): Promise<AgentMessage[]> {
-    return this.db.messages.listByConversationId(conversationId);
+    const records = await this.db.messages.listByConversationId(conversationId);
+    return records.map((r) => ({
+      id: r.id,
+      conversationId: r.conversationId,
+      role: r.role,
+      content: r.content,
+      createdAt: r.createdAt,
+      attachments: r.metadata?.attachments as AgentMessage["attachments"],
+    }));
   }
 }

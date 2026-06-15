@@ -15,7 +15,8 @@ export type AgentLoopStatus =
   | "responding"
   | "completed"
   | "failed"
-  | "cancelled";
+  | "cancelled"
+  | "interrupted";
 
 // ── Loop Input / Output ───────────────────────────────────────────────
 
@@ -24,7 +25,17 @@ export interface AttachmentRef {
   name: string;
   type: string;
   sizeBytes?: number;
+  /** Public access URL or backend-downloadable address. */
+  url?: string;
+  /** OSS object key for backend record-keeping, deletion, and re-signing. */
+  storageKey?: string;
+  /** OSS provider identifier. */
+  provider?: "aliyun-oss" | "s3" | "minio";
+  /** Optional file checksum for integrity verification. */
+  checksum?: string;
 }
+
+export type PermissionMode = "ask" | "auto" | "full";
 
 export interface AgentLoopInput {
   runId: string;
@@ -33,6 +44,8 @@ export interface AgentLoopInput {
   userId?: string;
   message: string;
   mode: "chat" | "agent";
+  /** User-selected permission mode controlling tool approval behavior. */
+  permissionMode?: PermissionMode;
   attachments?: AttachmentRef[];
   client: {
     source: "web" | "cli" | "api";
@@ -68,6 +81,8 @@ export interface ToolCallSummary {
   name: string;
   status: "completed" | "failed" | "cancelled" | "timeout";
   summary: string;
+  /** Structured tool result for downstream consumption (reflection, response projection). */
+  structured?: Record<string, unknown>;
 }
 
 // ── Intent ────────────────────────────────────────────────────────────
@@ -84,6 +99,7 @@ export type IntentType =
   | "artifact_generation"
   | "memory_update"
   | "diagnostics"
+  | "use_skill"
   | "unknown";
 
 export interface RoutedIntent {
@@ -146,6 +162,7 @@ export interface AgentContext {
     summary: string;
     content?: string;
     status: string;
+    structured?: Record<string, unknown>;
   }>;
   availableSkills: Array<{
     id: string;
@@ -160,6 +177,25 @@ export interface AgentContext {
     usedTokensEstimate: number;
   };
   tokenEstimate: number;
+  /** Context snapshot for debugging and observability. */
+  contextSnapshot?: AgentContextSnapshot;
+}
+
+/**
+ * Context snapshot — records what the model saw during a specific call.
+ * Stored in model_calls.metadata.context for debugging and observability.
+ */
+export interface AgentContextSnapshot {
+  chunks: Array<{
+    id: string;
+    source: string;
+    priority: number;
+    tokenEstimate: number;
+    included: boolean;
+    reason?: string;
+  }>;
+  totalTokens: number;
+  droppedCount: number;
 }
 
 // ── Plan ──────────────────────────────────────────────────────────────
@@ -206,6 +242,20 @@ export interface PlannedToolCall {
   riskLevel: "low" | "medium" | "high" | "critical";
   requiresApproval: boolean;
   timeoutMs: number;
+  /** Capability-level risk hints from the skill manifest. */
+  riskHints?: {
+    defaultRisk?: RiskLevel;
+    destructiveArgs?: string[];
+    externalHosts?: string[];
+  };
+  /** Capability input JSON Schema for argument validation. */
+  inputSchema?: Record<string, unknown>;
+  /** Provenance tracking for each argument (source of the value). */
+  argumentSources?: Array<{
+    arg: string;
+    source: "message" | "attachment" | "memory" | "tool_result" | "plan" | "llm" | "heuristic";
+    ref?: string;
+  }>;
 }
 
 export type ToolDecision =
@@ -229,8 +279,62 @@ export interface AgentObservation {
 
 export interface AgentReflection {
   goalAchieved: boolean;
+  confidence: number;
   summary: string;
   nextAction?: "continue" | "respond" | "ask_user";
+  missingInfo?: string[];
+  nextToolCandidates?: Array<{
+    skillId: string;
+    reason: string;
+    argumentsHint?: Record<string, unknown>;
+  }>;
+  stopReason?:
+    | "goal_achieved"
+    | "needs_user"
+    | "max_iterations"
+    | "tool_failed"
+    | "no_tool_available";
+}
+
+/**
+ * Agent task state — tracks goal progress across multiple tool iterations.
+ * Updated after each tool execution to maintain semantic understanding of
+ * what has been accomplished and what remains.
+ */
+export interface AgentTaskState {
+  goal: string;
+  completedSteps: string[];
+  pendingSteps: string[];
+  gatheredFacts: Record<string, unknown>;
+  openQuestions: string[];
+  iteration: number;
+}
+
+/**
+ * Conversation summary — rolling compression of older conversation turns.
+ * Stored as a memory record (type: "conversation_summary") to replace
+ * raw message history when the conversation grows beyond budget limits.
+ */
+export interface ConversationSummary {
+  conversationId: string;
+  range: { fromMessageId: string; toMessageId: string };
+  userGoals: string[];
+  decisions: string[];
+  facts: string[];
+  preferences: string[];
+  toolResults: Array<{
+    toolCallId: string;
+    skillId: string;
+    summary: string;
+    resultRef?: string;
+  }>;
+  attachments: Array<{
+    messageId: string;
+    name: string;
+    type: string;
+    url?: string;
+  }>;
+  openQuestions: string[];
 }
 
 // ── Safety ────────────────────────────────────────────────────────────
@@ -274,6 +378,15 @@ export interface ToolDecisionEngine {
       context: AgentContext;
       intent: RoutedIntent;
       plan?: AgentPlan;
+      previousObservation?: AgentObservation;
+      /** Reflection-suggested tools to prioritize in this round.
+       *  When present, these are tried first before normal candidate matching.
+       *  Each entry may include an argumentsHint for the argument builder. */
+      prioritySkills?: Array<{
+        skillId: string;
+        reason: string;
+        argumentsHint?: Record<string, unknown>;
+      }>;
     },
     signal: AbortSignal,
   ): Promise<ToolDecision>;
@@ -300,6 +413,14 @@ export interface PermissionPolicy {
     permissions: Permission[];
     arguments: Record<string, unknown>;
     context: AgentContext;
+    /** User-selected permission mode from the frontend. */
+    permissionMode?: PermissionMode;
+    /** Optional capability-level risk hints from the skill manifest. */
+    riskHints?: {
+      defaultRisk?: RiskLevel;
+      destructiveArgs?: string[];
+      externalHosts?: string[];
+    };
   }): Promise<{
     allowed: boolean;
     requiresApproval: boolean;
@@ -395,6 +516,8 @@ export interface ReflectionEngine {
       intent: RoutedIntent;
       plan?: AgentPlan;
       observation: AgentObservation;
+      /** Accumulated task state across iterations for goal-progress tracking. */
+      taskState?: AgentTaskState;
     },
     signal: AbortSignal,
   ): Promise<AgentReflection>;

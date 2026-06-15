@@ -39,6 +39,8 @@ export interface ToolExecutor {
     status: 'completed' | 'failed' | 'cancelled' | 'timeout';
     summary: string;
     content?: string;
+    /** Structured result data for downstream consumption and projection. */
+    structured?: Record<string, unknown>;
     artifacts: ArtifactRef[];
     stdout?: string;
     stderr?: string;
@@ -65,6 +67,9 @@ export const RETRY_BACKOFF = [0, 1000, 3000]; // immediate, 1s, 3s
 
 /** Max retry attempts for transient failures. */
 export const MAX_RETRIES = 2;
+
+/** Max repair attempts for argument validation failures. */
+export const MAX_REPAIR_ATTEMPTS = 2;
 
 /** Transient error patterns that can be retried. */
 export function isRetryable(error: unknown): boolean {

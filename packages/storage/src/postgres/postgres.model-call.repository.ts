@@ -14,11 +14,11 @@ export class PostgresModelCallRepository implements ModelCallRepository {
     const result = await this.pool.query(
       `INSERT INTO model_calls (
          id, run_id, provider, model, purpose, input_tokens, output_tokens,
-         latency_ms, cost_estimate, status, error, created_at
+         latency_ms, cost_estimate, status, error, metadata, created_at
        )
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, $12)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, $12::jsonb, $13)
        RETURNING id, run_id, provider, model, purpose, input_tokens, output_tokens,
-         latency_ms, cost_estimate, status, error, created_at`,
+         latency_ms, cost_estimate, status, error, metadata, created_at`,
       [
         input.id ?? `model_${crypto.randomUUID()}`,
         input.runId ?? null,
@@ -31,6 +31,7 @@ export class PostgresModelCallRepository implements ModelCallRepository {
         input.costEstimate ?? null,
         input.status ?? "pending",
         input.error === undefined ? null : JSON.stringify(input.error),
+        input.metadata ? JSON.stringify(input.metadata) : JSON.stringify({}),
         input.createdAt ?? new Date().toISOString(),
       ],
     );
@@ -52,7 +53,7 @@ export class PostgresModelCallRepository implements ModelCallRepository {
            error = COALESCE($6::jsonb, error)
        WHERE id = $7
        RETURNING id, run_id, provider, model, purpose, input_tokens, output_tokens,
-         latency_ms, cost_estimate, status, error, created_at`,
+         latency_ms, cost_estimate, status, error, metadata, created_at`,
       [
         status,
         input.inputTokens ?? null,
@@ -69,7 +70,7 @@ export class PostgresModelCallRepository implements ModelCallRepository {
   async findById(id: string): Promise<ModelCallRecord | null> {
     const result = await this.pool.query(
       `SELECT id, run_id, provider, model, purpose, input_tokens, output_tokens,
-         latency_ms, cost_estimate, status, error, created_at
+         latency_ms, cost_estimate, status, error, metadata, created_at
        FROM model_calls WHERE id = $1`,
       [id],
     );
@@ -79,7 +80,7 @@ export class PostgresModelCallRepository implements ModelCallRepository {
   async listByRunId(runId: string): Promise<ModelCallRecord[]> {
     const result = await this.pool.query(
       `SELECT id, run_id, provider, model, purpose, input_tokens, output_tokens,
-         latency_ms, cost_estimate, status, error, created_at
+         latency_ms, cost_estimate, status, error, metadata, created_at
        FROM model_calls WHERE run_id = $1 ORDER BY created_at ASC`,
       [runId],
     );
@@ -100,6 +101,7 @@ function mapModelCall(row: any): ModelCallRecord {
     costEstimate: row.cost_estimate ?? undefined,
     status: row.status,
     error: row.error ?? undefined,
+    metadata: row.metadata ?? undefined,
     createdAt: row.created_at.toISOString(),
   };
 }

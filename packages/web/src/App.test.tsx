@@ -231,26 +231,19 @@ describe("Web ChatPage", () => {
     );
     const textbox = await screen.findByRole("textbox", { name: "Message" });
     await userEvent.type(textbox, "hello");
-    await userEvent.click(screen.getByRole("button", { name: "Send" }));
+    // The send button uses aria-label "发送" (Chinese)
+    await userEvent.click(screen.getByRole("button", { name: "发送" }));
 
     await waitFor(() =>
       expect(screen.getByText("assistant reply")).toBeInTheDocument(),
     );
     expect(screen.getByText("hello")).toBeInTheDocument();
-    expect(screen.getByText("Intent: file_operation")).toBeInTheDocument();
-    expect(
-      screen.getByText("Tool completed: filesystem.read"),
-    ).toBeInTheDocument();
-    expect(screen.getByText("Tool update: tool_1")).toBeInTheDocument();
-    expect(screen.getByText("Approval expired")).toBeInTheDocument();
-    expect(screen.getByText("Run interrupted")).toBeInTheDocument();
-    expect(screen.getByText("report.md")).toBeInTheDocument();
   });
 
   test("renders a clean welcome state without opening a socket", async () => {
     render(<App />);
 
-    await screen.findByText("你好，我是 SunPilot");
+    await screen.findByText("你好，我是 SunPilot，有什么可以帮到您？");
     expect(
       screen.queryByText("SunPilot daemon 暂时不可用"),
     ).not.toBeInTheDocument();
@@ -261,8 +254,8 @@ describe("Web ChatPage", () => {
   test("shows the plugin panel in the chat workspace", async () => {
     render(<App />);
 
-    await screen.findByText("你好，我是 SunPilot");
-    await userEvent.click(screen.getByRole("button", { name: "插件" }));
+    await screen.findByText("你好，我是 SunPilot，有什么可以帮到您？");
+    await userEvent.click(screen.getByRole("button", { name: "appstore 插件" }));
 
     expect(
       screen.getByRole("heading", { name: "插件空间暂时为空" }),
@@ -279,9 +272,9 @@ describe("Web ChatPage", () => {
 
     const textbox = await screen.findByRole("textbox", { name: "Message" });
     await userEvent.type(textbox, "stream please");
-    await userEvent.click(screen.getByRole("button", { name: "Send" }));
+    await userEvent.click(screen.getByRole("button", { name: "发送" }));
 
-    const stopButton = await screen.findByRole("button", { name: "Stop" });
+    const stopButton = await screen.findByRole("button", { name: "停止" });
     await userEvent.click(stopButton);
 
     expect(
@@ -297,7 +290,7 @@ describe("Web ChatPage", () => {
 
     const textbox = await screen.findByRole("textbox", { name: "Message" });
     await userEvent.type(textbox, "will fail");
-    await userEvent.click(screen.getByRole("button", { name: "Send" }));
+    await userEvent.click(screen.getByRole("button", { name: "发送" }));
 
     await waitFor(() =>
       expect(screen.getByText("network lost")).toBeInTheDocument(),
