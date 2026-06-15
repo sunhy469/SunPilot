@@ -12,7 +12,7 @@ export const LEGAL_TRANSITIONS: Record<AgentLoopStatus, readonly AgentLoopStatus
   intent_routing: ["planning", "tool_deciding", "responding", "cancelled", "failed"],
   planning: ["tool_deciding", "waiting_approval", "cancelled", "failed"],
   tool_deciding: ["waiting_approval", "executing", "responding", "cancelled", "failed"],
-  waiting_approval: ["executing", "cancelled", "failed"],
+  waiting_approval: ["executing", "cancelled", "failed", "interrupted"],
   executing: ["observing", "reflecting", "responding", "waiting_approval", "cancelled", "failed"],
   observing: ["reflecting", "responding", "cancelled", "failed"],
   reflecting: ["tool_deciding", "responding", "cancelled", "failed"],
@@ -20,6 +20,7 @@ export const LEGAL_TRANSITIONS: Record<AgentLoopStatus, readonly AgentLoopStatus
   completed: [],
   cancelled: [],
   failed: [],
+  interrupted: ["cancelled", "failed"],
 };
 
 /**

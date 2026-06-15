@@ -5,7 +5,9 @@ export type { SunPilotApiDeps } from "./composition/api-deps.js";
 export { registerSunPilotApiRoutes } from "./http/register-routes.js";
 export * from "./http/schemas.js";
 
-// ── WebSocket ────────────────────────────────────────────────────────
+// ── Storage ────────────────────────────────────────────────────────────
+export { OssClient, createOssClient } from "./storage/oss-client.js";
+export type { OssConfig, PresignResult } from "./storage/oss-client.js";
 export { JsonRpcRouter } from "./ws/json-rpc-router.js";
 export type {
   JsonRpcCommand,

@@ -57,7 +57,7 @@ describe("launcher", () => {
     });
     expect(code).toBe(0);
     expect(messages).toEqual([
-      "Usage: sun <start|stop|status|doctor|logs|open>",
+      "Usage: sun <start|stop|restart|status|doctor|logs|open>",
     ]);
   });
 
@@ -275,7 +275,7 @@ describe("launcher", () => {
     expect(code).toBe(0);
     expect(killImpl).toHaveBeenCalledWith(123, "SIGTERM");
     expect(rmImpl).toHaveBeenCalledWith(paths.pidFile, { force: true });
-    expect(messages).toEqual(["SunPilot daemon stop signal sent."]);
+    expect(messages).toEqual(["SunPilot daemon stopped."]);
   });
 
   test("stop removes a stale pid file when the daemon process is gone", async () => {
@@ -298,7 +298,7 @@ describe("launcher", () => {
     expect(killImpl).toHaveBeenCalledWith(123, "SIGTERM");
     expect(rmImpl).toHaveBeenCalledWith(paths.pidFile, { force: true });
     expect(messages).toEqual([
-      "SunPilot daemon pid file exists, but the process is not running.",
+      "SunPilot daemon was not running.",
     ]);
   });
 });

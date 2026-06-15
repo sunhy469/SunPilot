@@ -1,14 +1,21 @@
+export interface AttachmentRef {
+  id: string;
+  name: string;
+  type: string;
+  sizeBytes?: number;
+  url?: string;
+  storageKey?: string;
+  provider?: "aliyun-oss" | "s3" | "minio";
+  checksum?: string;
+}
+
 export interface ChatSendParams {
   conversationId?: string;
   message: string;
   mode?: "chat" | "agent";
+  permissionMode?: "ask" | "auto" | "full";
   clientRequestId?: string;
-  attachments?: Array<{
-    id: string;
-    name: string;
-    type: string;
-    sizeBytes?: number;
-  }>;
+  attachments?: AttachmentRef[];
 }
 
 // ── Wire event types (what comes over WebSocket) ────────────────────

@@ -13,6 +13,7 @@ import {
   type AgentEventRecord,
 } from "../../../features/agent-runtime/api";
 import type {
+  AttachmentRef,
   ChatSocketErrorResponse,
   ChatSocketEvent,
 } from "../../../features/chat/types";
@@ -23,20 +24,9 @@ import {
   sendChatStop,
 } from "../../../features/chat/ws";
 import type { ChatMessage } from "../../../features/conversations/types";
-import type { ChatViewState } from "../types";
+import type { ChatViewState, LocalSendState } from "../types";
 
 type ChatSocketPayload = ChatSocketEvent | ChatSocketErrorResponse;
-
-export interface AgentTimelineItem {
-  id: string;
-  runId?: string;
-  conversationId?: string;
-  type: string;
-  title: string;
-  detail?: string;
-  tone: "neutral" | "working" | "success" | "warning" | "danger";
-  createdAt: string;
-}
 
 export interface AgentArtifactPreview {
   id: string;
@@ -146,6 +136,7 @@ export function useChat(
   const [status, setStatus] = useState<"online" | "offline" | "thinking">(
     "offline",
   );
+  const [sendState, setSendState] = useState<LocalSendState>("editing");
   const [error, setError] = useState("");
   const socketRef = useRef<WebSocket | null>(null);
   const responseTimerRef = useRef<number | null>(null);
@@ -154,7 +145,6 @@ export function useChat(
   const activeRunIdRef = useRef<string | null>(null);
   const requestRef = useRef(createRequest());
   const [approvals, setApprovals] = useState<AgentApproval[]>([]);
-  const [timeline, setTimeline] = useState<AgentTimelineItem[]>([]);
   const [artifacts, setArtifacts] = useState<AgentArtifactPreview[]>([]);
   const [selectedArtifact, setSelectedArtifact] =
     useState<AgentArtifactSelection | null>(null);
@@ -205,14 +195,6 @@ export function useChat(
           event.sequence,
         );
       }
-      const item = timelineItemFromEvent(event);
-      if (item) {
-        setTimeline((items) => {
-          if (items.some((existing) => existing.id === item.id)) return items;
-          return [...items, item].slice(-12);
-        });
-      }
-
       if (method === "agent.approval.required") {
         const payload = params as {
           runId: string;
@@ -398,6 +380,7 @@ export function useChat(
       // ── Agent error events ────────────────────────────────────
       if (payload.method === "agent.error") {
         clearResponseTimer();
+        setSendState("failed");
         applyAgentEvent(payload);
         setError(
           payload.params.error?.message ??
@@ -416,7 +399,9 @@ export function useChat(
       if (payload.method === "agent.run.created") {
         activeRunIdRef.current = payload.params.runId;
         setConversationId(payload.params.conversationId);
+        setSendState("running");
         setStatus("thinking");
+        // Replace "pending" conversationId on all local messages with the real one
         setMessages((items) =>
           items.map((item) =>
             item.conversationId === "pending"
@@ -428,8 +413,30 @@ export function useChat(
 
       if (payload.method === "agent.response.started") {
         activeRunIdRef.current = payload.params.runId;
+        setSendState("streaming");
         setStatus("thinking");
         setMessages((items) => {
+          // Replace the local assistant placeholder (status="pending") with
+          // the real messageId from the server, preserving any accumulated content.
+          const placeholderIdx = items.findIndex(
+            (item) => item.role === "assistant" && item.status === "pending",
+          );
+          if (placeholderIdx >= 0) {
+            const placeholder = items[placeholderIdx]!;
+            return items.map((item, idx) =>
+              idx === placeholderIdx
+                ? {
+                    id: payload.params.messageId,
+                    conversationId: payload.params.conversationId ?? conversationId,
+                    role: placeholder.role as "assistant",
+                    content: placeholder.content,
+                    createdAt: placeholder.createdAt,
+                    status: "streaming" as const,
+                  }
+                : item,
+            );
+          }
+          // No placeholder found — create a new assistant message
           if (items.some((item) => item.id === payload.params.messageId)) {
             return items;
           }
@@ -438,9 +445,10 @@ export function useChat(
             {
               id: payload.params.messageId,
               conversationId: payload.params.conversationId ?? conversationId,
-              role: "assistant",
+              role: "assistant" as const,
               content: "",
               createdAt: new Date().toISOString(),
+              status: "streaming" as const,
             },
           ];
         });
@@ -458,27 +466,53 @@ export function useChat(
 
       if (deltaPayload) {
         startResponseTimer();
+        setSendState("streaming");
         activeRunIdRef.current = payload.params.runId;
         setMessages((items) => {
           const exists = items.some(
             (item) => item.id === deltaPayload.messageId,
           );
           if (!exists) {
-            // Auto-create assistant message if this is the first delta
+            // Replace the local assistant placeholder (status="pending")
+            // with the real messageId from the first delta, if one exists.
+            const placeholderIdx = items.findIndex(
+              (item) => item.role === "assistant" && item.status === "pending",
+            );
+            if (placeholderIdx >= 0) {
+              const placeholder = items[placeholderIdx]!;
+              return items.map((item, idx) =>
+                idx === placeholderIdx
+                  ? {
+                      id: deltaPayload.messageId,
+                      conversationId: deltaPayload.conversationId,
+                      role: placeholder.role as "assistant",
+                      content: deltaPayload.delta,
+                      createdAt: placeholder.createdAt,
+                      status: "streaming" as const,
+                    }
+                  : item,
+              );
+            }
+            // No placeholder — create a new assistant message
             return [
               ...items,
               {
                 id: deltaPayload.messageId,
                 conversationId: deltaPayload.conversationId,
-                role: "assistant",
+                role: "assistant" as const,
                 content: deltaPayload.delta,
                 createdAt: new Date().toISOString(),
+                status: "streaming" as const,
               },
             ];
           }
           return items.map((item) =>
             item.id === deltaPayload.messageId
-              ? { ...item, content: item.content + deltaPayload.delta }
+              ? {
+                  ...item,
+                  content: item.content + deltaPayload.delta,
+                  status: "streaming",
+                }
               : item,
           );
         });
@@ -487,6 +521,7 @@ export function useChat(
       // ── Agent response completed ──────────────────────────────
       if (payload.method === "agent.response.completed") {
         clearResponseTimer();
+        setSendState("completed");
         setStatus("online");
         setPendingState(false);
         activeRunIdRef.current = null;
@@ -495,6 +530,7 @@ export function useChat(
       // ── Agent run completed ───────────────────────────────────
       if (payload.method === "agent.run.completed") {
         clearResponseTimer();
+        setSendState("completed");
         setStatus("online");
         setPendingState(false);
         activeRunIdRef.current = null;
@@ -503,6 +539,7 @@ export function useChat(
       // ── Agent run failed ──────────────────────────────────────
       if (payload.method === "agent.run.failed") {
         clearResponseTimer();
+        setSendState("failed");
         setStatus("online");
         setPendingState(false);
         setError(payload.params.error.message);
@@ -512,6 +549,7 @@ export function useChat(
       // ── Agent run cancelled ───────────────────────────────────
       if (payload.method === "agent.run.cancelled") {
         clearResponseTimer();
+        setSendState("failed");
         setStatus("online");
         setPendingState(false);
         activeRunIdRef.current = null;
@@ -520,6 +558,7 @@ export function useChat(
       // ── Agent run interrupted ─────────────────────────────────
       if (payload.method === "agent.run.interrupted") {
         clearResponseTimer();
+        setSendState("failed");
         setStatus("online");
         setPendingState(false);
         activeRunIdRef.current = null;
@@ -566,29 +605,60 @@ export function useChat(
   }, [applyAgentEvent, conversationId]);
 
   const send = useCallback(
-    (message: string) => {
+    (message: string, attachments?: AttachmentRef[], permissionMode?: "ask" | "auto" | "full") => {
       const text = message.trim();
-      if (!text || pending) return;
+      if ((!text && (!attachments || attachments.length === 0)) || pending) return;
+
+      const placeholderId = `local_${crypto.randomUUID()}`;
+
       setPendingState(true);
+      setSendState("sending");
       setStatus("thinking");
       setError("");
       startResponseTimer();
+
+      // ── Immediate UI feedback (architecture doc §12.3) ──────────
+      // Append user message AND assistant placeholder synchronously before
+      // any network request. The placeholder will be bound to real IDs when
+      // agent.run.created and agent.response.started events arrive.
       setMessages((items) => [
         ...items,
         {
           id: `local_${crypto.randomUUID()}`,
           conversationId: conversationId || "pending",
-          role: "user",
+          role: "user" as const,
           content: text,
           createdAt: new Date().toISOString(),
+          attachments: attachments?.map((a) => ({
+            id: a.id,
+            name: a.name,
+            type: a.type,
+            sizeBytes: a.sizeBytes,
+            url: a.url,
+            storageKey: a.storageKey,
+          })),
+        },
+        {
+          id: placeholderId,
+          conversationId: conversationId || "pending",
+          role: "assistant" as const,
+          content: "",
+          createdAt: new Date().toISOString(),
+          status: "pending" as const,
         },
       ]);
+
       const socket = ensureSocket();
-      const transmit = () =>
+      const transmit = () => {
+        setSendState("accepted");
         sendChatMessage(socket, {
           ...(conversationId ? { conversationId } : {}),
           message: text,
+          mode: "agent",
+          permissionMode: permissionMode ?? "auto",
+          attachments,
         });
+      };
       if (socket.readyState === WebSocket.OPEN) transmit();
       else socket.addEventListener("open", transmit, { once: true });
     },
@@ -596,6 +666,7 @@ export function useChat(
       conversationId,
       ensureSocket,
       pending,
+      setMessages,
       setPendingState,
       startResponseTimer,
     ],
@@ -686,11 +757,12 @@ export function useChat(
     stop,
     pending,
     status,
+    sendState,
+    setSendState,
     error,
     setError,
     chatViewState,
     approvals,
-    timeline,
     artifacts,
     selectedArtifact,
     openArtifact,
@@ -698,181 +770,4 @@ export function useChat(
     approveApproval,
     rejectApproval,
   };
-}
-
-function timelineItemFromEvent(
-  event: ChatSocketEvent | AgentEventRecord,
-): AgentTimelineItem | undefined {
-  const method = "method" in event ? event.method : event.type;
-  if (
-    method === "pong" ||
-    method === "agent.response.delta" ||
-    method === "agent.run.created" ||
-    method === "agent.run.completed" ||
-    method === "agent.context.started" ||
-    method === "agent.context.completed" ||
-    method === "agent.intent.detected"
-  )
-    return undefined;
-  const params = ("method" in event ? event.params : event.payload) as Record<
-    string,
-    unknown
-  >;
-  const id =
-    "id" in event && event.id
-      ? event.id
-      : `${method}:${String(params.runId ?? "")}:${String(params.toolCallId ?? params.approvalId ?? params.memoryId ?? params.artifactId ?? "")}`;
-  const base = {
-    id,
-    runId:
-      ("runId" in event && event.runId) || typeof params.runId === "string"
-        ? (("runId" in event ? event.runId : params.runId) as string)
-        : undefined,
-    conversationId:
-      ("conversationId" in event && event.conversationId) ||
-      typeof params.conversationId === "string"
-        ? (("conversationId" in event
-            ? event.conversationId
-            : params.conversationId) as string)
-        : undefined,
-    type: method,
-    createdAt:
-      ("createdAt" in event && event.createdAt) || new Date().toISOString(),
-  };
-
-  switch (method) {
-    // run.created, context.*, intent.detected — filtered above
-    // (internal lifecycle events, not surfaced to the timeline)
-    case "agent.plan.created": {
-      const plan = params.plan as
-        | { summary?: unknown; steps?: unknown }
-        | undefined;
-      return {
-        ...base,
-        title: "Plan created",
-        detail:
-          typeof plan?.summary === "string"
-            ? plan.summary
-            : typeof plan?.steps === "number"
-              ? `${plan.steps} steps`
-              : undefined,
-        tone: "neutral",
-      };
-    }
-    case "agent.tool.selected":
-      return {
-        ...base,
-        title: `Tool selected: ${String(params.name ?? params.skillId ?? "tool")}`,
-        detail:
-          typeof params.riskLevel === "string"
-            ? `risk ${params.riskLevel}`
-            : undefined,
-        tone: "working",
-      };
-    case "agent.tool.started":
-      return {
-        ...base,
-        title: `Tool started: ${String(params.name ?? params.skillId ?? "tool")}`,
-        tone: "working",
-      };
-    case "agent.tool.delta":
-      return {
-        ...base,
-        title: `Tool update: ${String(params.toolCallId ?? "tool")}`,
-        detail: typeof params.delta === "string" ? params.delta : undefined,
-        tone: "working",
-      };
-    case "agent.tool.completed":
-      return {
-        ...base,
-        title: `Tool completed: ${String(params.skillId ?? "tool")}`,
-        detail: typeof params.summary === "string" ? params.summary : undefined,
-        tone: "success",
-      };
-    case "agent.tool.failed": {
-      const error = params.error as { message?: unknown } | undefined;
-      return {
-        ...base,
-        title: `Tool failed: ${String(params.skillId ?? "tool")}`,
-        detail: typeof error?.message === "string" ? error.message : undefined,
-        tone: "danger",
-      };
-    }
-    case "agent.approval.required":
-      return {
-        ...base,
-        title: `Approval required: ${String(params.title ?? "Action")}`,
-        detail:
-          typeof params.riskLevel === "string"
-            ? `risk ${params.riskLevel}`
-            : undefined,
-        tone: "warning",
-      };
-    case "agent.approval.approved":
-      return { ...base, title: "Approval approved", tone: "success" };
-    case "agent.approval.rejected":
-      return { ...base, title: "Approval rejected", tone: "danger" };
-    case "agent.approval.expired":
-      return {
-        ...base,
-        title: "Approval expired",
-        detail:
-          typeof params.title === "string"
-            ? params.title
-            : typeof params.approvalId === "string"
-              ? params.approvalId
-              : undefined,
-        tone: "warning",
-      };
-    case "agent.clarification.requested":
-      return {
-        ...base,
-        title: "Clarification requested",
-        detail:
-          typeof params.question === "string" ? params.question : undefined,
-        tone: "warning",
-      };
-    case "agent.artifact.created":
-      return {
-        ...base,
-        title: `Artifact: ${String(params.name ?? params.artifactId ?? "created")}`,
-        detail: typeof params.type === "string" ? params.type : undefined,
-        tone: "success",
-      };
-    case "agent.memory.written":
-      return {
-        ...base,
-        title: `Memory written: ${String(params.type ?? "memory")}`,
-        detail: typeof params.scope === "string" ? params.scope : undefined,
-        tone: "success",
-      };
-    // run.completed — filtered above
-    case "agent.run.failed": {
-      const error = params.error as { message?: unknown } | undefined;
-      return {
-        ...base,
-        title: "Run failed",
-        detail: typeof error?.message === "string" ? error.message : undefined,
-        tone: "danger",
-      };
-    }
-    case "agent.run.cancelled":
-      return { ...base, title: "Run cancelled", tone: "warning" };
-    case "agent.run.interrupted":
-      return {
-        ...base,
-        title: "Run interrupted",
-        detail: typeof params.reason === "string" ? params.reason : undefined,
-        tone: "warning",
-      };
-    case "agent.error":
-      return {
-        ...base,
-        title: "Agent error",
-        detail: typeof params.message === "string" ? params.message : undefined,
-        tone: "danger",
-      };
-    default:
-      return undefined;
-  }
 }

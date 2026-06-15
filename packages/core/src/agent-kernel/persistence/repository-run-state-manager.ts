@@ -172,6 +172,18 @@ export class RepositoryRunStateManager implements RunStateManager {
     return run ? mapRunToState(run) : undefined;
   }
 
+  async saveTaskState(
+    runId: string,
+    taskState: NonNullable<RunState["taskState"]>,
+  ): Promise<void> {
+    const run = await this.db.runs.findById(runId);
+    if (!run) return;
+    await this.db.runs.updateContext(runId, {
+      ...run.context,
+      taskState,
+    });
+  }
+
   private async requireRun(runId: string): Promise<RunRecord> {
     const run = await this.db.runs.findById(runId);
     if (!run) {
@@ -186,6 +198,7 @@ export class RepositoryRunStateManager implements RunStateManager {
 function mapRunToState(run: RunRecord): RunState {
   const history = statusHistoryFrom(run);
   const lastTransition = history.at(-1);
+  const taskState = run.context.taskState as RunState["taskState"] | undefined;
   return {
     runId: run.id,
     conversationId: run.conversationId ?? "",
@@ -194,6 +207,7 @@ function mapRunToState(run: RunRecord): RunState {
     mode: run.mode,
     goal: run.goal,
     error: normalizeError(run.error),
+    taskState,
     createdAt: run.createdAt,
     updatedAt: run.updatedAt,
     completedAt: run.completedAt,

@@ -256,6 +256,153 @@ describe("AgentLoopEngine clarification", () => {
   });
 });
 
+describe("AgentLoopEngine tool loop", () => {
+  test("continues tool execution until reflection says the goal is achieved", async () => {
+    const eventBus = new InMemoryAgentEventBus();
+    const runStateManager = new InMemoryRunStateManager();
+    const decisions: string[] = [];
+    const executions: string[] = [];
+    const composedObservations: unknown[] = [];
+    const engine = new AgentLoopEngine({
+      contextBuilder: {
+        async build() {
+          return context;
+        },
+      },
+      intentRouter: {
+        async route() {
+          return {
+            type: "use_skill",
+            confidence: 0.9,
+            requiresPlanning: false,
+            requiresTool: true,
+            requiresApproval: false,
+            riskLevel: "medium",
+            candidateSkills: ["search.initial"],
+            reason: "test",
+          };
+        },
+      },
+      planner: {
+        async createPlan() {
+          throw new Error("planner should not be called");
+        },
+      },
+      toolDecisionEngine: {
+        async decide(input) {
+          const hasPreviousToolResult = input.context.toolResults.length > 0;
+          decisions.push(hasPreviousToolResult ? "follow_up" : "initial");
+          return {
+            type: "use_tool",
+            reason: "test",
+            toolCalls: [
+              {
+                id: hasPreviousToolResult ? "tool_2" : "tool_1",
+                skillId: hasPreviousToolResult
+                  ? "search.detail"
+                  : "search.initial",
+                name: hasPreviousToolResult ? "Fetch details" : "Search",
+                arguments: {},
+                permissions: [],
+                reason: "test",
+                riskLevel: "low",
+                requiresApproval: false,
+                timeoutMs: 1_000,
+              },
+            ],
+          };
+        },
+      },
+      permissionPolicy: {
+        async evaluate() {
+          return {
+            allowed: true,
+            requiresApproval: false,
+            riskLevel: "low",
+            reasons: [],
+          };
+        },
+      },
+      approvalGate: {
+        async createApproval() {
+          throw new Error("approval should not be created");
+        },
+        async approve() {},
+        async reject() {},
+      },
+      executionOrchestrator: {
+        async execute(input) {
+          const call = input.decision.toolCalls[0]!;
+          executions.push(call.skillId);
+          return {
+            runId: loopInput.runId,
+            toolCalls: [
+              {
+                id: call.id,
+                skillId: call.skillId,
+                name: call.name,
+                status: "completed",
+                summary:
+                  call.skillId === "search.initial"
+                    ? "Found candidates; details still needed."
+                    : "Fetched final product sources.",
+              },
+            ],
+            artifacts: [],
+            summary: call.skillId,
+          };
+        },
+      },
+      reflectionEngine: {
+        async reflect(input) {
+          const hasDetails = input.observation.toolCalls.some(
+            (call) => call.skillId === "search.detail",
+          );
+          return {
+            goalAchieved: hasDetails,
+            summary: hasDetails ? "done" : "need details",
+            nextAction: hasDetails ? "respond" : "continue",
+          };
+        },
+      },
+      responseComposer: {
+        async composeDirect() {
+          throw new Error("direct response should not be composed");
+        },
+        async composeFromObservation(input) {
+          composedObservations.push(input.observation);
+          return { messageId: "msg_done", content: "完成" };
+        },
+        async composeClarification() {
+          throw new Error("clarification should not be composed");
+        },
+      },
+      runStateManager,
+      eventBus,
+    });
+
+    await runStateManager.createRun(loopInput);
+    const result = await engine.run(loopInput, new AbortController().signal);
+
+    expect(result.status).toBe("completed");
+    expect(result.assistantMessageId).toBe("msg_done");
+    expect(decisions).toEqual(["initial", "follow_up"]);
+    expect(executions).toEqual(["search.initial", "search.detail"]);
+    expect(result.toolCalls.map((call) => call.skillId)).toEqual([
+      "search.initial",
+      "search.detail",
+    ]);
+    expect(composedObservations).toEqual([
+      expect.objectContaining({
+        toolCalls: [
+          expect.objectContaining({ skillId: "search.initial" }),
+          expect.objectContaining({ skillId: "search.detail" }),
+        ],
+      }),
+    ]);
+  });
+});
+
 describe("AgentLoopEngine memory writing", () => {
   test("writes long-term memory after a completed direct response", async () => {
     const eventBus = new InMemoryAgentEventBus();

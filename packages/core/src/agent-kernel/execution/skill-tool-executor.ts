@@ -96,6 +96,7 @@ export class SkillToolExecutor implements ToolExecutor {
         status: "completed",
         summary: summarizeOutput(output),
         content: typeof output === "string" ? output : undefined,
+        structured: extractStructured(output),
         artifacts,
       };
     } catch (error) {
@@ -163,11 +164,52 @@ function resolveCapability(
 function summarizeOutput(output: unknown): string {
   if (typeof output === "string") return output;
   if (output === undefined) return "Tool completed.";
+  if (typeof output === "object" && output !== null) {
+    const record = output as Record<string, unknown>;
+    // Extract a human-readable summary from structured tool output
+    if (typeof record.summary === "string") return record.summary;
+    if (typeof record.totalResults === "number") {
+      return `Found ${record.totalResults} results.`;
+    }
+    // Common tool result patterns: content field, message field
+    if (typeof record.content === "string") return record.content;
+    if (typeof record.message === "string") return record.message;
+    // Avoid dumping large JSON — provide a short summary
+    const keys = Object.keys(record);
+    if (keys.length <= 3) {
+      // Small object — safe to stringify
+      try { return JSON.stringify(output); } catch { /* fall through */ }
+    }
+    return `Tool returned object with keys: ${keys.slice(0, 10).join(", ")}${keys.length > 10 ? "..." : ""}`;
+  }
   try {
     return JSON.stringify(output);
   } catch {
     return String(output);
   }
+}
+
+/**
+ * Extract structured data from tool output for downstream consumption.
+ * Preserves candidates, results, summary, and provenance fields.
+ */
+function extractStructured(output: unknown): Record<string, unknown> | undefined {
+  if (!output || typeof output !== "object") return undefined;
+  const record = output as Record<string, unknown>;
+  // If the output already has a structured field, use it directly
+  if (record.structured && typeof record.structured === "object") {
+    return record.structured as Record<string, unknown>;
+  }
+  // Otherwise, extract relevant fields to avoid dumping raw JSON
+  const extracted: Record<string, unknown> = {};
+  if (typeof record.totalResults === "number") extracted.totalResults = record.totalResults;
+  if (Array.isArray(record.candidates)) extracted.candidates = record.candidates;
+  if (Array.isArray(record.results)) extracted.results = record.results;
+  if (typeof record.summary === "string") extracted.summary = record.summary;
+  if (record.provenance && typeof record.provenance === "object") {
+    extracted.provenance = record.provenance;
+  }
+  return Object.keys(extracted).length > 0 ? extracted : undefined;
 }
 
 function toArtifactRef(artifact: ArtifactRecord): ArtifactRef {

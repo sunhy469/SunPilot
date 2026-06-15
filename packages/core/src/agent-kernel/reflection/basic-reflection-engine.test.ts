@@ -57,10 +57,10 @@ describe("BasicReflectionEngine", () => {
       new AbortController().signal,
     );
 
-    expect(result).toEqual({
-      goalAchieved: false,
-      summary: "Tool execution had 1 non-completed call(s): Read File: failed",
-      nextAction: "respond",
-    });
+    expect(result.goalAchieved).toBe(false);
+    expect(result.nextAction).toBe("respond");
+    expect(result.stopReason).toBe("tool_failed");
+    expect(result.confidence).toBeLessThan(0.5);
+    expect(result.summary).toContain("Read File");
   });
 });

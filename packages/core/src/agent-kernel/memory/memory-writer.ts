@@ -7,6 +7,7 @@ import type {
   MemoryWriteResult,
   SecretRedactor,
 } from "./memory-types.js";
+import type { EmbeddingService } from "../context/embedding-service.js";
 import { DefaultMemoryPolicy } from "./memory-policy.js";
 import { PatternSecretRedactor } from "./secret-redactor.js";
 
@@ -14,6 +15,8 @@ export interface DefaultMemoryWriterDeps {
   repository: MemoryRepositoryPort;
   policy?: MemoryPolicy;
   secretRedactor?: SecretRedactor;
+  /** Optional embedding service for semantic memory retrieval. */
+  embeddingService?: EmbeddingService;
   idGenerator?: () => string;
   clock?: () => Date;
 }
@@ -66,8 +69,20 @@ export class DefaultMemoryWriter {
         continue;
       }
 
+      // Generate semantic embedding for hybrid retrieval (best-effort)
+      let embedding: number[] | undefined;
+      if (this.deps.embeddingService) {
+        try {
+          embedding = await this.deps.embeddingService.embed(
+            secretScan.redactedText,
+          );
+        } catch {
+          // Embedding generation failed — continue without semantic index
+        }
+      }
+
       const record = await this.deps.repository.create(
-        this.toRecord(candidate, input, secretScan.redactedText, decision.reason),
+        this.toRecord(candidate, input, secretScan.redactedText, decision.reason, embedding),
       );
       written.push(record);
 
@@ -123,28 +138,139 @@ export class DefaultMemoryWriter {
       });
     }
 
-    if (input.observation && input.reflection?.goalAchieved) {
+    // Generate conversation summary when:
+    // 1. A tool task completes successfully (goalAchieved), OR
+    // 2. The conversation has grown large (forceSummary — token or turn trigger), OR
+    // 3. Rolling trigger: every 8 tool turns to keep summary incremental
+    const turnCount =
+      input.observation?.toolCalls.length ?? 0;
+    const shouldRollingSummarize =
+      input.observation &&
+      turnCount > 0 &&
+      (input.context.messages.length >= 20 || turnCount >= 8);
+    const shouldSummarize =
+      input.observation &&
+      (input.reflection?.goalAchieved ||
+        input.forceSummary ||
+        shouldRollingSummarize);
+    if (shouldSummarize && input.observation) {
+      const obs = input.observation;
+      const refl = input.reflection;
+      const toolDetails = obs.toolCalls
+        .map((tc) => `- ${tc.name} (${tc.skillId}): ${tc.status} — ${tc.summary}`)
+        .join("\n");
+      const artifactDetails = obs.artifacts
+        .map((a) => `- ${a.name} (${a.type})`)
+        .join("\n");
+      const structuredFacts = obs.toolCalls
+        .filter((tc) => tc.structured)
+        .map((tc) => {
+          const s = tc.structured!;
+          const total =
+            s.totalResults ??
+            (Array.isArray(s.candidates)
+              ? (s.candidates as unknown[]).length
+              : Array.isArray(s.results)
+                ? (s.results as unknown[]).length
+                : undefined);
+          return total !== undefined
+            ? `${tc.name}: ${total} results`
+            : `${tc.name}: completed`;
+        })
+        .join(", ");
+
+      const goalText = refl?.summary ?? "Conversation progress";
       const content = [
-        input.observation.summary,
-        input.reflection.summary,
-      ].filter(Boolean).join("\n");
+        `Goal: ${goalText}`,
+        obs.summary ? `Summary: ${obs.summary}` : "",
+        toolDetails ? `Tools executed:\n${toolDetails}` : "",
+        structuredFacts ? `Results: ${structuredFacts}` : "",
+        artifactDetails ? `Artifacts created:\n${artifactDetails}` : "",
+        refl?.missingInfo?.length
+          ? `Open questions: ${refl.missingInfo.join(", ")}`
+          : "",
+      ]
+        .filter(Boolean)
+        .join("\n\n");
+
       if (content.trim()) {
+        // Determine the message range this summary covers.
+        const range = input.messageRange ?? {
+          fromMessageId: input.input.userMessageId,
+          toMessageId: input.input.userMessageId,
+        };
+
+        // ── Quality scoring ──────────────────────────────────────────
+        // Derive quality from reflection confidence, tool result richness,
+        // and whether any tools failed. This feeds into stale detection
+        // and summary prioritization in ContextBuilder.
+        const toolSuccessRate =
+          obs.toolCalls.length > 0
+            ? obs.toolCalls.filter((tc) => tc.status === "completed").length /
+              obs.toolCalls.length
+            : 1;
+        const reflConfidence = refl?.confidence ?? 0.7;
+        const hasArtifacts = obs.artifacts.length > 0;
+        const hasQuestions = (refl?.missingInfo?.length ?? 0) > 0;
+        const qualityScore = Math.round(
+          (reflConfidence * 0.4 + toolSuccessRate * 0.3 +
+            (hasArtifacts ? 0.15 : 0) + (hasQuestions ? 0 : 0.15)) * 100,
+        ) / 100; // 0.0–1.0
+
+        // Dynamic importance: goal-achieved summaries more important
+        const dynImportance = refl?.goalAchieved
+          ? 0.75
+          : input.forceSummary
+            ? 0.65
+            : 0.55;
+
+        // Summary version: increment for rolling updates
+        const summaryVersion =
+          (typeof input.context?.messages?.length === "number"
+            ? Math.floor(input.context.messages.length / 10)
+            : 1);
+        const now = new Date().toISOString();
+
         candidates.push({
           key: `task_summary:${input.input.runId}`,
-          title: `Task summary for ${input.input.runId}`,
+          title: `Task: ${goalText.slice(0, 80)}`,
           content,
-          summary: input.reflection.summary || input.observation.summary,
+          summary: refl?.summary ?? obs.summary,
           type: "conversation_summary",
           scope: "conversation",
           scopeId: input.input.conversationId,
           source: "agent_task_summary",
-          confidence: 0.7,
-          importance: 0.55,
-          reason: "completed tool task summary",
+          confidence: qualityScore,
+          importance: dynImportance,
+          reason: "completed tool task summary with structured results",
           metadata: {
-            trigger: "completed_tool_task",
-            artifactIds: input.observation.artifacts.map((artifact) => artifact.id),
-            toolCallIds: input.observation.toolCalls.map((toolCall) => toolCall.id),
+            trigger: refl?.goalAchieved
+              ? "completed_tool_task"
+              : input.forceSummary
+                ? "force_summary"
+                : shouldRollingSummarize
+                  ? "rolling_turn_trigger"
+                  : "manual",
+            runId: input.input.runId,
+            artifactIds: obs.artifacts.map((a) => a.id),
+            toolCallIds: obs.toolCalls.map((tc) => tc.id),
+            goalAchieved: refl?.goalAchieved ?? false,
+            confidence: refl?.confidence,
+            timestamp: now,
+            // Rolling summary range: tracks which messages are covered
+            // ContextBuilder uses this to exclude summarized messages.
+            messageRange: range,
+            // Quality feedback loop fields
+            quality: {
+              score: qualityScore,
+              toolSuccessRate,
+              reflectionConfidence: reflConfidence,
+              hasArtifacts,
+              hasOpenQuestions: hasQuestions,
+              toolCount: obs.toolCalls.length,
+            },
+            version: summaryVersion,
+            updatedAt: now,
           },
         });
       }
@@ -158,6 +284,7 @@ export class DefaultMemoryWriter {
     input: MemoryWriteInput,
     redactedContent: string,
     policyReason: string,
+    embedding?: number[],
   ): MemoryRecord {
     const now = this.clock().toISOString();
     return {
@@ -174,6 +301,7 @@ export class DefaultMemoryWriter {
       source: candidate.source,
       confidence: candidate.confidence,
       importance: candidate.importance,
+      embedding,
       metadata: {
         ...candidate.metadata,
         conversationId: input.input.conversationId,

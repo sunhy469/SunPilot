@@ -45,6 +45,7 @@ export interface JsonRpcRouterDeps {
     Pick<
       AgentService,
       | "handleChatCommand"
+      | "startChatCommand"
       | "stopChat"
       | "cancelRun"
       | "resumeRun"
@@ -71,11 +72,16 @@ export class JsonRpcRouter {
         const agent = await this.deps.getChatAgent();
         const params = chatSendSchema.parse(command.params ?? {});
         const conversationId = params.conversationId;
-        const result = await agent.handleChatCommand(
+
+        // Fast ack: startChatCommand returns immediately after creating
+        // conversation/message/run. Agent Loop executes in background.
+        // All progress delivered via agent.* event notifications.
+        const accepted = await agent.startChatCommand(
           {
             conversationId,
             message: params.message,
             mode: params.mode,
+            permissionMode: params.permissionMode,
             clientRequestId: params.clientRequestId,
             attachments: params.attachments,
           },
@@ -117,9 +123,9 @@ export class JsonRpcRouter {
         return {
           result: {
             accepted: true,
-            conversationId: result.conversationId,
-            runId: result.runId,
-            messageId: result.messageId,
+            conversationId: accepted.conversationId,
+            runId: accepted.runId,
+            messageId: accepted.messageId,
           },
         };
       }
@@ -179,11 +185,12 @@ export class JsonRpcRouter {
       }
 
       case "approval.reject": {
-        const { approvalId, actor, reason } = approvalDecideSchema.parse(
-          command.params ?? {},
-        );
+        const { approvalId, actor, reason, strategy } =
+          approvalDecideSchema.parse(command.params ?? {});
         const agent = await this.deps.getChatAgent();
-        return { result: await agent.reject(approvalId, actor, reason) };
+        return {
+          result: await agent.reject(approvalId, actor, reason, strategy),
+        };
       }
 
       case "run.subscribe": {

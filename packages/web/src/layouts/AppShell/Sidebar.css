@@ -3,6 +3,7 @@
   border-right: 1px solid var(--sp-border);
   border-radius: 16px 0 0 16px;
   position: relative;
+  transition: width 200ms ease;
 }
 
 .sidebar-inner {
@@ -11,7 +12,31 @@
   flex-direction: column;
   height: 100%;
   min-height: 0;
+  overflow: hidden;
 }
+
+/* ── Collapsed state (tablet) ───────────────────────────────────── */
+
+.sidebar--collapsed .sidebar-inner {
+  padding: 14px 8px;
+}
+
+/* ── Mobile state (hidden sidebar) ───────────────────────────────── */
+
+.sidebar--mobile {
+  position: fixed;
+  top: 0;
+  left: 0;
+  bottom: 0;
+  z-index: 100;
+  width: 0 !important;
+  min-width: 0 !important;
+  max-width: 0 !important;
+  border-right: none;
+  border-radius: 0;
+}
+
+/* ── Resize handle ───────────────────────────────────────────────── */
 
 .sidebar-resize-handle {
   position: absolute;

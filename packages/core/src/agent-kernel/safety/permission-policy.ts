@@ -1,6 +1,7 @@
 import type {
   AgentContext,
   PermissionPolicy as PermissionPolicyInterface,
+  PermissionMode,
 } from '../loop-types.js';
 import {
   classifyRisk,
@@ -11,17 +12,15 @@ import {
 /**
  * PermissionPolicy — 权限策略引擎，评估工具调用是否允许/需审批/应拒绝。
  *
- * 策略矩阵（架构文档 §15.4）：
- *   low       → 自动允许，无需审批
- *   medium    → 有显式权限声明则允许，否则需审批
- *   high      → 必须审批
- *   critical  → 默认拒绝
+ * 策略矩阵（架构文档 §15.4），按用户选择的 permissionMode 调整：
  *
- * 风险等级由 classifyRisk 根据 skillId 类别和参数内容判定：
- * - filesystem.write → high
- * - shell.execute → high
- * - network.request → medium
- * - filesystem.read → low
+ *   ask  (保守): low → auto-allow, medium+ → require approval, critical → reject
+ *   auto (平衡): low → auto-allow, medium → auto-allow if explicit perms,
+ *                high → require approval, critical → reject
+ *   full (完全): low/medium/high → auto-allow, critical → reject
+ *
+ * 风险等级由 classifyRisk 根据 skillId 类别和参数内容判定，
+ * 同时参考 skill manifest 提供的 riskHints (destructiveArgs, externalHosts)。
  */
 export class PermissionPolicy implements PermissionPolicyInterface {
   async evaluate(input: {
@@ -31,16 +30,40 @@ export class PermissionPolicy implements PermissionPolicyInterface {
     permissions: Permission[];
     arguments: Record<string, unknown>;
     context: AgentContext;
+    /** User-selected permission mode from the frontend. */
+    permissionMode?: PermissionMode;
+    /** Optional capability-level risk hints from the skill manifest. */
+    riskHints?: {
+      defaultRisk?: "low" | "medium" | "high" | "critical";
+      destructiveArgs?: string[];
+      externalHosts?: string[];
+    };
   }): Promise<PermissionDecision> {
-    const { skillId, permissions, arguments: args } = input;
+    const { skillId, permissions, arguments: args, riskHints } = input;
+    const mode = input.permissionMode ?? "auto";
 
     // Determine category from skillId
     const category = this.categoryFromSkillId(skillId);
 
-    // Classify risk
-    const { riskLevel, reasons } = classifyRisk(category, args);
+    // Classify risk — use manifest riskHints.defaultRisk if stricter
+    const baseClassification = classifyRisk(category, args);
+    const riskLevel =
+      riskHints?.defaultRisk &&
+      riskOrder(riskHints.defaultRisk) > riskOrder(baseClassification.riskLevel)
+        ? riskHints.defaultRisk
+        : baseClassification.riskLevel;
+    const reasons = [
+      ...baseClassification.reasons,
+      ...(riskHints?.destructiveArgs?.length
+        ? [`Destructive arguments: ${riskHints.destructiveArgs.join(", ")}`]
+        : []),
+      ...(riskHints?.externalHosts?.length
+        ? [`External hosts: ${riskHints.externalHosts.join(", ")}`]
+        : []),
+      `Permission mode: ${mode}`,
+    ];
 
-    // Critical risk → reject by default
+    // Critical risk → always reject regardless of mode
     if (riskLevel === 'critical') {
       return {
         allowed: false,
@@ -50,41 +73,86 @@ export class PermissionPolicy implements PermissionPolicyInterface {
       };
     }
 
-    // High risk → require approval
-    if (riskLevel === 'high') {
-      return {
-        allowed: true,
-        requiresApproval: true,
-        riskLevel: 'high',
-        reasons: [...reasons, 'High risk actions require approval'],
-      };
-    }
+    // ── Mode-specific decision logic ──────────────────────────────
 
-    // Medium risk → allow if we have explicit permissions
-    if (riskLevel === 'medium') {
-      if (permissions.length > 0) {
+    switch (mode) {
+      case 'full':
+        // Full access: auto-allow low/medium/high, only reject critical
+        if (riskLevel === 'high') {
+          return {
+            allowed: true,
+            requiresApproval: false,
+            riskLevel: 'high',
+            reasons: [...reasons, 'Full permission mode auto-allows high risk'],
+          };
+        }
         return {
           allowed: true,
           requiresApproval: false,
-          riskLevel: 'medium',
-          reasons: [...reasons, 'Medium risk with explicit permission set'],
+          riskLevel,
+          reasons: [...reasons, 'Full permission mode — auto-allowed'],
         };
-      }
-      return {
-        allowed: true,
-        requiresApproval: true,
-        riskLevel: 'medium',
-        reasons: [...reasons, 'Medium risk without explicit permissions requires approval'],
-      };
-    }
 
-    // Low risk → auto allow
-    return {
-      allowed: true,
-      requiresApproval: false,
-      riskLevel: 'low',
-      reasons: [...reasons, 'Low risk actions are auto-allowed'],
-    };
+      case 'ask':
+        // Conservative: require approval for medium+ risk
+        if (riskLevel === 'high') {
+          return {
+            allowed: true,
+            requiresApproval: true,
+            riskLevel: 'high',
+            reasons: [...reasons, 'Ask mode requires approval for high risk'],
+          };
+        }
+        if (riskLevel === 'medium') {
+          return {
+            allowed: true,
+            requiresApproval: true,
+            riskLevel: 'medium',
+            reasons: [...reasons, 'Ask mode requires approval for medium+ risk'],
+          };
+        }
+        // Low risk → auto allow
+        return {
+          allowed: true,
+          requiresApproval: false,
+          riskLevel: 'low',
+          reasons: [...reasons, 'Ask mode auto-allows low risk'],
+        };
+
+      case 'auto':
+      default:
+        // Balanced (default): risk-based with approval for high risk
+        if (riskLevel === 'high') {
+          return {
+            allowed: true,
+            requiresApproval: true,
+            riskLevel: 'high',
+            reasons: [...reasons, 'Auto mode requires approval for high risk'],
+          };
+        }
+        if (riskLevel === 'medium') {
+          if (permissions.length > 0) {
+            return {
+              allowed: true,
+              requiresApproval: false,
+              riskLevel: 'medium',
+              reasons: [...reasons, 'Auto mode: medium risk with explicit permissions'],
+            };
+          }
+          return {
+            allowed: true,
+            requiresApproval: true,
+            riskLevel: 'medium',
+            reasons: [...reasons, 'Auto mode: medium risk without explicit permissions requires approval'],
+          };
+        }
+        return {
+          allowed: true,
+          requiresApproval: false,
+          riskLevel: 'low',
+          reasons: [...reasons, 'Auto mode auto-allows low risk'],
+        };
+    }
   }
 
   private categoryFromSkillId(skillId: string): string {
@@ -102,4 +170,11 @@ export class PermissionPolicy implements PermissionPolicyInterface {
     if (capability.startsWith('artifact')) return 'artifact';
     return 'custom';
   }
+}
+
+function riskOrder(level: string): number {
+  const order: Record<string, number> = {
+    low: 0, medium: 1, high: 2, critical: 3,
+  };
+  return order[level] ?? 0;
 }

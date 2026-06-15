@@ -18,6 +18,9 @@ const migrationFiles = [
   "011_memory_core.sql",
   "012_agent_runtime_cleanup.sql",
   "013_conversations_kind.sql",
+  "014_pgvector_embeddings.sql",
+  "015_model_calls_metadata.sql",
+  "016_tool_call_metadata.sql",
 ];
 const migrationLockKey = 7_290_317_373_001;
 

@@ -12,10 +12,12 @@ import type {
 import {
   DEFAULT_CONCURRENCY,
   MAX_RETRIES,
+  MAX_REPAIR_ATTEMPTS,
   RETRY_BACKOFF,
   isRetryable,
   type ToolExecutor,
 } from "./execution-types.js";
+import type { ToolArgumentBuilder } from "../tools/tool-argument-builder.js";
 
 export interface ExecutionOrchestratorDeps {
   /** Executor that actually runs tools (bridges to skill-runner). */
@@ -24,6 +26,8 @@ export interface ExecutionOrchestratorDeps {
   eventBus: AgentEventBus;
   /** Durable audit log for tool invocations. */
   toolCalls?: ToolCallRepository;
+  /** Optional schema-aware argument builder for repair loops. */
+  argumentBuilder?: ToolArgumentBuilder;
 }
 
 /**
@@ -121,13 +125,155 @@ export class ExecutionOrchestrator implements ExecutionOrchestratorInterface {
       arguments: Record<string, unknown>;
       riskLevel: string;
       timeoutMs: number;
+      inputSchema?: Record<string, unknown>;
+      argumentSources?: Array<{
+        arg: string;
+        source: string;
+        ref?: string;
+      }>;
     },
     signal: AbortSignal,
   ): Promise<{
     summary: ToolCallSummary;
     artifacts: ArtifactRef[];
   }> {
-    // Create tool call record once, before any retry attempt
+    // ── Emit tool_argument.generated event for provenance audit ──────
+    if (call.argumentSources && call.argumentSources.length > 0) {
+      this.deps.eventBus.emit(
+        "agent.tool_argument.generated",
+        {
+          runId,
+          toolCallId: call.id,
+          skillId: call.skillId,
+          sources: call.argumentSources,
+        },
+        { runId },
+      );
+    }
+
+    // ── Validate arguments against schema before execution ───────────
+    // Supports repair loop: on validation failure, feed errors back to
+    // argument builder for regeneration, up to MAX_REPAIR_ATTEMPTS.
+    // Tracks repair history for long-term audit.
+    let currentArgs = call.arguments;
+    let currentSchema = call.inputSchema;
+    const originalArgs = { ...call.arguments };
+    const repairHistory: Record<string, unknown>[] = [];
+
+    if (currentSchema) {
+      for (let repairAttempt = 0; repairAttempt <= MAX_REPAIR_ATTEMPTS; repairAttempt++) {
+        const validationErrors = validateArguments(currentArgs, currentSchema);
+        if (validationErrors.length === 0) break; // valid, proceed to execution
+
+        // If we have an argument builder, attempt repair
+        if (this.deps.argumentBuilder && repairAttempt < MAX_REPAIR_ATTEMPTS) {
+          this.deps.eventBus.emit(
+            "agent.tool_argument.validation_failed",
+            {
+              runId,
+              toolCallId: call.id,
+              skillId: call.skillId,
+              name: call.name,
+              validationErrors,
+              failedArguments: { ...currentArgs },
+              schema: currentSchema,
+            },
+            { runId },
+          );
+
+          try {
+            const repairEntry: Record<string, unknown> = {
+              attempt: repairAttempt,
+              beforeArgs: { ...currentArgs },
+              validationErrors: [...validationErrors],
+            };
+            const repaired = await this.deps.argumentBuilder.repair(
+              {
+                skillId: call.skillId,
+                name: call.name,
+                currentArgs,
+                schema: currentSchema,
+                validationErrors,
+              },
+              signal,
+            );
+            repairEntry.afterArgs = { ...repaired.arguments };
+            repairEntry.repairSource = "heuristic";
+            repairHistory.push(repairEntry);
+            currentArgs = repaired.arguments;
+            call.arguments = currentArgs;
+            continue;
+          } catch {
+            // Repair failed — fall through to mark as failed
+            repairHistory.push({
+              attempt: repairAttempt,
+              beforeArgs: { ...currentArgs },
+              validationErrors: [...validationErrors],
+            });
+          }
+        }
+
+        // No repair possible or repair exhausted — mark as failed
+        // ... (rest of the failure handling)
+        this.deps.eventBus.emit(
+          "agent.tool_argument.validation_failed",
+          {
+            runId,
+            toolCallId: call.id,
+            skillId: call.skillId,
+            name: call.name,
+            validationErrors,
+            failedArguments: { ...currentArgs },
+            schema: currentSchema,
+          },
+          { runId },
+        );
+        this.deps.eventBus.emit(
+          "agent.tool.failed",
+          {
+            runId,
+            toolCallId: call.id,
+            skillId: call.skillId,
+            name: call.name,
+            error: {
+              code: "ARGUMENT_VALIDATION_FAILED",
+              message: `Argument validation failed: ${validationErrors.join("; ")}`,
+            },
+          },
+          { runId },
+        );
+        await this.deps.toolCalls?.create({
+          id: call.id,
+          runId,
+          skillId: call.skillId,
+          name: call.name,
+          arguments: currentArgs,
+          status: "failed",
+          riskLevel: normalizeRiskLevel(call.riskLevel),
+          startedAt: new Date().toISOString(),
+          metadata: {
+            argumentSources: call.argumentSources ?? [],
+            inputSchema: call.inputSchema ? true : false,
+            validationErrors,
+            repairHistory:
+              repairHistory.length > 0 ? repairHistory : undefined,
+            repairExhausted: repairHistory.length > 0,
+          },
+        });
+        return {
+          summary: {
+            id: call.id,
+            skillId: call.skillId,
+            name: call.name,
+            status: "failed",
+            summary: `Argument validation failed: ${validationErrors.join("; ")}`,
+          },
+          artifacts: [],
+        };
+      }
+    }
+
+    // Create tool call record with audit metadata
     const now = new Date().toISOString();
     await this.deps.toolCalls?.create({
       id: call.id,
@@ -138,6 +284,18 @@ export class ExecutionOrchestrator implements ExecutionOrchestratorInterface {
       status: "running",
       riskLevel: normalizeRiskLevel(call.riskLevel),
       startedAt: now,
+      metadata: {
+        argumentSources: call.argumentSources ?? [],
+        inputSchema: call.inputSchema ? true : false,
+        repairHistory:
+          repairHistory.length > 0
+            ? repairHistory
+            : undefined,
+        wasRepaired:
+          repairHistory.length > 0
+            ? { originalArgs, repairedArgs: call.arguments }
+            : undefined,
+      },
     });
 
     let lastError: Error | undefined;
@@ -179,6 +337,7 @@ export class ExecutionOrchestrator implements ExecutionOrchestratorInterface {
           name: call.name,
           status: result.status,
           summary: result.summary,
+          structured: result.structured,
         };
 
         // Emit appropriate event
@@ -187,6 +346,7 @@ export class ExecutionOrchestrator implements ExecutionOrchestratorInterface {
             result: {
               summary: result.summary,
               content: result.content,
+              structured: result.structured,
               artifacts: result.artifacts,
               stdout: result.stdout,
               stderr: result.stderr,
@@ -277,6 +437,7 @@ export class ExecutionOrchestrator implements ExecutionOrchestratorInterface {
         name: call.name,
         status: "failed",
         summary: errorMsg,
+        structured: undefined,
       },
       artifacts: [],
     };
@@ -337,4 +498,66 @@ function normalizeRiskLevel(
     return riskLevel;
   }
   return "low";
+}
+
+/**
+ * Validate tool arguments against a JSON Schema.
+ * Returns a list of validation error messages, or an empty array if valid.
+ *
+ * Supports:
+ * - required fields check
+ * - type checks (string, number, array)
+ * - enum constraints
+ */
+function validateArguments(
+  args: Record<string, unknown>,
+  schema: Record<string, unknown>,
+): string[] {
+  const errors: string[] = [];
+
+  // Check required fields
+  const required = schema.required;
+  if (Array.isArray(required)) {
+    for (const field of required) {
+      if (typeof field !== "string") continue;
+      const value = args[field];
+      if (value === undefined || value === null || value === "") {
+        errors.push(`Missing required field: ${field}`);
+      }
+    }
+  }
+
+  // Check property types if defined
+  const properties = schema.properties;
+  if (properties && typeof properties === "object") {
+    for (const [key, propSchema] of Object.entries(
+      properties as Record<string, Record<string, unknown>>,
+    )) {
+      const value = args[key];
+      if (value === undefined || value === null) continue;
+
+      const propType = propSchema.type;
+      if (propType === "string" && typeof value !== "string") {
+        errors.push(`Field "${key}" must be a string`);
+      }
+      if (propType === "number" || propType === "integer") {
+        if (typeof value !== "number") {
+          errors.push(`Field "${key}" must be a number`);
+        }
+      }
+      if (propType === "array" && !Array.isArray(value)) {
+        errors.push(`Field "${key}" must be an array`);
+      }
+
+      // Check enum constraint
+      const enumValues = propSchema.enum;
+      if (Array.isArray(enumValues) && !enumValues.includes(value)) {
+        errors.push(
+          `Field "${key}" must be one of: ${enumValues.join(", ")}`,
+        );
+      }
+    }
+  }
+
+  return errors;
 }

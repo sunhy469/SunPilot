@@ -9,6 +9,7 @@ import {
 import {
   parseAgentChatRequest,
   RuntimeError,
+  ossNotConfigured,
 } from "@sunpilot/core";
 import type { SunPilotApiDeps } from "../composition/api-deps.js";
 import {
@@ -20,6 +21,7 @@ import {
   conversationEventsQuerySchema,
   listApprovalsQuerySchema,
   listAuditLogsQuerySchema,
+  uploadPresignBodySchema,
 } from "./schemas.js";
 
 function chatHttpStatus(error: unknown): number {
@@ -175,9 +177,17 @@ export function registerSunPilotApiRoutes(
         request.params.id,
       );
       if (!conversation) return reply.code(404).send({ error: "not_found" });
+      const records = await database.messages.listByConversationId(request.params.id);
       return {
         conversationId: request.params.id,
-        items: await database.messages.listByConversationId(request.params.id),
+        items: records.map((r) => ({
+          id: r.id,
+          conversationId: r.conversationId,
+          role: r.role,
+          content: r.content,
+          createdAt: r.createdAt,
+          attachments: (r.metadata as { attachments?: unknown })?.attachments,
+        })),
       };
     },
   );
@@ -267,6 +277,57 @@ export function registerSunPilotApiRoutes(
       runId: request.params.id,
       items: await database.modelCalls.listByRunId(request.params.id),
     }),
+  );
+
+  // ── Context snapshot debug API ─────────────────────────────────────
+  // Returns the context snapshots for all model calls in a run.
+  app.get<{ Params: { id: string } }>(
+    "/v1/runs/:id/context",
+    async (request, reply) => {
+      const modelCalls = await database.modelCalls.listByRunId(request.params.id);
+      const snapshots = modelCalls
+        .filter((mc) => mc.metadata?.context)
+        .map((mc) => ({
+          modelCallId: mc.id,
+          purpose: mc.purpose,
+          model: mc.model,
+          provider: mc.provider,
+          status: mc.status,
+          createdAt: mc.createdAt,
+          context: mc.metadata!.context,
+        }));
+      if (snapshots.length === 0) {
+        return reply.code(404).send({
+          error: "not_found",
+          message: "No context snapshots found for this run.",
+        });
+      }
+      return { runId: request.params.id, snapshots };
+    },
+  );
+
+  // Returns the context snapshot for a specific model call.
+  app.get<{ Params: { id: string } }>(
+    "/v1/model-calls/:id/context",
+    async (request, reply) => {
+      const mc = await database.modelCalls.findById(request.params.id);
+      if (!mc) return reply.code(404).send({ error: "not_found" });
+      if (!mc.metadata?.context) {
+        return reply.code(404).send({
+          error: "not_found",
+          message: "No context snapshot for this model call.",
+        });
+      }
+      return {
+        modelCallId: mc.id,
+        purpose: mc.purpose,
+        model: mc.model,
+        provider: mc.provider,
+        status: mc.status,
+        createdAt: mc.createdAt,
+        context: mc.metadata.context,
+      };
+    },
   );
   app.get<{ Params: { id: string }; Querystring: { key?: string } }>(
     "/v1/runs/:id/memory",
@@ -502,6 +563,83 @@ export function registerSunPilotApiRoutes(
         .send(createReadStream(artifact.path));
     },
   );
+
+  // ── Upload ──────────────────────────────────────────────────────────
+
+  const ALLOWED_MIME_TYPES = new Set([
+    // Images
+    "image/jpeg",
+    "image/png",
+    "image/gif",
+    "image/webp",
+    "image/svg+xml",
+    // Video
+    "video/mp4",
+    "video/webm",
+    // Documents
+    "application/pdf",
+    "application/msword",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "application/vnd.ms-excel",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "application/vnd.ms-powerpoint",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    // Text & Data
+    "text/plain",
+    "text/markdown",
+    "text/csv",
+    "application/json",
+    // Archives
+    "application/zip",
+    "application/x-tar",
+    "application/gzip",
+  ]);
+
+  app.post("/v1/upload/presign", async (request, reply) => {
+    const ossClient = deps.oss;
+    if (!ossClient) {
+      const err = ossNotConfigured();
+      return reply.code(err.statusCode).send({
+        error: err.code,
+        message: err.message,
+      });
+    }
+
+    try {
+      const body = uploadPresignBodySchema.parse(request.body ?? {});
+
+      // Validate MIME type against allowlist
+      if (!ALLOWED_MIME_TYPES.has(body.contentType)) {
+        return reply.code(400).send({
+          error: "unsupported_media_type",
+          message: `File type "${body.contentType}" is not supported.`,
+        });
+      }
+
+      const key = ossClient.createObjectKey(body.fileName);
+      const presignedUrl = await ossClient.createPresignedUrl({
+        key,
+        contentType: body.contentType,
+        sizeBytes: body.sizeBytes,
+      });
+      const publicUrl = ossClient.publicUrl(key);
+      return { presignedUrl, publicUrl, key };
+    } catch (error) {
+      if (error instanceof ZodError) {
+        return reply.code(400).send({
+          error: "bad_request",
+          message: formatZodIssues(error),
+        });
+      }
+      if (error instanceof RuntimeError) {
+        return reply.code(error.statusCode).send({
+          error: error.code,
+          message: error.message,
+        });
+      }
+      throw error;
+    }
+  });
 
   // ── Audit ──────────────────────────────────────────────────────────
   app.get("/v1/audit-logs", async (request) => {
