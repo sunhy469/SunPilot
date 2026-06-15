@@ -145,4 +145,77 @@ describe("ToolDecisionEngine", () => {
       ],
     });
   });
+
+  test("passes image attachments and URLs into search skill arguments", async () => {
+    const decision = await new ToolDecisionEngine({
+      listSkills: async () => [
+        {
+          id: "jaderoad:product.source.search1688",
+          name: "搜索 1688 货源",
+          description: "Search 1688 by product image or text query.",
+          category: "custom",
+          enabled: true,
+          permissions: ["network.request"],
+          defaultTimeoutMs: 5_000,
+          maxTimeoutMs: 10_000,
+          supportsAbort: true,
+          idempotent: true,
+          riskHints: { defaultRisk: "medium" },
+        },
+      ],
+    }).decide(
+      {
+        context: {
+          ...context,
+          currentMessage: {
+            id: "msg_user",
+            content: "帮我搜索这件衣服的同款货源",
+            attachments: [
+              {
+                id: "att_1",
+                name: "clothes.png",
+                type: "image/png",
+                url: "http://jadeco.oss-cn-shanghai.aliyuncs.com/sunpilot/uploads/2026-06-15-07-50-17/1s9ug1_image.png",
+              },
+            ],
+          },
+        },
+        intent: {
+          type: "use_skill",
+          confidence: 0.9,
+          requiresPlanning: false,
+          requiresTool: true,
+          requiresApproval: false,
+          riskLevel: "medium",
+          candidateSkills: [],
+          reason: "test",
+        },
+      },
+      new AbortController().signal,
+    );
+
+    expect(decision).toEqual(
+      expect.objectContaining({
+        type: "use_tool",
+        toolCalls: [
+          expect.objectContaining({
+            skillId: "jaderoad:product.source.search1688",
+            arguments: expect.objectContaining({
+              query: "帮我搜索这件衣服的同款货源",
+              imageUrl:
+                "http://jadeco.oss-cn-shanghai.aliyuncs.com/sunpilot/uploads/2026-06-15-07-50-17/1s9ug1_image.png",
+              image_url:
+                "http://jadeco.oss-cn-shanghai.aliyuncs.com/sunpilot/uploads/2026-06-15-07-50-17/1s9ug1_image.png",
+              attachments: [
+                expect.objectContaining({
+                  id: "att_1",
+                  type: "image/png",
+                }),
+              ],
+            }),
+          }),
+        ],
+      }),
+    );
+  });
 });

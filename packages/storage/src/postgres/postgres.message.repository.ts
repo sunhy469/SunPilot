@@ -6,11 +6,18 @@ export class PostgresMessageRepository implements MessageRepository {
 
   async create(input: CreateMessageInput): Promise<MessageRecord> {
     const id = input.id ?? `msg_${crypto.randomUUID()}`;
+    const metadata = {
+      ...(input.metadata ?? {}),
+      ...(input.attachments?.length ? { attachments: input.attachments } : {}),
+    };
+    const embeddingValue = input.embedding?.length
+      ? formatVector(input.embedding)
+      : null;
     const result = await this.pool.query(
-      `INSERT INTO messages (id, conversation_id, role, content, metadata)
-       VALUES ($1, $2, $3, $4, $5::jsonb)
+      `INSERT INTO messages (id, conversation_id, role, content, metadata, embedding)
+       VALUES ($1, $2, $3, $4, $5::jsonb, $6::vector)
        RETURNING id, conversation_id, role, content, metadata, created_at`,
-      [id, input.conversationId, input.role, input.content, JSON.stringify(input.metadata ?? {})]
+      [id, input.conversationId, input.role, input.content, JSON.stringify(metadata), embeddingValue],
     );
     await this.pool.query("UPDATE conversations SET updated_at = NOW() WHERE id = $1", [input.conversationId]);
     return mapMessage(result.rows[0]);
@@ -34,4 +41,9 @@ function mapMessage(row: any): MessageRecord {
     metadata: row.metadata ?? {},
     createdAt: row.created_at.toISOString()
   };
+}
+
+/** Format a number array as a pgvector-compatible string literal: '[1,2,3]' */
+function formatVector(vec: number[]): string {
+  return `[${vec.join(",")}]`;
 }

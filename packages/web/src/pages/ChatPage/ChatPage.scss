@@ -21,13 +21,31 @@
   margin-bottom: 8px;
 }
 
-/* sm (≥576px): tighter padding on small screens */
-@media (max-width: 575px) {
+/* Tablet (≥768px, <992px) */
+@media (max-width: 991px) {
   .chat-composer-wrap {
-    padding: 0 10px 14px;
+    padding: 0 clamp(12px, 2.5vw, 24px) 16px;
+  }
+}
+
+/* Small tablet / large phone (≥576px, <768px) */
+@media (max-width: 767px) {
+  .chat-composer-wrap {
+    padding: 0 12px 14px;
   }
 
   .chat-page__error-wrap {
-    padding: 0 10px;
+    padding: 0 12px;
+  }
+}
+
+/* Phone (<576px) */
+@media (max-width: 575px) {
+  .chat-composer-wrap {
+    padding: 0 8px 12px;
+  }
+
+  .chat-page__error-wrap {
+    padding: 0 8px;
   }
 }

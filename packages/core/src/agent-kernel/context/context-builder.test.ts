@@ -40,7 +40,16 @@ describe("ContextBuilder", () => {
 
     const context = await builder.build(input, new AbortController().signal);
 
+    // ContextBuilder now searches for conversation_summary memories first
+    // to compress older history, then does the main memory search.
     expect(calls).toEqual([
+      {
+        query: "conversation_summary",
+        runId: "run_1",
+        conversationId: "conversation_1",
+        userId: "user_1",
+        limit: 10,
+      },
       {
         query: "remember deployment",
         runId: "run_1",

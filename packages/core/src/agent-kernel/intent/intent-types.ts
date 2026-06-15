@@ -127,6 +127,19 @@ export const DEFAULT_INTENT_RULES: IntentRule[] = [
     candidateSkills: [],
   },
   {
+    type: "use_skill",
+    patterns: [
+      /(搜索|查找|找|搜|货源|同款|淘宝)/i,
+      /\b1688\b/i,
+      /\b(search|find|lookup|source)\b/i,
+    ],
+    requiresPlanning: false,
+    requiresTool: true,
+    requiresApproval: false,
+    riskLevel: "medium",
+    candidateSkills: [],
+  },
+  {
     type: "question_answering",
     patterns: [
       /\b(what|how|why|when|where|who|can you|explain|tell me|describe)\b/i,

@@ -27,6 +27,8 @@ export interface SkillSummary {
   maxTimeoutMs: number;
   supportsAbort: boolean;
   idempotent: boolean;
+  /** Capability input schema (JSON Schema or simple field definitions). */
+  inputSchema?: Record<string, unknown>;
   riskHints: {
     defaultRisk: RiskLevel;
     destructiveArgs?: string[];
@@ -68,5 +70,6 @@ export const INTENT_SKILL_MAP: Record<string, string[]> = {
   artifact_generation: ["artifact.write"],
   memory_update: ["memory.write"],
   diagnostics: ["filesystem.read", "shell.execute"],
+  use_skill: [],
   unknown: [],
 };

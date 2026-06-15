@@ -588,7 +588,7 @@ describe("daemon Agent runtime REST routes", () => {
           status: "completed",
         }),
         approve: async () => ({ approved: true }),
-        reject: async () => ({ rejected: true }),
+        reject: async () => ({ rejected: true, runId: "run_test", strategy: "interrupt" }),
       },
     });
 
@@ -642,7 +642,7 @@ describe("daemon Agent runtime REST routes", () => {
           };
         },
         approve: async () => ({ approved: true }),
-        reject: async () => ({ rejected: true }),
+        reject: async () => ({ rejected: true, runId: "run_test", strategy: "interrupt" }),
       },
     });
 
@@ -699,7 +699,7 @@ describe("daemon Agent runtime REST routes", () => {
           status: "completed",
         }),
         approve: async () => ({ approved: true }),
-        reject: async () => ({ rejected: true }),
+        reject: async () => ({ rejected: true, runId: "run_test", strategy: "interrupt" }),
       },
     });
 
@@ -756,7 +756,7 @@ describe("daemon Agent runtime REST routes", () => {
           approved.push({ approvalId, actor });
           return { approved: true };
         },
-        reject: async () => ({ rejected: true }),
+        reject: async () => ({ rejected: true, runId: "run_test", strategy: "interrupt" }),
       },
     });
 
@@ -812,9 +812,10 @@ describe("daemon Agent runtime REST routes", () => {
           approvalId: string,
           actor?: string,
           reason?: string,
+          _strategy?: string,
         ) => {
           rejected.push({ approvalId, actor, reason });
-          return { rejected: true };
+          return { rejected: true, runId: "run_test", strategy: "interrupt" };
         },
       },
     });
@@ -826,7 +827,9 @@ describe("daemon Agent runtime REST routes", () => {
     });
 
     expect(response.statusCode).toBe(200);
-    expect(response.json()).toEqual({ rejected: true });
+    expect(response.json()).toEqual(
+      expect.objectContaining({ rejected: true }),
+    );
     expect(rejected).toEqual([
       { approvalId: "approval_agent", actor: "web", reason: "too risky" },
     ]);

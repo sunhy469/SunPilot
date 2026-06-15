@@ -152,11 +152,6 @@ async function interruptRecoveredRun(
       });
     }
   }
-  try {
-    await (database as any).jobs?.updateStatus?.(run.id, "interrupted");
-  } catch {
-    // jobs repository not yet available on DatabaseContext; skip during recovery
-  }
   await database.events.append({
     id: `evt_${crypto.randomUUID()}`,
     runId: run.id,

@@ -382,6 +382,7 @@ export class InMemoryDatabaseContext implements DatabaseContext {
         status: input.status ?? "pending",
         riskLevel: input.riskLevel ?? "low",
         approvalId: input.approvalId,
+        metadata: input.metadata,
         startedAt: input.startedAt,
         createdAt: input.createdAt ?? new Date().toISOString(),
       };

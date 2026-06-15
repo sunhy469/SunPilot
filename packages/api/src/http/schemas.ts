@@ -84,3 +84,9 @@ export const listAuditLogsQuerySchema = z.object({
   runId: z.string().optional(),
   limit: z.coerce.number().int().positive().max(200).optional(),
 });
+
+export const uploadPresignBodySchema = z.object({
+  fileName: z.string().min(1, "fileName is required"),
+  contentType: z.string().default("application/octet-stream"),
+  sizeBytes: z.number().positive().optional(),
+});

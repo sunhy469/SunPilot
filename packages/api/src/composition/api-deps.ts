@@ -1,5 +1,6 @@
 import type { AgentService } from "@sunpilot/core";
 import type { DatabaseContext, SunPilotPaths } from "@sunpilot/storage";
+import type { OssClient } from "../storage/oss-client.js";
 
 /**
  * API 层依赖接口 — API 只能依赖这个接口，不依赖 daemon 进程对象。
@@ -29,4 +30,6 @@ export interface SunPilotApiDeps {
     read(): unknown;
     update(input: unknown): unknown;
   };
+  /** Optional OSS client — created once at startup, shared across requests. */
+  oss?: OssClient;
 }

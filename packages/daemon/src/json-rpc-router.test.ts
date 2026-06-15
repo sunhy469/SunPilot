@@ -25,42 +25,42 @@ describe("JsonRpcRouter", () => {
       database: new InMemoryDatabaseContext(),
       getChatAgent: async () =>
         ({
-          handleChatCommand: async (input: any, ctx: any, hooks: any) => {
+          startChatCommand: async (input: any, ctx: any, hooks: any) => {
             calls.push({ input, ctx });
-            // liveEventBus events always carry a real DB sequence
-            hooks?.onEvent?.({
-              id: "evt_delta",
-              type: "agent.response.delta",
-              sequence: 42,
-              runId: "run_1",
-              conversationId: "conv_1",
-              payload: {
+            // Fast ack: return immediately, then deliver events via hooks
+            queueMicrotask(() => {
+              hooks?.onEvent?.({
+                id: "evt_delta",
+                type: "agent.response.delta",
+                sequence: 42,
                 runId: "run_1",
                 conversationId: "conv_1",
-                messageId: "msg_1",
-                delta: "hi",
-              },
-              createdAt: "2026-06-06T00:00:00.000Z",
-            });
-            hooks?.onEvent?.({
-              id: "evt_started",
-              type: "agent.response.started",
-              sequence: 41,
-              runId: "run_1",
-              conversationId: "conv_1",
-              payload: {
+                payload: {
+                  runId: "run_1",
+                  conversationId: "conv_1",
+                  messageId: "msg_1",
+                  delta: "hi",
+                },
+                createdAt: "2026-06-06T00:00:00.000Z",
+              });
+              hooks?.onEvent?.({
+                id: "evt_started",
+                type: "agent.response.started",
+                sequence: 41,
                 runId: "run_1",
-                messageId: "msg_1",
-              },
-              createdAt: "2026-06-06T00:00:00.000Z",
+                conversationId: "conv_1",
+                payload: {
+                  runId: "run_1",
+                  messageId: "msg_1",
+                },
+                createdAt: "2026-06-06T00:00:00.000Z",
+              });
             });
             return {
+              accepted: true,
               runId: "run_1",
               conversationId: "conv_1",
               messageId: "msg_1",
-              status: "completed",
-              artifacts: [],
-              toolCalls: [],
             };
           },
         }) as any,
@@ -136,13 +136,22 @@ describe("JsonRpcRouter", () => {
       database: new InMemoryDatabaseContext(),
       getChatAgent: async () =>
         ({
-          handleChatCommand: async (_input: any, _ctx: any, hooks: any) => {
-            hooks?.onError?.(new Error("something broke"));
-            throw new Error("something broke");
+          startChatCommand: async (_input: any, _ctx: any, hooks: any) => {
+            // Fast ack returns immediately; error delivered via onError asynchronously
+            queueMicrotask(() => {
+              hooks?.onError?.(new Error("something broke"));
+            });
+            return {
+              accepted: true,
+              runId: "run_err",
+              conversationId: "conv_err",
+              messageId: "msg_err",
+            };
           },
         }) as any,
     });
 
+    // startChatCommand returns fast ack, does not reject
     await expect(
       router.handle(
         {
@@ -151,7 +160,12 @@ describe("JsonRpcRouter", () => {
         },
         createContext(notifications),
       ),
-    ).rejects.toThrow("something broke");
+    ).resolves.toEqual({
+      result: expect.objectContaining({ accepted: true }),
+    });
+
+    // Wait for the microtask-delivered onError notification
+    await new Promise((resolve) => setTimeout(resolve, 10));
 
     // onError produces an agent.error notification via agentErrorNotification —
     // this is transient and sequence: -1 is expected.

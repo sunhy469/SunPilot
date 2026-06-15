@@ -13,6 +13,28 @@
   line-height: 1.7;
 }
 
+/* ── Attachments inside user message ──────────────────────────────── */
+
+.user-attachments {
+  margin-bottom: 0;
+}
+
+.user-attachment-image {
+  max-width: 200px;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.user-attachment-image img {
+  display: block;
+}
+
+.user-attachment-file {
+  padding: 6px 10px;
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.04);
+}
+
 @media (max-width: 767px) {
   .message-row.user {
     gap: 10px;
@@ -20,5 +42,9 @@
 
   .user-bubble {
     max-width: calc(100% - 48px);
+  }
+
+  .user-attachment-image {
+    max-width: 140px;
   }
 }

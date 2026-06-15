@@ -86,6 +86,17 @@ pnpm build
 sun start
 ```
 
+The local PostgreSQL container uses `pgvector/pgvector:pg16` because the
+database migrations create the `vector` extension for semantic memory and
+message embeddings. If you previously created the container from a plain
+`postgres` image, recreate it before rerunning migrations:
+
+```bash
+docker compose down
+docker compose pull postgres
+docker compose up -d postgres
+```
+
 Open the product:
 
 ```bash

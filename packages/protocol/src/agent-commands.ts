@@ -12,6 +12,7 @@ export const chatSendSchema = z.object({
   conversationId: z.string().optional(),
   message: z.string().min(1, 'message is required'),
   mode: z.enum(['chat', 'agent']).default('agent'),
+  permissionMode: z.enum(['ask', 'auto', 'full']).default('auto'),
   attachments: z
     .array(
       z.object({
@@ -19,6 +20,10 @@ export const chatSendSchema = z.object({
         name: z.string(),
         type: z.string(),
         sizeBytes: z.number().optional(),
+        url: z.string().optional(),
+        storageKey: z.string().optional(),
+        provider: z.enum(["aliyun-oss", "s3", "minio"]).optional(),
+        checksum: z.string().optional(),
       }),
     )
     .default([]),
@@ -61,20 +66,31 @@ export const approvalDecideSchema = z.object({
   approvalId: z.string().min(1),
   reason: z.string().optional(),
   actor: z.string().default('local-user'),
+  strategy: z
+    .enum(['cancel', 'interrupt', 'continue_without_tool'])
+    .default('interrupt'),
 });
 
 // ── Command interfaces ───────────────────────────────────────────────
+
+export type PermissionMode = 'ask' | 'auto' | 'full';
 
 export interface ChatSendParams {
   clientRequestId?: string;
   conversationId?: string;
   message: string;
   mode: 'chat' | 'agent';
+  /** User-selected permission mode: ask=always approve, auto=risk-based, full=never approve. */
+  permissionMode?: PermissionMode;
   attachments: Array<{
     id: string;
     name: string;
     type: string;
     sizeBytes?: number;
+    url?: string;
+    storageKey?: string;
+    provider?: 'aliyun-oss' | 's3' | 'minio';
+    checksum?: string;
   }>;
 }
 

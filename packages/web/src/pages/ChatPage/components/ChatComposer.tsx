@@ -1,11 +1,10 @@
-import { useState, useCallback, useRef, type ReactNode } from "react";
+import { useState, useCallback, useRef, useEffect, type ReactNode } from "react";
 import {
   Input,
   Button,
   Flex,
   Select,
   Upload,
-  Image,
   Typography,
   Space,
 } from "antd";
@@ -13,10 +12,13 @@ import {
   SendOutlined,
   StopOutlined,
   PlusOutlined,
-  FileOutlined,
-  CloseOutlined,
+  LoadingOutlined,
+  ReloadOutlined,
 } from "@ant-design/icons";
-import type { UploadFile } from "antd/es/upload";
+import type { AttachmentRef } from "../../../features/chat/types";
+import { useFileAttachments } from "../hooks/useFileAttachments";
+import { AttachmentPreview } from "./AttachmentPreview";
+import type { LocalSendState } from "../types";
 import "./ChatComposer.css";
 
 const { TextArea } = Input;
@@ -102,6 +104,8 @@ export function ChatComposer({
   onChange,
   onSend,
   onStop,
+  sendState,
+  onSendStateChange,
 }: {
   placeholder?: string;
   disabled?: boolean;
@@ -109,16 +113,34 @@ export function ChatComposer({
   variant?: "default" | "welcome";
   value?: string;
   onChange?: (value: string) => void;
-  onSend: (text: string) => void;
+  onSend: (text: string, attachments?: AttachmentRef[], permissionMode?: "ask" | "auto" | "full") => void;
   onStop?: () => void;
+  /** Global send state from useChat — drives consistent UI across components. */
+  sendState?: LocalSendState;
+  /** Report upload/queue state changes to parent so useChat.sendState stays in sync. */
+  onSendStateChange?: (state: LocalSendState) => void;
 }) {
   const [internalValue, setInternalValue] = useState("");
-  const [attachments, setAttachments] = useState<UploadFile[]>([]);
   const [permission, setPermission] = useState("auto");
   const [model, setModel] = useState("claude-sonnet-4-6");
-  const [previewVisible, setPreviewVisible] = useState(false);
-  const [previewSrc, setPreviewSrc] = useState("");
-  const textareaRef = useRef<any>(null);
+  // Track queued send when user clicks send while uploads are in progress
+  const [queuedSend, setQueuedSend] = useState(false);
+  const [uploadFailed, setUploadFailed] = useState(false);
+  // Preserve the last sent text and attachments for retry on failure
+  const lastSentRef = useRef<{ text: string; hasFiles: boolean }>({ text: "", hasFiles: false });
+
+  const {
+    files,
+    dragOver,
+    dragHandlers,
+    uploading,
+    uploadProgress,
+    addFiles,
+    addFilesFromPaste,
+    removeFile,
+    clearFiles,
+    toAttachmentRefs,
+  } = useFileAttachments();
 
   const isControlled = value !== undefined;
   const currentValue = value ?? internalValue;
@@ -130,12 +152,125 @@ export function ChatComposer({
     [isControlled, onChange],
   );
 
+  // ── Restore input on send failure ────────────────────────────────
+  // When sendState transitions to "failed", restore the user's text
+  // and keep attachments so they don't lose their input.
+  const prevSendStateRef = useRef<LocalSendState | undefined>(undefined);
+  const currentValueRef = useRef(currentValue);
+  currentValueRef.current = currentValue;
+  useEffect(() => {
+    const prev = prevSendStateRef.current;
+    prevSendStateRef.current = sendState;
+    if (
+      sendState === "failed" &&
+      prev &&
+      prev !== "failed" &&
+      prev !== "editing" &&
+      lastSentRef.current.text
+    ) {
+      // Restore text if it was cleared by the send handler
+      if (!currentValueRef.current.trim()) {
+        setCurrentValue(lastSentRef.current.text);
+      }
+    }
+  }, [sendState, setCurrentValue]);
+
+  // ── Sync upload state to global sendState ─────────────────────────
+  // Report state changes so useChat.sendState reflects upload progress,
+  // enabling consistent UI across the ChatPage (sidebar, header, etc.).
+  //
+  // State transitions:
+  //   uploading && queuedSend → "queued_until_upload_done"
+  //   uploading && !queuedSend → "uploading"
+  //   !uploading && uploadFailed → "failed"
+  //   !uploading && !uploadFailed && was uploading → "editing" (clean finish)
+
+  const wasUploadingRef = useRef(false);
+
+  useEffect(() => {
+    if (uploading) {
+      wasUploadingRef.current = true;
+      onSendStateChange?.(queuedSend ? "queued_until_upload_done" : "uploading");
+    } else if (uploadFailed) {
+      wasUploadingRef.current = false;
+      onSendStateChange?.("failed");
+    } else if (wasUploadingRef.current) {
+      // Uploads completed cleanly — return to editing so UI reflects the
+      // ready-to-send state. This fixes the gap where sendState was stuck
+      // at "uploading" after attachment uploads finished.
+      wasUploadingRef.current = false;
+      onSendStateChange?.("editing");
+    }
+  }, [uploading, queuedSend, uploadFailed, onSendStateChange]);
+
+  // ── Auto-send when uploads complete ────────────────────────────────
+  // Architecture doc §12.2–§12.3: If the user clicks send while attachments
+  // are still uploading, queue the message and auto-send once OSS uploads
+  // finish. The UI shows "附件上传完成后将自动发送" while queued.
+
+  useEffect(() => {
+    if (!queuedSend || uploading) return;
+    // All uploads finished — fire the queued send
+    setQueuedSend(false);
+    const text = currentValue.trim();
+    onSend(text || "请查看附件", toAttachmentRefs(), permission as "ask" | "auto" | "full");
+    clearFiles();
+    setCurrentValue("");
+    onSendStateChange?.("sending");
+  }, [uploading, queuedSend, currentValue, onSend, toAttachmentRefs, clearFiles, setCurrentValue, onSendStateChange, permission]);
+
+  // ── Send ──────────────────────────────────────────────────────────
+
   const handleSend = useCallback(() => {
     const text = currentValue.trim();
-    if (!text || disabled) return;
-    onSend(text);
+    const hasContent = text.length > 0 || files.length > 0;
+    if (!hasContent || disabled) return;
+
+    // Remember what was sent for retry-on-failure preservation
+    lastSentRef.current = { text, hasFiles: files.length > 0 };
+
+    // If uploads are still in progress, queue the send instead of
+    // blocking. The user gets immediate feedback: "附件上传完成后将自动发送".
+    if (uploading) {
+      setQueuedSend(true);
+      onSendStateChange?.("queued_until_upload_done");
+      return;
+    }
+
+    onSend(text || "请查看附件", toAttachmentRefs(), permission as "ask" | "auto" | "full");
+    clearFiles();
     setCurrentValue("");
-  }, [currentValue, disabled, onSend, setCurrentValue]);
+  }, [currentValue, disabled, files, uploading, onSend, setCurrentValue, toAttachmentRefs, clearFiles, onSendStateChange, permission]);
+
+  // ── Detect upload failures ────────────────────────────────────────
+  // When uploads complete, check for any files with error status.
+  useEffect(() => {
+    if (!uploading && files.some((f) => f.status === "error")) {
+      setUploadFailed(true);
+    } else if (!uploading) {
+      setUploadFailed(false);
+    }
+  }, [uploading, files]);
+
+  // ── Retry failed upload ───────────────────────────────────────────
+  // Re-upload files that failed. The failed files are removed and
+  // re-added through addFiles, which triggers fresh OSS uploads.
+  const handleRetryUpload = useCallback(() => {
+    setUploadFailed(false);
+    const failedFiles = files.filter((f) => f.status === "error");
+    // Collect originFileObj from failed entries to re-upload
+    const retryFiles = failedFiles
+      .map((f) => f.originFileObj)
+      .filter((f): f is File => f instanceof File);
+    // Remove the failed entries
+    for (const f of failedFiles) {
+      removeFile(f.uid);
+    }
+    // Re-add valid origin files for fresh upload
+    if (retryFiles.length > 0) {
+      addFiles(retryFiles);
+    }
+  }, [files, removeFile, addFiles]);
 
   const handleKeyDown = useCallback(
     (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -147,98 +282,53 @@ export function ChatComposer({
     [handleSend],
   );
 
-  const handleRemoveAttachment = useCallback((e: React.MouseEvent, uid: string) => {
-    e.stopPropagation();
-    setAttachments((prev) => prev.filter((f) => f.uid !== uid));
-  }, []);
-
-  const handlePreview = useCallback((file: UploadFile) => {
-    if (file.url || file.preview) {
-      setPreviewSrc((file.url ?? file.preview) as string);
-      setPreviewVisible(true);
-      return;
-    }
-    if (file.originFileObj) {
-      const reader = new FileReader();
-      reader.onload = () => {
-        setPreviewSrc(reader.result as string);
-        setPreviewVisible(true);
-      };
-      reader.readAsDataURL(file.originFileObj);
-    }
-  }, []);
-
-  const isImage = (file: UploadFile) =>
-    file.type?.startsWith("image/") ||
-    /\.(png|jpe?g|gif|webp|svg)$/i.test(file.name);
+  // ── Class names / derived state ──────────────────────────────────
 
   const isWelcome = variant === "welcome";
-  const hasAttachments = attachments.length > 0;
+  const isQueued = queuedSend && uploading;
+  const isActiveSending =
+    sendState === "sending" ||
+    sendState === "accepted" ||
+    sendState === "running" ||
+    sendState === "streaming";
+  const sendDisabled =
+    disabled ||
+    (!currentValue.trim() && files.length === 0) ||
+    isQueued ||
+    isActiveSending;
+
+  // Status label for the current phase — displayed below the input
+  const statusLabel: string | undefined = (() => {
+    if (isQueued) return "附件上传完成后将自动发送...";
+    switch (sendState) {
+      case "uploading": return uploadProgress ? `上传中 ${uploadProgress}%...` : "上传中...";
+      case "sending": return "发送中...";
+      case "accepted": return "已接收，正在处理...";
+      case "running": return "工具调用中...";
+      case "streaming": return "生成回答中...";
+      case "failed": return "发送失败，请重试";
+      case "completed": return undefined; // brief flash, then back to editing
+      default: return undefined;
+    }
+  })();
+
+  const className = [
+    "chat-composer",
+    isWelcome && "chat-composer--welcome",
+    dragOver && "chat-composer--drag-over",
+  ]
+    .filter(Boolean)
+    .join(" ");
+
+  // ── Render ────────────────────────────────────────────────────────
 
   return (
-    <Flex
-      vertical
-      className={`chat-composer${isWelcome ? " chat-composer--welcome" : ""}`}
-    >
+    <Flex vertical className={className} {...dragHandlers} onPaste={addFilesFromPaste}>
       {/* ── Top layer: attachment preview ───────────────────────── */}
-      {hasAttachments && (
-        <Flex
-          gap={10}
-          wrap="wrap"
-          className="chat-composer__attachments"
-        >
-          {attachments.map((file) =>
-            isImage(file) ? (
-              <Flex
-                key={file.uid}
-                className="chat-composer__attachment-card"
-                onClick={() => handlePreview(file)}
-              >
-                <Image
-                  src={file.thumbUrl ?? file.url ?? undefined}
-                  alt={file.name}
-                  width={72}
-                  height={72}
-                  style={{ borderRadius: 10, objectFit: "cover" }}
-                  preview={false}
-                />
-                <Button
-                  type="text"
-                  size="small"
-                  className="chat-composer__attachment-remove"
-                  icon={<CloseOutlined style={{ fontSize: 10 }} />}
-                  onClick={(e) => handleRemoveAttachment(e, file.uid)}
-                  aria-label="移除"
-                />
-              </Flex>
-            ) : (
-              <Flex
-                key={file.uid}
-                className="chat-composer__attachment-file"
-                align="center"
-                gap={8}
-              >
-                <FileOutlined style={{ fontSize: 18, color: "var(--sp-muted)" }} />
-                <Text ellipsis style={{ maxWidth: 120, fontSize: 12 }}>
-                  {file.name}
-                </Text>
-                <Button
-                  type="text"
-                  size="small"
-                  className="chat-composer__attachment-remove"
-                  icon={<CloseOutlined style={{ fontSize: 10 }} />}
-                  onClick={(e) => handleRemoveAttachment(e, file.uid)}
-                  aria-label="移除"
-                />
-              </Flex>
-            ),
-          )}
-        </Flex>
-      )}
+      <AttachmentPreview files={files} onRemove={removeFile} />
 
       {/* ── Middle layer: text input ────────────────────────────── */}
       <TextArea
-        ref={textareaRef}
         className="chat-composer__input"
         aria-label="Message"
         placeholder={placeholder}
@@ -249,6 +339,45 @@ export function ChatComposer({
         onChange={(e) => setCurrentValue(e.target.value)}
         onKeyDown={handleKeyDown}
       />
+
+      {/* ── Upload progress bar + queued indicator ────────────── */}
+      {uploading && (
+        <div className="chat-composer__upload-progress">
+          <div
+            className="chat-composer__upload-progress-bar"
+            style={{ width: `${uploadProgress ?? 0}%` }}
+          />
+          {isQueued && (
+            <Text type="secondary" style={{ fontSize: 12, marginTop: 4, display: "block" }}>
+              <LoadingOutlined style={{ marginRight: 4 }} />
+              附件上传完成后将自动发送
+            </Text>
+          )}
+        </div>
+      )}
+      {uploadFailed && (
+        <div className="chat-composer__upload-progress">
+          <Text type="danger" style={{ fontSize: 12 }}>
+            附件上传失败，
+            <Button type="link" size="small" onClick={handleRetryUpload} style={{ padding: 0 }}>
+              点击重试
+            </Button>
+          </Text>
+        </div>
+      )}
+
+      {/* ── Send state indicator ────────────────────────────────── */}
+      {statusLabel && (
+        <div className="chat-composer__status-bar">
+          {isActiveSending && <LoadingOutlined style={{ marginRight: 6 }} />}
+          <Text
+            type={sendState === "failed" ? "danger" : "secondary"}
+            style={{ fontSize: 12 }}
+          >
+            {statusLabel}
+          </Text>
+        </div>
+      )}
 
       {/* ── Bottom layer: controls ──────────────────────────────── */}
       <Flex
@@ -261,9 +390,14 @@ export function ChatComposer({
             multiple
             showUploadList={false}
             beforeUpload={() => false}
-            onChange={(info) => setAttachments(info.fileList)}
-            fileList={attachments}
+            fileList={files}
             accept="image/*,video/*,.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.md,.json,.csv,.zip,.tar,.gz"
+            onChange={(info) => {
+              const originFile = info.file.originFileObj;
+              if (originFile) {
+                addFiles([originFile]);
+              }
+            }}
           >
             <Button
               type="text"
@@ -338,7 +472,7 @@ export function ChatComposer({
             className="chat-composer__select"
             popupMatchSelectWidth={false}
           />
-          {streaming && onStop ? (
+          {(streaming || isActiveSending) && onStop ? (
             <Button
               type="primary"
               danger
@@ -355,23 +489,12 @@ export function ChatComposer({
               size="small"
               icon={<SendOutlined />}
               aria-label="发送"
-              disabled={disabled || !currentValue.trim()}
+              disabled={sendDisabled}
               onClick={handleSend}
             />
           )}
         </Space>
       </Flex>
-
-      {/* ── Preview modal ──────────────────────────────────────── */}
-      <Image
-        src={previewSrc}
-        alt="预览"
-        style={{ display: "none" }}
-        preview={{
-          visible: previewVisible,
-          onVisibleChange: setPreviewVisible,
-        }}
-      />
     </Flex>
   );
 }
