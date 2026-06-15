@@ -73,6 +73,14 @@ export class RepositoryRunStateManager implements RunStateManager {
     const currentStatus = run.status as AgentLoopStatus;
     if (currentStatus === nextStatus) return mapRunToState(run);
 
+    // Terminal states cannot transition further — silently ignore
+    if (isTerminal(currentStatus)) {
+      console.warn(
+        `[RepositoryRunStateManager] run ${runId} is already terminal (${currentStatus}), ignoring transition to ${nextStatus}`,
+      );
+      return mapRunToState(run);
+    }
+
     const allowed = LEGAL_TRANSITIONS[currentStatus];
     if (!allowed || !allowed.includes(nextStatus)) {
       throw Object.assign(
