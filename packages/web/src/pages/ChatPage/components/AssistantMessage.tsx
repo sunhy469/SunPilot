@@ -1,5 +1,5 @@
-import { useState, useCallback, type ReactNode } from "react";
-import { Flex, Button, Typography, message } from "antd";
+import { useState, useCallback, useRef } from "react";
+import { Flex, Button, Typography } from "antd";
 import {
   CopyOutlined,
   LikeOutlined,
@@ -9,7 +9,7 @@ import {
 } from "@ant-design/icons";
 import type { ChatMessage } from "../../../features/conversations/types";
 import { formatTime } from "../../../shared/utils/formatTime";
-import { MarkdownRenderer } from "../../../rich-cards";
+import { MarkdownRenderer, RichCardRenderer } from "../../../rich-cards";
 import { StreamingCursor } from "./StreamingCursor";
 import { TypingDots } from "./TypingDots";
 import "./AssistantMessage.css";
@@ -23,27 +23,35 @@ export function AssistantMessage({
 }: {
   message: ChatMessage;
   isStreaming?: boolean;
-  cards?: ReactNode;
+  cards?: ChatMessage["cards"];
 }) {
   const [liked, setLiked] = useState(false);
   const [disliked, setDisliked] = useState(false);
+  const likedRef = useRef(liked);
+  const dislikedRef = useRef(disliked);
+  likedRef.current = liked;
+  dislikedRef.current = disliked;
   const hasContent = msg.content.length > 0;
 
   const handleCopy = useCallback(() => {
-    navigator.clipboard.writeText(msg.content).then(() => {
-      message.success("已复制");
-    });
+    const text = msg.content;
+    // Clipboard API may not be available in insecure contexts
+    if (navigator.clipboard?.writeText) {
+      navigator.clipboard.writeText(text).catch(() => {
+        // Silently fail — the text is still visible
+      });
+    }
   }, [msg.content]);
 
   const handleLike = useCallback(() => {
+    if (dislikedRef.current) setDisliked(false);
     setLiked((v) => !v);
-    if (disliked) setDisliked(false);
-  }, [disliked]);
+  }, []);
 
   const handleDislike = useCallback(() => {
+    if (likedRef.current) setLiked(false);
     setDisliked((v) => !v);
-    if (liked) setLiked(false);
-  }, [liked]);
+  }, []);
 
   return (
     <div className="message-row assistant">
@@ -61,7 +69,7 @@ export function AssistantMessage({
           )}
         </div>
 
-        {cards}
+        {cards && cards.length > 0 && <RichCardRenderer cards={cards} />}
 
         {/* Action row: copy / like / dislike / time */}
         {!isStreaming && hasContent && (

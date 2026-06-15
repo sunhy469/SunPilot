@@ -66,7 +66,7 @@ export class IntentRouter implements IntentRouterInterface {
     // ── Step 2: LLM classification (if available) ─────────────────
     if (this.deps.llm) {
       try {
-        const intent = await this.classifyWithLlm(message);
+        const intent = await this.classifyWithLlm(context);
         if (intent) return intent;
       } catch {
         // LLM unavailable — fall through to default
@@ -87,13 +87,27 @@ export class IntentRouter implements IntentRouterInterface {
   }
 
   /**
-   * Use a lightweight LLM call to classify intent.
-   * Only called when rule-based matching fails.
+   * Use a lightweight LLM call to classify intent AND select the
+   * specific skill when the user wants to use one.
+   *
+   * The LLM sees the full skill catalog and can semantically match
+   * user requests to the right skill (e.g. "搜一下货源" → product.source.search1688),
+   * which keyword/bigram matchers can't handle reliably.
    */
-  private async classifyWithLlm(message: string): Promise<RoutedIntent | null> {
+  private async classifyWithLlm(
+    context: AgentContext,
+  ): Promise<RoutedIntent | null> {
     if (!this.deps.llm) return null;
 
-    const prompt = `Classify the user's intent into EXACTLY ONE of these categories:
+    const message = context.currentMessage.content;
+    const skillList = context.availableSkills
+      .map((s) => `- ${s.id}: ${s.name} — ${s.description}`)
+      .join("\n");
+
+    const prompt = `Available skills:
+${skillList || "(none)"}
+
+Classify the user's intent into EXACTLY ONE of these categories:
 - casual_chat: greetings, small talk, thanks
 - question_answering: asking for information or explanation
 - project_analysis: reviewing or analyzing code/project structure
@@ -105,11 +119,15 @@ export class IntentRouter implements IntentRouterInterface {
 - artifact_generation: generating documents or reports
 - memory_update: saving or updating preferences/facts
 - diagnostics: debugging or troubleshooting
+- use_skill: user wants to use a specific available skill listed above
+
+If you choose use_skill, also specify WHICH skill ID from the list above.
+Respond in this exact format:
+  For use_skill: "use_skill:<skill-id>"  (e.g. "use_skill:jaderoad:product.source.search1688")
+  For all others: just the category name  (e.g. "question_answering")
 
 User message: "${message}"
-
-Respond with ONLY the category name, nothing else.`;
-
+`;
     const messages = [{ role: "user" as const, content: prompt }];
     let response = "";
 
@@ -118,6 +136,13 @@ Respond with ONLY the category name, nothing else.`;
     }
 
     const normalized = response.trim().toLowerCase();
+
+    // Parse "use_skill:<skill-id>" format
+    if (normalized.startsWith("use_skill:")) {
+      const skillId = normalized.slice("use_skill:".length).trim();
+      return this.defaultsForType("use_skill", skillId);
+    }
+
     const validTypes = [
       "casual_chat",
       "question_answering",
@@ -130,6 +155,7 @@ Respond with ONLY the category name, nothing else.`;
       "artifact_generation",
       "memory_update",
       "diagnostics",
+      "use_skill",
     ];
 
     if (validTypes.includes(normalized)) {
@@ -139,7 +165,10 @@ Respond with ONLY the category name, nothing else.`;
     return null;
   }
 
-  private defaultsForType(type: RoutedIntent["type"]): RoutedIntent {
+  private defaultsForType(
+    type: RoutedIntent["type"],
+    selectedSkillId?: string,
+  ): RoutedIntent {
     switch (type) {
       case "casual_chat":
         return {
@@ -207,6 +236,19 @@ Respond with ONLY the category name, nothing else.`;
           riskLevel: "medium",
           candidateSkills: [],
           reason: "LLM classified as automation execution",
+        };
+      case "use_skill":
+        return {
+          type,
+          confidence: selectedSkillId ? 0.8 : 0.7,
+          requiresPlanning: false,
+          requiresTool: true,
+          requiresApproval: false,
+          riskLevel: "medium",
+          candidateSkills: selectedSkillId ? [selectedSkillId] : [],
+          reason: selectedSkillId
+            ? `LLM selected skill: ${selectedSkillId}`
+            : "LLM classified as skill usage",
         };
       default:
         return {

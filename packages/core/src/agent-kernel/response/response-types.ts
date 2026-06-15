@@ -13,13 +13,14 @@ export interface ResponseComposerDeps {
   };
   /** Event bus for streaming delta events. */
   eventBus: AgentEventBus;
-  /** Save the final assistant message. */
+  /** Save the final assistant message with optional metadata for provenance. */
   saveMessage: (input: {
     id: string;
     conversationId: string;
     role: 'assistant';
     content: string;
     runId?: string;
+    metadata?: Record<string, unknown>;
   }) => Promise<void>;
   /** Durable audit/cost log for LLM invocations. */
   modelCalls?: ModelCallRepository;

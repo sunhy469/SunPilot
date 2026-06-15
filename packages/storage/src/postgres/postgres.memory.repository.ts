@@ -22,15 +22,18 @@ export class PostgresMemoryRepository implements MemoryRepository {
 
   async create(input: MemoryRecord): Promise<MemoryRecord> {
     const normalized = normalizeMemoryInput(input);
+    const embeddingValue = normalized.embedding?.length
+      ? formatVector(normalized.embedding)
+      : null;
     const result = await this.pool.query(
       `INSERT INTO memory_metadata (
          id, run_id, step_id, key, value, scope, scope_id, type, title, content,
-         summary, source, confidence, importance, metadata, created_at, updated_at,
+         summary, source, confidence, importance, metadata, embedding, created_at, updated_at,
          last_accessed_at, expires_at, superseded_by, deleted_at
        ) VALUES (
          $1, $2, $3, $4, $5::jsonb, $6, $7, $8, $9, $10,
-         $11, $12, $13, $14, $15::jsonb, $16, $17,
-         $18, $19, $20, $21
+         $11, $12, $13, $14, $15::jsonb, $16::vector, $17, $18,
+         $19, $20, $21, $22
        )
        RETURNING ${MEMORY_COLUMNS}`,
       [
@@ -49,6 +52,7 @@ export class PostgresMemoryRepository implements MemoryRepository {
         normalized.confidence,
         normalized.importance,
         JSON.stringify(normalized.metadata ?? {}),
+        embeddingValue,
         normalized.createdAt,
         normalized.updatedAt,
         normalized.lastAccessedAt ?? null,
@@ -120,37 +124,71 @@ export class PostgresMemoryRepository implements MemoryRepository {
   ): Promise<RetrievedMemoryRecord[]> {
     const { where, values } = buildMemoryWhere(input);
     const query = input.query?.trim();
-    const queryValueIndex = values.length + 1;
     const hasQuery = Boolean(query);
-    const scoreSql = hasQuery
+    const hasEmbedding = Array.isArray(input.embedding) && input.embedding.length > 0;
+
+    // ── Scoring ────────────────────────────────────────────────────
+    // Hybrid score: keyword (up to 0.45) + semantic (up to 0.45) + quality (0.10)
+    // When embedding is available, semantic term dominates pure-vector recall.
+
+    // Embedding index within params
+    let paramIdx = values.length;
+
+    const semanticSql = hasEmbedding
+      ? `(1 - (embedding <=> $${++paramIdx}::vector)) * 0.45`
+      : `0`;
+    const keywordSql = hasQuery
       ? `(
-          CASE WHEN title ILIKE '%' || $${queryValueIndex} || '%' THEN 0.45 ELSE 0 END +
-          CASE WHEN summary ILIKE '%' || $${queryValueIndex} || '%' THEN 0.35 ELSE 0 END +
-          CASE WHEN content ILIKE '%' || $${queryValueIndex} || '%' THEN 0.25 ELSE 0 END +
-          CASE WHEN key ILIKE '%' || $${queryValueIndex} || '%' THEN 0.20 ELSE 0 END +
-          importance * 0.20 + confidence * 0.15 +
-          GREATEST(0, 1 - EXTRACT(EPOCH FROM (NOW() - updated_at)) / 2592000) * 0.15
-        )`
-      : `(importance * 0.35 + confidence * 0.30 + GREATEST(0, 1 - EXTRACT(EPOCH FROM (NOW() - updated_at)) / 2592000) * 0.20)`;
-    const relevanceSql = hasQuery
-      ? `(
-          CASE WHEN title ILIKE '%' || $${queryValueIndex} || '%' THEN 1 ELSE 0 END +
-          CASE WHEN summary ILIKE '%' || $${queryValueIndex} || '%' THEN 0.7 ELSE 0 END +
-          CASE WHEN content ILIKE '%' || $${queryValueIndex} || '%' THEN 0.5 ELSE 0 END +
-          CASE WHEN key ILIKE '%' || $${queryValueIndex} || '%' THEN 0.4 ELSE 0 END
+          CASE WHEN title ILIKE '%' || $${++paramIdx} || '%' THEN 0.20 ELSE 0 END +
+          CASE WHEN summary ILIKE '%' || $${++paramIdx} || '%' THEN 0.15 ELSE 0 END +
+          CASE WHEN content ILIKE '%' || $${++paramIdx} || '%' THEN 0.10 ELSE 0 END
         )`
       : `0`;
-    const queryClause = hasQuery
-      ? `${where ? `${where} AND` : "WHERE"} (title ILIKE '%' || $${queryValueIndex} || '%' OR summary ILIKE '%' || $${queryValueIndex} || '%' OR content ILIKE '%' || $${queryValueIndex} || '%' OR key ILIKE '%' || $${queryValueIndex} || '%' OR value::text ILIKE '%' || $${queryValueIndex} || '%')`
-      : where;
-    const queryValues = hasQuery ? [...values, query] : values;
+    const qualitySql =
+      `(importance * 0.15 + confidence * 0.10 + GREATEST(0, 1 - EXTRACT(EPOCH FROM (NOW() - updated_at)) / 2592000) * 0.10)`;
+    const scoreSql = `(${keywordSql} + ${semanticSql} + ${qualitySql})`;
+
+    // ── Query filtering ─────────────────────────────────────────────
+    // When a text query is provided, ILIKE acts as a pre-filter for
+    // lexical relevance. When ONLY embedding is provided (pure vector
+    // recall), skip the ILIKE constraint so semantic results surface.
+    // When embedding is available alongside a query, use hybrid: ILIKE
+    // pre-filters the candidate set but vector score still contributes.
+    const params: unknown[] = [...values];
+    let queryClause = where;
+
+    if (hasEmbedding) {
+      params.push(formatVector(input.embedding!));
+    }
+    if (hasQuery) {
+      params.push(query);
+      queryClause = `${where ? `${where} AND` : "WHERE"} (title ILIKE '%' || $${params.length} || '%' OR summary ILIKE '%' || $${params.length} || '%' OR content ILIKE '%' || $${params.length} || '%' OR key ILIKE '%' || $${params.length} || '%' OR value::text ILIKE '%' || $${params.length} || '%')`;
+    }
+    // When only embedding (no text query), no ILIKE pre-filter —
+    // pure vector recall based on cosine similarity.
+
+    // ── Relevance (for display/debug) ───────────────────────────────
+    const relevanceSql = hasQuery
+      ? `(
+          CASE WHEN title ILIKE '%' || $${params.length} || '%' THEN 1 ELSE 0 END +
+          CASE WHEN summary ILIKE '%' || $${params.length} || '%' THEN 0.7 ELSE 0 END +
+          CASE WHEN content ILIKE '%' || $${params.length} || '%' THEN 0.5 ELSE 0 END +
+          CASE WHEN key ILIKE '%' || $${params.length} || '%' THEN 0.4 ELSE 0 END
+        )`
+      : hasEmbedding
+        ? `(1 - (embedding <=> $1::vector))`
+        : `0`;
+
+    const limit = input.limit ?? 10;
+    params.push(limit);
+
     const result = await this.pool.query(
       `SELECT ${MEMORY_COLUMNS}, ${scoreSql} AS score, ${relevanceSql} AS relevance
        FROM memory_metadata
        ${queryClause}
        ORDER BY score DESC, updated_at DESC
-       LIMIT $${queryValues.length + 1}`,
-      [...queryValues, input.limit ?? 10],
+       LIMIT $${params.length}`,
+      params,
     );
     return result.rows.map(mapRetrievedMemory);
   }
@@ -334,4 +372,9 @@ function toIsoRequired(value: unknown): string {
 function toIso(value: unknown): string | undefined {
   if (!value) return undefined;
   return value instanceof Date ? value.toISOString() : String(value);
+}
+
+/** Format a number array as a pgvector-compatible string literal: '[1,2,3]' */
+function formatVector(vec: number[]): string {
+  return `[${vec.join(",")}]`;
 }

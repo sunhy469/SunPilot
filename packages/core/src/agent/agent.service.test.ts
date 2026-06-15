@@ -105,34 +105,25 @@ function createService(
 }
 
 describe("AgentService", () => {
-  test("routes compatibility chat() calls through the Agent Loop", async () => {
+  test("handleChatCommand creates conversation and runs Agent Loop", async () => {
     const { service, conversations } = createService();
     const events: string[] = [];
 
-    const response = await service.chat(
-      { message: "hello" },
+    const response = await service.handleChatCommand(
+      { message: "hello", mode: "agent" },
+      { source: "api" },
       {
         onUserMessage(message) {
           events.push(`user:${message.content}`);
         },
-        onAssistantStarted({ messageId }) {
-          events.push(`started:${messageId}`);
-        },
-        onAssistantDelta({ delta }) {
-          events.push(`delta:${delta}`);
-        },
-        onAssistantMessage(message) {
-          events.push(`assistant:${message.id}:${message.content}`);
+        onDelta(delta) {
+          events.push(`delta:${delta.delta}`);
         },
       },
     );
 
     expect(response.conversationId).toMatch(/^conv_/);
-    expect(response.message).toMatchObject({
-      conversationId: response.conversationId,
-      role: "assistant",
-      content: "hello from agent loop",
-    });
+    expect(response.runId).toMatch(/^run_/);
     await expect(
       conversations.listMessages(response.conversationId),
     ).resolves.toEqual([
@@ -142,8 +133,6 @@ describe("AgentService", () => {
       "user:hello",
       "delta:hello from ",
       "delta:agent loop",
-      `started:${response.message.id}`,
-      `assistant:${response.message.id}:hello from agent loop`,
     ]);
   });
 
@@ -167,19 +156,12 @@ describe("AgentService", () => {
     expect(observed).toEqual(["hello from ", "agent loop"]);
   });
 
-  test("rejects unknown conversations before starting the loop", async () => {
-    let called = false;
-    const { service } = createService({
-      run: async () => {
-        called = true;
-        throw new Error("should not call loop");
-      },
-    });
+  test("assertConversationExists rejects unknown conversations", async () => {
+    const { service } = createService();
 
     await expect(
-      service.chat({ conversationId: "conv_missing", message: "hello" }),
+      service.assertConversationExists("conv_missing"),
     ).rejects.toThrow("Unknown conversation: conv_missing");
-    expect(called).toBe(false);
   });
 
   test("replays completed chat commands with the same clientRequestId", async () => {

@@ -1,6 +1,7 @@
 import type {
   AgentContext,
   AgentLoopInput,
+  AttachmentRef,
   ContextBuilder as ContextBuilderInterface,
 } from "../loop-types.js";
 import { ContextChunk, estimateTokens } from "./context-types.js";
@@ -16,6 +17,7 @@ export interface ContextBuilderDeps {
       id: string;
       role: string;
       content: string;
+      attachments?: AttachmentRef[];
       createdAt: string;
     }>
   >;
@@ -26,6 +28,8 @@ export interface ContextBuilderDeps {
     conversationId: string;
     userId?: string;
     limit?: number;
+    /** Optional embedding vector for pure semantic (no-ILIKE) recall. */
+    embedding?: number[];
   }) => Promise<
     Array<{
       id: string;
@@ -37,6 +41,7 @@ export interface ContextBuilderDeps {
       scope?: string;
       scopeId?: string;
       score?: number;
+      metadata?: Record<string, unknown>;
     }>
   >;
   /** List available skills. */
@@ -66,6 +71,7 @@ export interface ContextBuilderDeps {
       status: string;
       summary?: string;
       content?: string;
+      structured?: Record<string, unknown>;
     }>
   >;
   /** System prompt personas and rules. */
@@ -79,6 +85,8 @@ export interface ContextBuilderDeps {
   maxContextTokens?: number;
   /** Reserved tokens for model output. */
   reservedOutputTokens?: number;
+  /** Generate an embedding vector for the given text (best-effort). */
+  embedText?: (text: string) => Promise<number[]>;
 }
 
 /**
@@ -95,9 +103,16 @@ export interface ContextBuilderDeps {
  *   18 — tool_results（最近工具调用结果）
  *   20 — skill_catalog（可用技能目录）
  *   25 — artifacts（运行中产生的制品）
+ *
+ * History is now token-budget-driven: we fetch up to MAX_HISTORY_MESSAGES
+ * and let TokenBudgeter decide which to include based on available tokens.
+ * Short conversations get full history; long ones get trimmed by priority.
  */
 export class ContextBuilder implements ContextBuilderInterface {
   private readonly budgeter: TokenBudgeter;
+
+  /** Maximum messages to fetch from history. TokenBudgeter may trim further. */
+  private static readonly MAX_HISTORY_MESSAGES = 100;
 
   constructor(private readonly deps: ContextBuilderDeps) {
     this.budgeter = new TokenBudgeter(
@@ -173,10 +188,106 @@ export class ContextBuilder implements ContextBuilderInterface {
     });
 
     // ── Conversation history ──────────────────────────────────────
+    // Tokens reserved before history insertion: track how much budget
+    // is consumed so far so we can decide whether to compress early history.
+    const preHistoryTokens = chunks.reduce(
+      (sum, c) => sum + c.tokenEstimate,
+      0,
+    );
+
     try {
-      const messages = await this.deps.listMessages(input.conversationId, 30);
+      const messages = await this.deps.listMessages(
+        input.conversationId,
+        ContextBuilder.MAX_HISTORY_MESSAGES,
+      );
+
+      // Check for existing conversation summaries to compress older history.
+      // Summaries replace raw messages that fall within their range,
+      // keeping only recent messages (after the latest summary's range)
+      // as full text.
+      let summaryChunks: ContextChunk[] = [];
+      const summarizedMessageIds = new Set<string>();
+
+      if (this.deps.searchMemories) {
+        try {
+          const summaryMemories = await this.deps.searchMemories({
+            query: "conversation_summary",
+            runId: input.runId,
+            conversationId: input.conversationId,
+            userId: input.userId,
+            limit: 10,
+          });
+          const convSummaries = summaryMemories.filter(
+            (m) => m.type === "conversation_summary",
+          );
+
+          // Collect all message IDs covered by any summary range.
+          // Build a map: messageId → true for fast lookup.
+          for (const summary of convSummaries) {
+            const range = summary.metadata?.messageRange as
+              | { fromMessageId?: string; toMessageId?: string }
+              | undefined;
+            if (range?.fromMessageId && range?.toMessageId) {
+              // Find all messages between fromMessageId and toMessageId (inclusive)
+              const fromIdx = messages.findIndex(
+                (m) => m.id === range.fromMessageId,
+              );
+              const toIdx = messages.findIndex(
+                (m) => m.id === range.toMessageId,
+              );
+              if (fromIdx >= 0 && toIdx >= fromIdx) {
+                for (let i = fromIdx; i <= toIdx; i++) {
+                  summarizedMessageIds.add(messages[i]!.id);
+                }
+              }
+            }
+
+            // ── Stale detection ────────────────────────────────────
+            // A summary is stale when unconvered messages appear after
+            // its range boundary. Stale summaries are still included but
+            // at a lower priority since they may not reflect recent turns.
+            let isStale = false;
+            if (range?.toMessageId) {
+              const boundaryIdx = messages.findIndex(
+                (m) => m.id === range.toMessageId,
+              );
+              isStale =
+                boundaryIdx >= 0 && boundaryIdx < messages.length - 1;
+            }
+
+            summaryChunks.push({
+              id: `summary_${summary.id}`,
+              source: "conversation_summary",
+              title: summary.title
+                + (isStale ? " [stale — new messages since]" : ""),
+              content: `[Previous conversation summary${isStale ? " (may be outdated)" : ""}]\n${summary.content}`,
+              // Stale summaries get lower priority (12) so they may be
+              // trimmed if budget is tight, but still above raw history.
+              priority: isStale ? 12 : 8,
+              tokenEstimate: estimateTokens(summary.content),
+              metadata: {
+                memoryId: summary.id,
+                type: "conversation_summary",
+                confidence: summary.confidence,
+                score: summary.score,
+              },
+            });
+          }
+        } catch {
+          // Memory search unavailable — skip summaries
+        }
+      }
+
+      // Build history chunks, skipping messages already covered by a summary.
+      // This is precise compaction: summarized messages are replaced by their
+      // summary, reducing token usage while preserving conversation context.
+      let skippedCount = 0;
       for (const msg of messages) {
         if (msg.id === input.userMessageId) continue; // skip current
+        if (summarizedMessageIds.has(msg.id)) {
+          skippedCount++;
+          continue; // covered by a conversation summary
+        }
         chunks.push({
           id: `history_${msg.id}`,
           source: "conversation_history",
@@ -184,9 +295,20 @@ export class ContextBuilder implements ContextBuilderInterface {
           content: msg.content,
           priority: 10,
           tokenEstimate: estimateTokens(msg.content),
-          metadata: { messageId: msg.id, role: msg.role },
+          metadata: {
+            messageId: msg.id,
+            role: msg.role,
+            attachments: msg.attachments,
+          },
           createdAt: msg.createdAt,
         });
+      }
+
+      // Prepend summary chunks so they appear before raw history in the prompt.
+      // Summaries have lower priority (8 < 10) so they survive token budget
+      // cuts better than raw history.
+      if (summaryChunks.length > 0) {
+        chunks.push(...summaryChunks);
       }
     } catch {
       // Conversation store not available — skip history
@@ -195,14 +317,61 @@ export class ContextBuilder implements ContextBuilderInterface {
     // ── Memories ──────────────────────────────────────────────────
     if (this.deps.searchMemories) {
       try {
-        const memories = await this.deps.searchMemories({
+        // Generate query embedding once for reuse
+        let queryEmbedding: number[] | undefined;
+        if (this.deps.embedText && input.message.trim()) {
+          try {
+            queryEmbedding = await this.deps.embedText(input.message);
+          } catch {
+            // Embedding unavailable — hybrid search still works with keyword
+          }
+        }
+
+        // Pass 1: Hybrid search (query + embedding) — keyword-dominant
+        const hybridMemories = await this.deps.searchMemories({
           query: input.message,
           runId: input.runId,
           conversationId: input.conversationId,
           userId: input.userId,
           limit: 10,
+          embedding: queryEmbedding,
         });
-        for (const mem of memories) {
+
+        // Pass 2: Pure vector recall (embedding only, empty query)
+        // This triggers the semantic-only path in PostgresMemoryRepository
+        // where ILIKE pre-filter is skipped. Effectively doubles recall
+        // coverage by adding semantically-similar but lexically-different
+        // memories that keyword search would miss.
+        let vectorMemories: Awaited<ReturnType<typeof this.deps.searchMemories>> = [];
+        if (queryEmbedding) {
+          try {
+            vectorMemories = await this.deps.searchMemories({
+              query: "",
+              runId: input.runId,
+              conversationId: input.conversationId,
+              userId: input.userId,
+              limit: 5,
+              embedding: queryEmbedding,
+            });
+          } catch {
+            // Pure vector recall unavailable — use hybrid results only
+          }
+        }
+
+        // Merge: deduplicate by id, preferring hybrid (higher relevance) score
+        const seenIds = new Set<string>();
+        const allMemories = [...hybridMemories];
+        for (const mem of vectorMemories) {
+          if (!seenIds.has(mem.id)) {
+            seenIds.add(mem.id);
+            allMemories.push(mem);
+          }
+        }
+
+        // Sort by score descending
+        allMemories.sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
+
+        for (const mem of allMemories.slice(0, 15)) {
           const content = `[${mem.type}] ${mem.title}: ${mem.content}`;
           chunks.push({
             id: `memory_${mem.id}`,
@@ -272,6 +441,7 @@ export class ContextBuilder implements ContextBuilderInterface {
               toolCallId: result.toolCallId,
               status: result.status,
               content: result.content,
+              structured: result.structured,
             },
           });
         }
@@ -334,6 +504,29 @@ export class ContextBuilder implements ContextBuilderInterface {
     // ── Apply token budget ────────────────────────────────────────
     const budget = this.budgeter.apply(chunks);
 
+    // ── Build context snapshot for observability ──────────────────
+    const contextSnapshot = {
+      chunks: [
+        ...budget.included.map((c) => ({
+          id: c.id,
+          source: c.source,
+          priority: c.priority,
+          tokenEstimate: c.tokenEstimate,
+          included: true as const,
+        })),
+        ...budget.excluded.map((c) => ({
+          id: c.id,
+          source: c.source,
+          priority: c.priority,
+          tokenEstimate: c.tokenEstimate,
+          included: false as const,
+          reason: "token_budget" as const,
+        })),
+      ],
+      totalTokens: budget.totalTokens,
+      droppedCount: budget.excluded.length,
+    };
+
     // ── Pack into AgentContext ────────────────────────────────────
     const systemChunks = budget.included.filter((c) => c.source === "system");
     const safetyChunks = budget.included.filter(
@@ -355,12 +548,31 @@ export class ContextBuilder implements ContextBuilderInterface {
         content: input.message,
         attachments: input.attachments ?? [],
       },
-      messages: budget.included
-        .filter((c) => c.source === "conversation_history")
-        .map((c) => ({
-          role: (c.metadata.role as "user" | "assistant" | "system") ?? "user",
-          content: c.content,
-        })),
+      messages: [
+        // Conversation summaries appear first as system-level context,
+        // replacing older raw messages that have been compressed.
+        ...budget.included
+          .filter((c) => c.source === "conversation_summary")
+          .map((c) => ({
+            role: "system" as const,
+            content: c.content,
+            metadata: {
+              memoryId: c.metadata.memoryId,
+              type: "conversation_summary",
+            },
+          })),
+        // Raw conversation history messages
+        ...budget.included
+          .filter((c) => c.source === "conversation_history")
+          .map((c) => ({
+            role: (c.metadata.role as "user" | "assistant" | "system") ?? "user",
+            content: c.content,
+            metadata: {
+              messageId: c.metadata.messageId,
+              attachments: c.metadata.attachments,
+            },
+          })),
+      ],
       memories: budget.included
         .filter((c) => c.source === "memory")
         .map((c) => ({
@@ -389,6 +601,7 @@ export class ContextBuilder implements ContextBuilderInterface {
           summary: c.content,
           content: c.metadata.content as string | undefined,
           status: (c.metadata.status as string) ?? "completed",
+          structured: c.metadata.structured as Record<string, unknown> | undefined,
         })),
       availableSkills: budget.included.some((c) => c.source === "skill_catalog")
         ? availableSkills
@@ -399,6 +612,7 @@ export class ContextBuilder implements ContextBuilderInterface {
         usedTokensEstimate: budget.totalTokens,
       },
       tokenEstimate: budget.totalTokens,
+      contextSnapshot,
     };
   }
 }

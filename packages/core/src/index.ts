@@ -10,11 +10,20 @@ export {
 } from "./agent-kernel/state/run-state-machine.js";
 export { AuditActor } from "./agent-kernel/audit/audit-actor.js";
 export { ContextBuilder } from "./agent-kernel/context/context-builder.js";
+export type { ContextBuilderDeps } from "./agent-kernel/context/context-builder.js";
 export { TokenBudgeter } from "./agent-kernel/context/context-budgeter.js";
 export * from "./agent-kernel/context/context-types.js";
+export * from "./agent-kernel/context/embedding-service.js";
+export { LlmEmbeddingService } from "./agent-kernel/context/llm-embedding-service.js";
 export { IntentRouter } from "./agent-kernel/intent/intent-router.js";
 export * from "./agent-kernel/intent/intent-types.js";
 export { ToolDecisionEngine } from "./agent-kernel/tools/tool-decision-engine.js";
+export { DefaultToolArgumentBuilder } from "./agent-kernel/tools/tool-argument-builder.js";
+export type {
+  ToolArgumentBuilder,
+  ToolArgumentBuilderInput,
+  ToolArgumentBuilderResult,
+} from "./agent-kernel/tools/tool-argument-builder.js";
 export * from "./agent-kernel/tools/tool-types.js";
 export { RuleBasedPlanner } from "./agent-kernel/planning/rule-based-planner.js";
 export { BasicReflectionEngine } from "./agent-kernel/reflection/basic-reflection-engine.js";
@@ -41,7 +50,12 @@ export { RepositoryApprovalExpiryService } from "./agent-kernel/persistence/repo
 export { RepositoryApprovalRequestService } from "./agent-kernel/persistence/repository-approval-request-service.js";
 export { RepositoryApprovalGate } from "./agent-kernel/persistence/repository-approval-gate.js";
 export { RepositoryRunStateManager } from "./agent-kernel/persistence/repository-run-state-manager.js";
-export { ResponseComposer } from "./agent-kernel/response/response-composer.js";
+export {
+  ResponseComposer,
+  projectToolResult,
+  buildResponseProvenance,
+  TOOL_RESULT_RELIABILITY_RULES,
+} from "./agent-kernel/response/response-composer.js";
 export * from "./agent-kernel/response/response-types.js";
 export * from "./providers.js";
 export * from "./errors.js";

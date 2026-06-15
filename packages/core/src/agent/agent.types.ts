@@ -6,6 +6,14 @@ export interface AgentMessage {
   role: AgentMessageRole;
   content: string;
   createdAt: string;
+  attachments?: Array<{
+    id: string;
+    name: string;
+    type: string;
+    sizeBytes?: number;
+    url?: string;
+    storageKey?: string;
+  }>;
 }
 
 export interface AgentConversation {
@@ -26,20 +34,6 @@ export interface AgentChatResponse {
   message: AgentMessage;
 }
 
-export interface AgentChatHooks {
-  onUserMessage?(message: AgentMessage): Promise<void> | void;
-  onAssistantStarted?(input: {
-    conversationId: string;
-    messageId: string;
-  }): Promise<void> | void;
-  onAssistantDelta?(input: {
-    conversationId: string;
-    messageId: string;
-    delta: string;
-  }): Promise<void> | void;
-  onAssistantMessage?(message: AgentMessage): Promise<void> | void;
-}
-
 export interface CreateAgentConversationInput {
   id?: string;
   title?: string;
@@ -50,6 +44,14 @@ export interface CreateAgentMessageInput {
   conversationId: string;
   role: AgentMessageRole;
   content: string;
+  attachments?: Array<{
+    id: string;
+    name: string;
+    type: string;
+    sizeBytes?: number;
+    url?: string;
+    storageKey?: string;
+  }>;
 }
 
 export interface AgentConversationStore {

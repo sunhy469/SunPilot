@@ -4,6 +4,7 @@ import { conversationTitle } from "../../features/conversations/model";
 import { SidebarNav } from "./SidebarNav";
 import { RecentConversations } from "./RecentConversations";
 import { UserFooter } from "./UserFooter";
+import { useResponsive } from "../../shared/hooks/useResponsive";
 import { Layout } from "antd";
 import "./Sidebar.css";
 
@@ -12,6 +13,7 @@ const { Sider } = Layout;
 const MIN_WIDTH = 200;
 const MAX_WIDTH = 480;
 const DEFAULT_WIDTH = 260;
+const COLLAPSED_ICON_WIDTH = 72;
 
 export function Sidebar({
   conversations,
@@ -28,14 +30,20 @@ export function Sidebar({
   onSelect: (id: string) => void;
   onOpenPlugins: () => void;
 }) {
+  const responsive = useResponsive();
   const [sidebarWidth, setSidebarWidth] = useState(DEFAULT_WIDTH);
-  const siderRef = useRef<HTMLElement>(null);
+  const siderRef = useRef<HTMLDivElement>(null);
   const draggingRef = useRef(false);
   const startXRef = useRef(0);
   const startWidthRef = useRef(DEFAULT_WIDTH);
 
+  // Auto-collapse on tablet/mobile — icon-only mode on compact screens
+  const collapsed = responsive.isCompact;
+  const collapsedWidth = responsive.isMobile ? 0 : COLLAPSED_ICON_WIDTH;
+
   const handleMouseDown = useCallback(
     (e: React.MouseEvent) => {
+      if (responsive.isCompact) return; // no resize on mobile
       e.preventDefault();
       draggingRef.current = true;
       startXRef.current = e.clientX;
@@ -43,14 +51,13 @@ export function Sidebar({
       document.body.style.cursor = "col-resize";
       document.body.style.userSelect = "none";
     },
-    [sidebarWidth],
+    [sidebarWidth, responsive.isCompact],
   );
 
   const handleMouseMove = useCallback((e: MouseEvent) => {
     if (!draggingRef.current) return;
     const delta = e.clientX - startXRef.current;
     const next = Math.min(MAX_WIDTH, Math.max(MIN_WIDTH, startWidthRef.current + delta));
-    // Direct DOM manipulation for smooth drag — bypass React render cycle
     if (siderRef.current) {
       siderRef.current.style.width = `${next}px`;
       siderRef.current.style.minWidth = `${next}px`;
@@ -64,7 +71,6 @@ export function Sidebar({
     draggingRef.current = false;
     document.body.style.cursor = "";
     document.body.style.userSelect = "";
-    // Sync final width to React state
     if (siderRef.current) {
       const finalWidth = parseInt(siderRef.current.style.width, 10) || DEFAULT_WIDTH;
       setSidebarWidth(finalWidth);
@@ -90,13 +96,17 @@ export function Sidebar({
   return (
     <Sider
       ref={siderRef}
-      className="sidebar"
+      className={`sidebar${collapsed ? " sidebar--collapsed" : ""}${responsive.isMobile ? " sidebar--mobile" : ""}`}
       width={sidebarWidth}
-      collapsedWidth={72}
+      collapsedWidth={collapsedWidth}
       collapsible
+      collapsed={collapsed}
       trigger={null}
       defaultCollapsed={false}
-      style={{ minWidth: MIN_WIDTH, maxWidth: MAX_WIDTH }}
+      style={{
+        minWidth: responsive.isMobile ? 0 : MIN_WIDTH,
+        maxWidth: MAX_WIDTH,
+      }}
     >
       <div className="sidebar-inner">
         <SidebarNav
@@ -117,11 +127,13 @@ export function Sidebar({
         <UserFooter />
       </div>
 
-      {/* Resize handle */}
-      <div
-        className="sidebar-resize-handle"
-        onMouseDown={handleMouseDown}
-      />
+      {/* Resize handle — hidden on mobile */}
+      {!responsive.isCompact && (
+        <div
+          className="sidebar-resize-handle"
+          onMouseDown={handleMouseDown}
+        />
+      )}
     </Sider>
   );
 }

@@ -10,6 +10,7 @@ export interface ContextChunk {
     | 'system'
     | 'current_message'
     | 'conversation_history'
+    | 'conversation_summary'
     | 'memory'
     | 'artifact'
     | 'tool_result'
@@ -44,11 +45,12 @@ export const DEFAULT_TOKEN_BUDGET: Record<string, number> = {
  * Mandatory chunks have priority 0 and are never trimmed.
  */
 export const TRIM_ORDER: ContextChunk['source'][] = [
-  'memory',           // low-relevance memories first
-  'tool_result',      // old tool results
-  'artifact',         // old artifact summaries
-  'conversation_history', // older messages
-  'skill_catalog',    // long skill descriptions
+  'memory',                // low-relevance memories first
+  'tool_result',           // old tool results
+  'artifact',              // old artifact summaries
+  'conversation_history',  // older raw messages (trimmed before summaries)
+  'conversation_summary',  // compressed history (more token-efficient)
+  'skill_catalog',         // long skill descriptions
 ];
 
 export const MANDATORY_SOURCES: Set<ContextChunk['source']> = new Set([

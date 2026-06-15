@@ -5,7 +5,6 @@ import type { ChatViewState } from "../types";
 import { useAutoScroll } from "../hooks/useAutoScroll";
 import { UserMessage } from "./UserMessage";
 import { AssistantMessage } from "./AssistantMessage";
-import { RichCardRenderer } from "../../../rich-cards";
 import "./MessageList.css";
 
 const MemoUserMessage = memo(UserMessage);
@@ -18,13 +17,12 @@ export function MessageList({
   messages: ChatMessage[];
   status: ChatViewState;
 }) {
-  const scrollRef = useAutoScroll([messages, status]);
+  const isStreaming = status === "streaming";
+  const scrollRef = useAutoScroll([messages, status], isStreaming);
 
   if (messages.length === 0) {
     return null;
   }
-
-  const isStreaming = status === "streaming";
 
   return (
     <div className="message-list" ref={scrollRef}>
@@ -46,11 +44,7 @@ export function MessageList({
                 key={message.id}
                 message={message}
                 isStreaming={isLastAssistant}
-                cards={
-                  message.cards && message.cards.length > 0 ? (
-                    <RichCardRenderer cards={message.cards} />
-                  ) : undefined
-                }
+                cards={message.cards}
               />
             );
           }

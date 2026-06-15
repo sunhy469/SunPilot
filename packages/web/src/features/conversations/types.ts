@@ -15,5 +15,15 @@ export interface ChatMessage {
   role: "system" | "user" | "assistant";
   content: string;
   createdAt: string;
+  /** Transient UI status for local optimistic updates (pending/streaming/completed). */
+  status?: "pending" | "streaming" | "completed" | "error" | "stopped";
   cards?: RichCardView[];
+  attachments?: Array<{
+    id: string;
+    name: string;
+    type: string;
+    sizeBytes?: number;
+    url?: string;
+    storageKey?: string;
+  }>;
 }

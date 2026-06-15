@@ -24,6 +24,8 @@ export const AGENT_EVENT_TYPES = [
   "agent.tool.delta",
   "agent.tool.completed",
   "agent.tool.failed",
+  "agent.tool_argument.generated",
+  "agent.tool_argument.validation_failed",
   // Approval
   "agent.approval.required",
   "agent.approval.approved",
@@ -168,17 +170,45 @@ export interface AgentToolFailedPayload {
   runId: string;
   toolCallId: string;
   skillId: string;
+  name?: string;
   error: {
     code: string;
     message: string;
   };
 }
 
+export interface AgentToolArgumentGeneratedPayload {
+  runId: string;
+  toolCallId: string;
+  skillId: string;
+  sources: Array<{
+    arg: string;
+    source: string;
+    ref?: string;
+  }>;
+}
+
+export interface AgentToolArgumentValidationFailedPayload {
+  runId: string;
+  toolCallId: string;
+  skillId: string;
+  name?: string;
+  validationErrors: string[];
+  /** The original arguments that failed validation. */
+  failedArguments: Record<string, unknown>;
+  /** The schema used for validation. */
+  schema?: Record<string, unknown>;
+}
+
 export interface AgentApprovalRequiredPayload {
   runId: string;
   approvalId: string;
   title: string;
+  description?: string;
   riskLevel: string;
+  skillId?: string;
+  argumentsPreview?: Record<string, unknown>;
+  reasons?: string[];
 }
 
 export interface AgentApprovalApprovedPayload {

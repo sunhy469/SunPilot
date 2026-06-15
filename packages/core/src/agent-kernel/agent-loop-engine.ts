@@ -4,7 +4,9 @@ import type {
   AgentLoopInput,
   AgentLoopResult,
   AgentContext,
+  AgentObservation,
   AgentPlan,
+  AgentTaskState,
   RoutedIntent,
   Permission,
   RiskLevel,
@@ -21,6 +23,8 @@ import type {
 } from "./loop-types.js";
 import type { RunStateManager } from "./run-state-manager.js";
 import type { MemoryWriter } from "./memory/memory-types.js";
+
+const MAX_TOOL_ITERATIONS = 5;
 
 export interface AgentLoopEngineDeps {
   contextBuilder: ContextBuilder;
@@ -90,11 +94,24 @@ export class AgentLoopEngine {
         signal,
       );
       const plan = await this.maybeCreatePlan(input, context, intent, signal);
-      const decision = await this.decideTools(input, context, intent, plan, signal);
+      const decision = await this.decideTools(
+        input,
+        context,
+        intent,
+        plan,
+        signal,
+      );
 
       switch (decision.type) {
         case "use_tool":
-          return this.handleUseTool(input, context, intent, plan, decision, signal);
+          return this.handleUseTool(
+            input,
+            context,
+            intent,
+            plan,
+            decision,
+            signal,
+          );
         case "no_tool":
           return this.handleNoTool(input, context, intent, plan, signal);
         case "ask_clarification":
@@ -204,10 +221,16 @@ export class AgentLoopEngine {
     intent: RoutedIntent,
     plan: AgentPlan | undefined,
     signal: AbortSignal,
+    previousObservation?: AgentObservation,
+    prioritySkills?: Array<{
+      skillId: string;
+      reason: string;
+      argumentsHint?: Record<string, unknown>;
+    }>,
   ): Promise<ToolDecision> {
     await this.deps.runStateManager.markStatus(input.runId, "tool_deciding");
     return this.deps.toolDecisionEngine.decide(
-      { context, intent, plan },
+      { context, intent, plan, previousObservation, prioritySkills },
       signal,
     );
   }
@@ -222,6 +245,9 @@ export class AgentLoopEngine {
     plan: AgentPlan | undefined,
     decision: ToolDecision & { type: "use_tool" },
     signal: AbortSignal,
+    iteration = 1,
+    accumulatedObservation?: AgentObservation,
+    taskState?: AgentTaskState,
   ): Promise<AgentLoopResult> {
     const { runId, conversationId } = input;
 
@@ -247,6 +273,8 @@ export class AgentLoopEngine {
         permissions: tc.permissions,
         arguments: tc.arguments,
         context,
+        permissionMode: input.permissionMode,
+        riskHints: tc.riskHints,
       });
 
       if (!permDecision.allowed) {
@@ -264,12 +292,13 @@ export class AgentLoopEngine {
           conversationId,
           toolCallId: tc.id,
           title: `Approve ${tc.name}`,
-          description: `Run tool ${tc.name} with risk level ${maxRiskLevel(tc.riskLevel, permDecision.riskLevel)}`,
+          description: `Run tool ${tc.name} with arguments: ${JSON.stringify(summarizeArguments(tc.arguments))}`,
           riskLevel: maxRiskLevel(tc.riskLevel, permDecision.riskLevel),
           requestedAction: {
             skillId: tc.skillId,
             arguments: tc.arguments,
             permissions: tc.permissions,
+            toolCallId: tc.id,
           },
         });
 
@@ -283,7 +312,17 @@ export class AgentLoopEngine {
       }
     }
 
-    return this.executeToolDecision(input, context, intent, plan, decision, signal);
+    return this.executeToolDecision(
+      input,
+      context,
+      intent,
+      plan,
+      decision,
+      signal,
+      iteration,
+      accumulatedObservation,
+      taskState,
+    );
   }
 
   /** 分支 B：无需工具 — 直接 LLM 生成回复。 */
@@ -319,7 +358,12 @@ export class AgentLoopEngine {
     await this.deps.runStateManager.markStatus(runId, "completed");
     this.deps.eventBus.emit(
       "agent.run.completed",
-      { runId, assistantMessageId: response.messageId, artifacts: [], toolCalls: 0 },
+      {
+        runId,
+        assistantMessageId: response.messageId,
+        artifacts: [],
+        toolCalls: 0,
+      },
       { runId, conversationId },
     );
 
@@ -357,7 +401,12 @@ export class AgentLoopEngine {
     await this.deps.runStateManager.markStatus(runId, "completed");
     this.deps.eventBus.emit(
       "agent.run.completed",
-      { runId, assistantMessageId: response.messageId, artifacts: [], toolCalls: 0 },
+      {
+        runId,
+        assistantMessageId: response.messageId,
+        artifacts: [],
+        toolCalls: 0,
+      },
       { runId, conversationId },
     );
 
@@ -435,7 +484,14 @@ export class AgentLoopEngine {
     );
     this.deps.eventBus.emit(
       "agent.error",
-      { runId, conversationId, code: agentError.code, message: agentError.message, category: agentError.category, retryable: agentError.retryable },
+      {
+        runId,
+        conversationId,
+        code: agentError.code,
+        message: agentError.message,
+        category: agentError.category,
+        retryable: agentError.retryable,
+      },
       { runId, conversationId },
     );
 
@@ -447,6 +503,136 @@ export class AgentLoopEngine {
       toolCalls: [],
       error: agentError,
     };
+  }
+
+  /**
+   * Continue the agent loop after a tool was rejected with
+   * `continue_without_tool` strategy. Skips the rejected tool and
+   * proceeds directly to responding, letting the LLM explain the
+   * situation to the user.
+   */
+  async continueAfterRejection(
+    input: {
+      runId: string;
+      conversationId: string;
+      userId?: string;
+      rejectedToolCallId?: string;
+      originalMessage: string;
+      mode: "chat" | "agent";
+    },
+    signal: AbortSignal,
+  ): Promise<AgentLoopResult> {
+    const run = await this.deps.runStateManager.getRun(input.runId);
+    if (!run) {
+      throw Object.assign(new Error(`Unknown run: ${input.runId}`), {
+        code: "AGENT_RUN_NOT_FOUND",
+      });
+    }
+
+    const agentInput: AgentLoopInput = {
+      runId: input.runId,
+      conversationId: input.conversationId,
+      userMessageId: input.runId,
+      userId: input.userId,
+      message: input.originalMessage,
+      mode: input.mode,
+      attachments: [],
+      client: { source: "api" },
+    };
+
+    try {
+      // Rebuild context so the LLM has the full conversation
+      const context = await this.deps.contextBuilder.build(agentInput, signal);
+
+      // Build an empty observation for the skipped tool
+      const skippedObservation: AgentObservation = {
+        runId: input.runId,
+        toolCalls: input.rejectedToolCallId
+          ? [
+              {
+                id: input.rejectedToolCallId,
+                skillId: "rejected",
+                name: "Rejected tool",
+                status: "failed",
+                summary:
+                  "Tool execution was rejected by user. Continue without this tool.",
+              },
+            ]
+          : [],
+        artifacts: [],
+        summary: "Tool rejected — continuing without tool execution.",
+      };
+
+      const intent: RoutedIntent = {
+        type: "use_skill",
+        confidence: 0.5,
+        requiresPlanning: false,
+        requiresTool: false,
+        requiresApproval: false,
+        riskLevel: "low",
+        candidateSkills: [],
+        reason: "continue_without_tool after rejection",
+      };
+
+      const reflection = await this.deps.reflectionEngine.reflect(
+        { context, intent, observation: skippedObservation },
+        signal,
+      );
+
+      await this.deps.runStateManager.markStatus(input.runId, "responding");
+      const response = await this.deps.responseComposer.composeFromObservation(
+        {
+          input: agentInput,
+          context,
+          observation: skippedObservation,
+          reflection,
+        },
+        signal,
+      );
+
+      this.deps.eventBus.emit(
+        "agent.response.completed",
+        {
+          runId: input.runId,
+          conversationId: input.conversationId,
+          messageId: response.messageId,
+        },
+        { runId: input.runId, conversationId: input.conversationId },
+      );
+
+      await this.deps.runStateManager.markStatus(input.runId, "completed");
+      this.deps.eventBus.emit(
+        "agent.run.completed",
+        {
+          runId: input.runId,
+          assistantMessageId: response.messageId,
+          artifacts: [],
+          toolCalls: 0,
+        },
+        { runId: input.runId, conversationId: input.conversationId },
+      );
+
+      return {
+        runId: input.runId,
+        conversationId: input.conversationId,
+        assistantMessageId: response.messageId,
+        status: "completed",
+        artifacts: [],
+        toolCalls: [],
+      };
+    } catch (error) {
+      if (signal.aborted) {
+        await this.deps.runStateManager.markCancelled(input.runId, "aborted");
+        return {
+          runId: input.runId,
+          conversationId: input.conversationId,
+          status: "cancelled",
+          artifacts: [],
+          toolCalls: [],
+        };
+      }
+      throw error;
+    }
   }
 
   /**
@@ -484,10 +670,7 @@ export class AgentLoopEngine {
       userMessageId: approval.approvalId,
       userId: undefined,
       message: run.goal ?? approval.title ?? approval.requestedAction.skillId,
-      mode:
-        run.mode === "chat" || run.mode === "agent"
-          ? run.mode
-          : "agent",
+      mode: run.mode === "chat" || run.mode === "agent" ? run.mode : "agent",
       attachments: [],
       client: { source: "api" },
     };
@@ -610,6 +793,7 @@ export class AgentLoopEngine {
       skillId: string;
       arguments: Record<string, unknown>;
       permissions: Permission[];
+      toolCallId?: string;
     };
   }): Promise<{ id: string; status: string }> {
     if (this.deps.approvalRequestService) {
@@ -631,7 +815,11 @@ export class AgentLoopEngine {
         runId: input.runId,
         approvalId: approval.id,
         title: input.title,
+        description: input.description,
         riskLevel: input.riskLevel,
+        skillId: input.requestedAction.skillId,
+        argumentsPreview: summarizeArguments(input.requestedAction.arguments),
+        reasons: buildRiskReasons(input.riskLevel, input.requestedAction),
       },
       { runId: input.runId, conversationId: input.conversationId },
     );
@@ -654,11 +842,14 @@ export class AgentLoopEngine {
     plan: AgentPlan | undefined,
     decision: ToolDecision & { type: "use_tool" },
     signal: AbortSignal,
+    iteration = 1,
+    accumulatedObservation?: AgentObservation,
+    taskState?: AgentTaskState,
   ): Promise<AgentLoopResult> {
     const { runId, conversationId } = input;
 
     await this.deps.runStateManager.markStatus(runId, "executing");
-    const observation = await this.deps.executionOrchestrator.execute(
+    const latestObservation = await this.deps.executionOrchestrator.execute(
       {
         runId,
         context,
@@ -668,6 +859,27 @@ export class AgentLoopEngine {
       },
       signal,
     );
+    const observation = mergeObservations(
+      runId,
+      accumulatedObservation,
+      latestObservation,
+    );
+
+    // Maintain task state across iterations
+    const updatedTaskState = updateTaskState(
+      taskState,
+      observation,
+      plan,
+      intent,
+      iteration,
+    );
+
+    // Persist task state so resume/retry retains multi-turn progress
+    await this.deps.runStateManager
+      .saveTaskState(runId, updatedTaskState)
+      .catch(() => {
+        // Best effort — non-blocking
+      });
 
     await this.deps.runStateManager.markStatus(runId, "reflecting");
     const reflection = await this.deps.reflectionEngine.reflect(
@@ -676,14 +888,73 @@ export class AgentLoopEngine {
         intent,
         plan,
         observation,
+        taskState: updatedTaskState,
       },
       signal,
     );
 
+    // Apply max-iterations stop reason when the loop is forced to stop
+    const stoppedByMaxIterations =
+      reflection.nextAction === "continue" &&
+      !reflection.goalAchieved &&
+      iteration >= MAX_TOOL_ITERATIONS;
+    const effectiveReflection = stoppedByMaxIterations
+      ? {
+          ...reflection,
+          stopReason: "max_iterations" as const,
+          summary: reflection.summary
+            ? `${reflection.summary} (stopped after ${MAX_TOOL_ITERATIONS} tool iterations)`
+            : `Task interrupted after ${MAX_TOOL_ITERATIONS} tool iterations.`,
+        }
+      : reflection;
+
+    if (
+      reflection.nextAction === "continue" &&
+      !reflection.goalAchieved &&
+      iteration < MAX_TOOL_ITERATIONS
+    ) {
+      // Pass reflection's next-tool suggestions as priority skills.
+      // The ToolDecisionEngine tries these first before falling back
+      // to normal candidate matching, giving reflection a stronger
+      // influence on the next round of tool selection.
+      const nextContext = appendObservationToContext(context, observation);
+      const nextDecision = await this.decideTools(
+        input,
+        nextContext,
+        intent,
+        plan,
+        signal,
+        observation,
+        reflection.nextToolCandidates,
+      );
+
+      switch (nextDecision.type) {
+        case "use_tool":
+          return this.handleUseTool(
+            input,
+            nextContext,
+            intent,
+            plan,
+            nextDecision,
+            signal,
+            iteration + 1,
+            observation,
+            updatedTaskState,
+          );
+        case "ask_clarification":
+          return this.handleClarification(input, nextDecision, signal);
+        case "require_approval":
+          return this.handleApprovalRequired(input, nextDecision, signal);
+        case "no_tool":
+          context = nextContext;
+          break;
+      }
+    }
+
     await this.deps.runStateManager.markStatus(runId, "responding");
 
     const response = await this.deps.responseComposer.composeFromObservation(
-      { input, context, observation, reflection },
+      { input, context, observation, reflection: effectiveReflection },
       signal,
     );
 
@@ -697,6 +968,16 @@ export class AgentLoopEngine {
       { runId, conversationId },
     );
 
+    // Determine if a proactive conversation summary should be generated.
+    // Trigger when token budget is strained (>40% used) or many iterations.
+    const tokenRatio =
+      context.limits.usedTokensEstimate /
+      Math.max(1, context.limits.maxTokens);
+    const shouldForceSummary =
+      tokenRatio > 0.4 ||
+      observation.toolCalls.length >= 15 ||
+      iteration > 3;
+
     await this.writeMemories({
       input,
       context,
@@ -704,7 +985,8 @@ export class AgentLoopEngine {
       plan,
       responseMessageId: response.messageId,
       observation,
-      reflection,
+      reflection: effectiveReflection,
+      forceSummary: shouldForceSummary,
     });
 
     await this.deps.runStateManager.markStatus(runId, "completed");
@@ -789,8 +1071,133 @@ function intentFromSkillId(skillId: string): RoutedIntent["type"] {
   if (skillId.startsWith("shell.")) return "shell_operation";
   if (skillId.startsWith("memory.")) return "memory_update";
   if (skillId.startsWith("artifact.")) return "artifact_generation";
-  if (skillId.includes(":") || skillId.startsWith("automation")) return "automation_execution";
+  if (skillId.includes(":") || skillId.startsWith("automation"))
+    return "automation_execution";
   return "unknown";
+}
+
+function appendObservationToContext(
+  context: AgentContext,
+  observation: AgentObservation,
+): AgentContext {
+  const toolResults = observation.toolCalls.map((call) => ({
+    toolCallId: call.id,
+    summary: call.summary,
+    status: call.status,
+  }));
+  const toolMessages = observation.toolCalls.map((call) => ({
+    role: "tool" as const,
+    name: call.name,
+    content: `${call.name} (${call.skillId}) ${call.status}: ${call.summary}`,
+    metadata: {
+      toolCallId: call.id,
+      skillId: call.skillId,
+      status: call.status,
+    },
+  }));
+
+  return {
+    ...context,
+    messages: [...context.messages, ...toolMessages],
+    toolResults: [...context.toolResults, ...toolResults],
+    artifacts: [
+      ...context.artifacts,
+      ...observation.artifacts.map((artifact) => ({
+        id: artifact.id,
+        name: artifact.name,
+        type: artifact.type,
+        summary: artifact.name,
+      })),
+    ],
+  };
+}
+
+function mergeObservations(
+  runId: string,
+  previous: AgentObservation | undefined,
+  latest: AgentObservation,
+): AgentObservation {
+  if (!previous) return latest;
+
+  return {
+    runId,
+    toolCalls: [...previous.toolCalls, ...latest.toolCalls],
+    artifacts: [...previous.artifacts, ...latest.artifacts],
+    summary: [previous.summary, latest.summary].filter(Boolean).join("\n"),
+  };
+}
+
+/**
+ * Update AgentTaskState with the results of the latest tool execution.
+ * Accumulates completed steps, gathered facts, and tracks open questions
+ * across iterations to improve reflection accuracy.
+ */
+function updateTaskState(
+  previous: AgentTaskState | undefined,
+  observation: AgentObservation,
+  plan: AgentPlan | undefined,
+  intent: RoutedIntent,
+  iteration: number,
+): AgentTaskState {
+  const goal = previous?.goal ?? plan?.goal ?? intent.reason ?? "Complete user request";
+
+  // Track completed steps
+  const completedSteps = [...(previous?.completedSteps ?? [])];
+  const pendingSteps = [...(previous?.pendingSteps ?? [])];
+
+  // On first iteration, initialize pending steps from plan
+  if (!previous && plan) {
+    for (const step of plan.steps) {
+      if (!completedSteps.includes(step.id)) {
+        pendingSteps.push(step.id);
+      }
+    }
+  }
+
+  // Mark tool steps as completed based on observation
+  for (const tc of observation.toolCalls) {
+    const stepId = `tool:${tc.skillId}`;
+    if (tc.status === "completed") {
+      if (!completedSteps.includes(stepId)) {
+        completedSteps.push(stepId);
+      }
+      pendingSteps.splice(pendingSteps.indexOf(stepId), 1);
+    }
+  }
+
+  // Accumulate gathered facts from tool results
+  const gatheredFacts: Record<string, unknown> = {
+    ...(previous?.gatheredFacts ?? {}),
+  };
+  for (const tc of observation.toolCalls) {
+    if (tc.structured) {
+      const totalResults =
+        tc.structured.totalResults ??
+        (Array.isArray(tc.structured.candidates)
+          ? (tc.structured.candidates as unknown[]).length
+          : Array.isArray(tc.structured.results)
+            ? (tc.structured.results as unknown[]).length
+            : undefined);
+      if (totalResults !== undefined) {
+        gatheredFacts[`${tc.skillId}.totalResults`] = totalResults;
+      }
+      if (tc.structured.summary) {
+        gatheredFacts[`${tc.skillId}.summary`] = tc.structured.summary;
+      }
+    }
+  }
+
+  // Track open questions from reflection's missing info
+  const openQuestions = [...(previous?.openQuestions ?? [])];
+
+  return {
+    goal,
+    completedSteps,
+    pendingSteps,
+    gatheredFacts,
+    openQuestions,
+    iteration,
+  };
 }
 
 function maxRiskLevel(left: RiskLevel, right: RiskLevel): RiskLevel {
@@ -801,4 +1208,54 @@ function maxRiskLevel(left: RiskLevel, right: RiskLevel): RiskLevel {
     critical: 3,
   };
   return order[left] >= order[right] ? left : right;
+}
+
+/**
+ * Summarize tool arguments for display in approval UI.
+ * Truncates long values to keep the approval card readable.
+ */
+function summarizeArguments(
+  args: Record<string, unknown>,
+): Record<string, unknown> {
+  const summarized: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(args)) {
+    if (typeof value === "string" && value.length > 200) {
+      summarized[key] = value.slice(0, 200) + "...";
+    } else if (Array.isArray(value) && value.length > 5) {
+      summarized[key] = `[${value.length} items]`;
+    } else {
+      summarized[key] = value;
+    }
+  }
+  return summarized;
+}
+
+/**
+ * Build human-readable risk reasons for approval events.
+ */
+function buildRiskReasons(
+  riskLevel: RiskLevel,
+  action: { skillId: string; permissions?: Permission[] },
+): string[] {
+  const reasons: string[] = [];
+  if (riskLevel === "high" || riskLevel === "critical") {
+    reasons.push(`Risk level: ${riskLevel}`);
+  }
+  const perms = action.permissions ?? [];
+  if (perms.includes("filesystem.write") || perms.includes("filesystem.delete")) {
+    reasons.push("Writes to filesystem");
+  }
+  if (perms.includes("shell.execute")) {
+    reasons.push("Executes shell commands");
+  }
+  if (perms.includes("network.request")) {
+    reasons.push("Makes network requests");
+  }
+  if (perms.includes("external.send")) {
+    reasons.push("Sends data externally");
+  }
+  if (reasons.length === 0) {
+    reasons.push("Low-risk operation");
+  }
+  return reasons;
 }
