@@ -470,10 +470,20 @@ export function projectToolResult(
   options?: {
     maxCandidates?: number;
     fields?: string[];
+    /** Projection hints from skill manifest (§P2-9). */
+    projectionHints?: {
+      summaryFields?: string[];
+      identityFields?: string[];
+      sourceUrlFields?: string[];
+      confidenceFields?: string[];
+    };
   },
 ): Record<string, unknown> {
+  const hints = options?.projectionHints;
   const maxCandidates = options?.maxCandidates ?? 5;
-  const fields = options?.fields ?? [
+
+  // Use projection hints when available, otherwise fall back to defaults
+  const summaryFields = hints?.summaryFields ?? [
     "id",
     "title",
     "price",
@@ -481,6 +491,8 @@ export function projectToolResult(
     "detailUrl",
     "estimatedProfitRmb",
   ];
+  const identityFields = hints?.identityFields ?? ["id", "url", "sku"];
+  const confidenceFields = hints?.confidenceFields ?? [];
 
   const candidates = Array.isArray(toolResult.candidates)
     ? toolResult.candidates.slice(0, maxCandidates)
@@ -494,12 +506,33 @@ export function projectToolResult(
 
   if (candidates) {
     projected.candidates = candidates.map((item: Record<string, unknown>) => {
+      // Pick summary fields for display
       const picked: Record<string, unknown> = {};
-      for (const field of fields!) {
+      for (const field of summaryFields) {
         if (field in item) picked[field] = item[field];
       }
-      // Always include id if present
-      if (item.id && !("id" in picked)) picked.id = item.id;
+      // Always include identity fields for provenance linking
+      for (const field of identityFields) {
+        if (field in item && !(field in picked)) picked[field] = item[field];
+      }
+      // Extract provenance source URLs
+      if (hints?.sourceUrlFields) {
+        for (const field of hints.sourceUrlFields) {
+          if (field in item && typeof item[field] === "string") {
+            picked["_source"] = item[field];
+            break;
+          }
+        }
+      }
+      // Extract confidence if available
+      if (confidenceFields.length > 0) {
+        for (const field of confidenceFields) {
+          if (field in item) {
+            picked["_confidence"] = item[field];
+            break;
+          }
+        }
+      }
       return picked;
     });
   }

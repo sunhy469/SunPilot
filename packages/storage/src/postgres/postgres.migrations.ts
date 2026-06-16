@@ -21,6 +21,7 @@ const migrationFiles = [
   "014_pgvector_embeddings.sql",
   "015_model_calls_metadata.sql",
   "016_tool_call_metadata.sql",
+  "017_agent_trace_plan.sql",
 ];
 const migrationLockKey = 7_290_317_373_001;
 

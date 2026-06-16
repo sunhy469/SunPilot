@@ -156,7 +156,7 @@ describe("createAgentLoopService", () => {
     ]);
     await expect(db.modelCalls.listByRunId(result.runId)).resolves.toEqual([
       expect.objectContaining({
-        provider: "test",
+        provider: "router:response_composition",
         model: "test",
         purpose: "response.compose",
         status: "completed",
@@ -254,7 +254,7 @@ describe("createAgentLoopService", () => {
     ]);
     await expect(db.modelCalls.listByRunId(result.runId)).resolves.toEqual([
       expect.objectContaining({
-        provider: "test",
+        provider: "router:response_composition",
         model: "test",
         purpose: "response.compose",
         status: "completed",

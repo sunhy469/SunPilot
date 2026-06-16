@@ -1,352 +1,418 @@
 # Agent 架构下一步完善清单
 
-更新时间：2026-06-15  
+更新时间：2026-06-16
 依据文档：`developer_docs/guides/agent_architecture_comparison.md`
+参考蓝图：`developer_docs/guides/agent_core_architecture_implementation.md`
 
 ## 总体判断
 
-`agent_architecture_comparison.md` 的结论不是 SunPilot 要照搬一个“大而全”的 Agent OS，而是要沿着当前“单 Agent + 多 Skill + 深关键路径”的方向继续补强。
+SunPilot 当前已经完成了单 Agent runtime 的大部分骨架和主链路接线。旧清单里若干“接入 X 模块”的任务已经发生变化：
 
-当前核心闭环已经成立：
+- `PlanValidator` / `Replanner` 已注入 `AgentLoopEngine`。
+- `ToolRetriever` 已注入 `ToolDecisionEngine`。
+- `ModelRouter` 已通过 purpose provider 接入多个 LLM 调用点。
+- `PromptInjectionDetector` 已扫描历史 tool results 与最新 observation。
+- `ToolSandbox` / `TaskScopedPermissionManager` 已在工具执行前参与校验。
+- `TraceManager` 已在 loop 中创建部分 phase span。
+
+所以下一步不应继续按“模块是否存在”推进，而应按“真实闭环是否成立”推进：
 
 ```text
-context -> intent -> plan/tool decision -> execute -> reflect -> respond -> memory
+真实 AgentService eval
+  -> 可审计 plan/tool/model/trace
+  -> 可恢复 rejection/sandbox/injection 路径
+  -> 可度量 context/memory/tool 质量
+  -> MCP-compatible tool metadata
 ```
 
-下一步最值得完善的不是 Multi-Agent、DAG 工作流或复杂后台调度，而是让现有单 Agent 在复杂任务、长上下文、工具规模增长、生产安全和行为回归上更稳定。
+## P0：先建立真实可靠性闭环
 
-优先级建议：
+### 1. 用真实 AgentService 替换 Golden Task mock executor
 
-1. 增强 Planning：补 Plan Validator 与 Replanner。
-2. 建立 Evaluation：用 Golden Tasks 固化 Agent 行为。
-3. 增加 Model Router：拆分分类、参数生成、总结、embedding 等模型职责。
-4. 强化安全边界：补 prompt injection 检测、sandbox 和 task-scoped 权限。
-5. 扩展工具召回：为 MCP/大量 Skill 场景补粗召回、动态 Top-K、工具分组。
-6. 完善长期记忆：补真实 embedding provider、矛盾记忆关系、记忆质量评估。
+当前状态：
 
-## 1. Planning 增强
+- `evals/agent/core-golden-tasks.ts` 已有 7 个核心任务。
+- `evals/agent/golden-task-runner.ts` 已有 runner 和断言逻辑。
+- `evals/agent/golden-tasks.test.ts` 当前使用 mock executor，文件注释明确它只验证 eval harness，不验证真实 agent 行为。
+- 根 `package.json` 没有 `eval:agent` 脚本。
 
-### 当前状态
+需要完成：
 
-SunPilot 已有 `RuleBasedPlanner`、plan steps、ReAct loop 和 reflection continue/respond 机制，但规划仍偏轻量。复杂多步骤任务主要依赖模型自我判断和 reflection，而不是结构化的计划验证与重规划。
+- 增加真实 adapter，例如 `evals/agent/agent-service-adapter.ts`：
+  - 通过 `createAgentLoopService()` 组装真实 `AgentService`。
+  - 使用隔离 Postgres test database 或轻量 test database context。
+  - 注册 deterministic test skills，覆盖 image search、web fetch、shell/filesystem、failure/retry、missing param。
+  - 使用 deterministic fake LLM provider，按 purpose 返回稳定输出。
+  - 捕获 events、tool_calls、model_calls、context snapshot、assistant message。
+- 修改 `golden-tasks.test.ts`：
+  - 默认跑 lightweight mock harness 可以保留。
+  - 新增 `GOLDEN_TASKS_REAL_AGENT=true` 分支跑真实 adapter。
+- 增加脚本：
+  - `pnpm eval:agent`
+  - 可选 `pnpm eval:agent:real`
+- 输出报告：
+  - `evals/reports/agent-golden-<timestamp>.json`
+  - 控制台摘要包含失败规则、实际 tool sequence、最终回答、关键事件。
 
-### 需要完善
+验收标准：
 
-- 增加 `PlanValidator`：
-  - 检查 plan step 是否缺目标、缺输入、缺依赖。
-  - 检查是否存在循环依赖。
-  - 检查 step risk 与 permission mode 是否匹配。
-  - 检查需要审批的步骤是否提前标注。
-  - 检查 plan 是否能在当前工具集合中执行。
-- 增加结构化 `Replanner`：
-  - 工具失败后生成替代步骤。
-  - 用户修改目标后重写后续步骤。
-  - 工具结果不满足预期时补充验证步骤。
-  - 缺少参数时将澄清问题纳入 plan state。
-- 扩展 plan step 状态：
+- P0 golden tasks 能通过真实 `AgentService` 一键运行。
+- 能捕捉以下回归：
+  - 未等工具结果就回答。
+  - 缺参数时不澄清。
+  - 工具失败后编造。
+  - prompt injection 覆盖系统规则。
+  - 用户拒绝审批后静默停止。
+- CI 至少跑 mock harness；真实 harness 可先作为本地/夜间门禁。
+
+### 2. 持久化 trace、plan 和 replan evidence
+
+当前状态：
+
+- `TraceManager` 是内存态，已在 loop 中覆盖 context、intent、tool execution、reflection、response 等 span。
+- `agent.plan.created/validated/revised` 事件存在。
+- plan step 有 `completionEvidence` 类型，执行后会写入内存中的 plan 对象。
+- run context 已能保存 `taskState`。
+
+需要完成：
+
+- 增加 trace persistence：
+  - 新表 `agent_traces` / `agent_trace_spans`，或先存入 events/model_calls/tool_calls metadata。
+  - 记录 `traceId`、`runId`、`spanKind`、duration、error、event sequences、modelCallIds、toolCallIds。
+- 增加 plan snapshot persistence：
+  - 在 `agent.plan.created` 后保存 plan JSON。
+  - 在 `agent.plan.revised` 后保存 revised plan 与 diff summary。
+  - 每个 step 更新 status/evidence 时保存 snapshot 或 append event。
+- 将 evidence 绑定从 `skillId` 提升到更稳定的 step identity：
+  - tool call 创建时带 `planStepId`。
+  - tool call metadata 写 `planStepId`、argumentSources、retrievalReason、repairHistory。
+  - 同一 skill 多次出现在 plan 中时按 step id 区分。
+
+验收标准：
+
+- 任意 run 能查询到：原始 plan、validated result、revised plan、每个 step 的 tool evidence。
+- 同一 skill 多次调用不会互相覆盖 step evidence。
+- trace 能从一个 phase 跳到相关 event/model_call/tool_call。
+- approval resume 后 trace/plan evidence 不断链。
+
+### 3. 把安全拒绝变成可恢复 observation
+
+当前状态：
+
+- sandbox 和 scoped permission 已进入 `handleUseTool`。
+- sandbox 拒绝目前会抛 `AGENT_SANDBOX_BLOCKED`，最终 run failed。
+- prompt injection blocked 目前复用 `agent.error`，并改写 tool summary。
+
+需要完成：
+
+- 定义安全 observation 结果，而不是直接内部失败：
+  - `SANDBOX_DENIED`
+  - `PROMPT_INJECTION_BLOCKED`
+  - `TASK_SCOPE_REAUTH_REQUIRED`
+- sandbox 拒绝时：
+  - 创建/更新对应 tool_call 为 failed。
+  - metadata 写 `{ safety: { deniedBy: "sandbox", reason, mode } }`。
+  - 进入 reflection/replanner，让 agent 解释或选择替代路径。
+- prompt injection blocked 时：
+  - 不让 blocked 内容进入最终事实依据。
+  - metadata 标记 `trust: "untrusted"`、`blocked: true`、`matches`。
+  - 增加独立事件 `agent.safety.injection_detected` 或扩展现有 error payload。
+- scoped permission 拒绝/需重审时：
+  - 给用户可读的审批原因。
+  - 参数变化导致重新审批时展示 diff summary。
+
+验收标准：
+
+- 高危 shell/filesystem/network 被 sandbox 拦截后，run 不以内部错误结束。
+- 用户能看到“为什么没执行”和“下一步可怎么做”。
+- Replanner 可基于安全拒绝生成替代 plan 或解释性 response。
+- Golden Task 覆盖 sandbox denial 和 prompt injection。
+
+## P1：提高可观测性和工具治理
+
+### 4. 统一 ToolRetriever 决策 metadata
+
+当前状态：
+
+- `ToolRetriever` 已参与召回。
+- `ToolDecisionEngine` 的 reason 中会出现部分 score 信息。
+- tool call metadata 已有数据库字段，但 retrieval 细节没有系统写入。
+
+需要完成：
+
+- 在 `ToolRetriever.retrieve()` 返回结构中稳定暴露：
+  - query
+  - topK
+  - selected skill
+  - candidate scores
+  - matchReasons
+  - fallbackUsed/fallbackReason
+  - historyBoost/penalty
+  - permission/risk score
+- `ToolDecisionEngine` 创建 `PlannedToolCall` 时写入：
+  - `retrievalMetadata`
+  - `decisionPath`
+  - `llmSelectionUsed`
+  - `clarificationReason`
+- `ExecutionOrchestrator` 将这些字段落到 `tool_calls.metadata`。
+- 增加调试事件或 trace span metadata：
+  - 不必把所有候选发给 UI，但要能从 DB 复盘。
+
+验收标准：
+
+- 工具误选时能看到 Top-K 候选和选中原因。
+- 100+ skill 模拟下，LLM semantic selection 只接收小候选集。
+- 相似工具分数接近时会澄清，而不是随机选。
+
+### 5. 统一 ModelRouter 与 model_calls 记录
+
+当前状态：
+
+- `ModelRouter` 有内部 `ModelCallRecord` 和 stats。
+- `ResponseComposer` 会写 DB `model_calls`，purpose 为 `response.compose`。
+- intent/tool argument/reflection/replanning 等模型调用经过 purpose provider，但不一定写入 DB `model_calls`。
+
+需要完成：
+
+- 让 ModelRouter 支持外部 recorder：
+  - 每次 routed call 成功/失败后写 `model_calls`。
+  - 记录 purpose、model、provider、latency、token estimate、fallbackUsed、fallbackReason。
+- 对齐 purpose 命名：
+  - `intent_classification`
+  - `tool_argument_generation`
+  - `planning`
+  - `reflection`
+  - `response_composition`
+  - `summary_compression`
+  - `replanning`
+- ResponseComposer 不再单独使用不一致 purpose，或通过 adapter 统一。
+- trace span metadata 写入相关 modelCallIds。
+
+验收标准：
+
+- 每个 LLM 调用都有 DB model_call 记录。
+- 可以按 purpose 汇总 token、latency、error、fallback。
+- 单模型 router 与未来 multi-model router 使用同一审计结构。
+
+### 6. 补齐 trace viewer/API
+
+当前状态：
+
+- TraceManager 可 `exportTrace()` / `summarizeTrace()`，但未暴露 API/UI。
+- events、model_calls、tool_calls、run_status_history 已有持久化基础。
+
+需要完成：
+
+- daemon 增加查询接口：
+  - `GET /api/agent/runs/:runId/trace`
+  - 或 JSON-RPC `agent.trace.get`
+- 返回合并视图：
+  - run status timeline
+  - event sequence
+  - spans
+  - model calls
+  - tool calls
+  - approvals
+  - plan revisions
+- Web UI 增加 run 调试面板：
+  - phase timeline
+  - tool call list
+  - model call cost/latency
+  - plan/replan diff
+  - safety warnings
+
+验收标准：
+
+- 从一个异常回答能定位到对应 context、tool result、reflection、response model call。
+- trace viewer 不依赖进程内存，daemon 重启后仍可看历史 run。
+- 工具失败、sandbox 拒绝、approval reject 都能在 timeline 中看清。
+
+## P2：补质量闭环
+
+### 7. Context trust 与 context eval
+
+当前状态：
+
+- ContextBuilder 以 chunk priority 和 token budget 为主。
+- injection detector 会改写部分 tool result 文本。
+- 没有统一 trust/source/authority metadata。
+
+需要完成：
+
+- 扩展 `ContextChunk.metadata`：
+  - `trust: system | user | memory | tool | external | untrusted`
+  - `sourceUri`
+  - `generatedAt`
+  - `expiresAt`
   - `blocked`
-  - `skipped`
-  - `waiting_approval`
-  - `needs_clarification`
-  - `verified`
-- 将 `taskState` 与 plan step 更紧密关联，避免 reflection 只以自然语言判断任务是否完成。
-
-### 验收标准
-
-- 工具失败后不会直接早停，可以生成替代计划或明确说明不可继续。
-- 用户中途改变目标时，已完成步骤保留，未完成步骤重排。
-- 复杂任务能显示哪些 step 已完成、哪些 step 被跳过、哪些 step 需要用户输入。
-- Replanner 的行为有端到端测试覆盖。
-
-## 2. Evaluation 框架
-
-### 当前状态
-
-SunPilot 目前主要依赖代码审查、手动测试和局部单元测试判断 Agent 行为。Agent loop、工具调用、审批、上下文压缩、记忆召回等行为缺少稳定的 Golden Task 回归评估。
-
-### 需要完善
-
-- 建立 `evals/agent` 目录或独立测试包。
-- 定义 Golden Task 数据格式：
-  - 用户输入。
-  - 初始会话历史。
-  - 附件。
-  - 可用工具集合。
-  - 权限模式。
-  - 期望工具调用。
-  - 期望最终回答约束。
-  - 禁止行为。
-- 增加核心评估集：
-  - 图片/附件搜索同款货源必须等待工具结果。
-  - 工具参数缺失时必须澄清或 repair，不能伪造结果。
-  - 用户拒绝工具后必须继续完成可完成部分。
-  - summary 覆盖旧消息后不能丢失关键约束。
-  - memory recall 必须召回用户长期偏好。
-  - prompt injection 工具结果不能覆盖系统规则。
-- 增加评估报告：
-  - pass/fail。
-  - 实际工具调用序列。
-  - 实际上下文快照摘要。
-  - 模型调用次数和 token 消耗。
-  - 失败原因分类。
-
-### 验收标准
-
-- 每次修改 Agent Core 后能运行固定 Golden Task。
-- 能检测“LLM 提前回答、没有等待工具结果”的回归。
-- 能检测“工具返回为空却编造结果”的回归。
-- 能检测“上下文压缩丢关键约束”的回归。
-
-## 3. Model Router
-
-### 当前状态
-
-SunPilot 使用单一 `LlmProvider` 承担意图识别、工具参数生成、反思、总结、最终回答等职责。embedding 服务如果没有真实 provider，会回退到关键词/哈希向量。
-
-### 需要完善
-
-- 增加 `ModelRouter`：
-  - intent classification 使用低成本模型。
-  - tool argument generation 使用结构化输出能力强的模型。
-  - reflection 使用稳定推理模型。
-  - response composition 使用主对话模型。
-  - summary/compression 使用低成本长上下文模型。
-  - embedding 使用专用 embedding provider。
-- 为每类模型调用记录：
-  - model name。
-  - purpose。
-  - latency。
-  - token usage。
-  - fallback reason。
-- 增加 fallback 策略：
-  - 小模型失败时回退主模型。
-  - embedding provider 不可用时显式进入 degraded mode。
-  - 结构化输出失败时进入 repair path。
-
-### 验收标准
-
-- 不同任务类型能路由到不同模型配置。
-- embedding provider 是否真实启用在日志和 metadata 中可见。
-- 模型失败时不会让整个 run 无声失败。
-- token 成本和延迟能按 purpose 统计。
-
-## 4. 工具召回与 Tool System 扩展
-
-### 当前状态
-
-SunPilot 的工具系统在参数生成和 repair 上很强，但工具召回更适合当前工具数量较少的场景。如果未来接入 MCP、大量第三方工具或更多 Skill，需要补蓝图里的粗召回和动态 Top-K。
-
-### 需要完善
-
-- 增加工具粗召回层：
-  - keyword match。
-  - capability/category match。
-  - permission/risk match。
-  - embedding similarity。
-  - recent success/failure history。
-- 增加动态 Top-K：
-  - casual chat：0。
-  - simple tool action：1-3。
-  - multi-step task：3-8。
-  - ambiguous task：优先澄清。
-- 增加工具去重和分组：
-  - 同类工具只保留最适合的候选。
-  - 同一 MCP server 的多个相似工具做 group 展示。
-  - 降低模型看到过多近似工具的概率。
-- 强化 Tool Manifest：
-  - 输入 schema 完整度。
-  - 输出 schema。
-  - side effects。
-  - idempotency。
-  - timeout/retry policy。
-  - examples。
-
-### 验收标准
-
-- 工具数量增加到 100+ 时，模型仍只看到少量高相关工具。
-- 不会因为相似工具过多导致误选。
-- Top-K 大小随 intent 和 task complexity 自动变化。
-- 工具选择原因可追踪。
-
-## 5. 安全与 Guardrails
-
-### 当前状态
-
-SunPilot 已有 risk classifier、permission policy、approval gate、secret redaction。主要缺口是 prompt injection 检测、工具 sandbox 和更细粒度的 task-scoped 权限。
-
-### 需要完善
-
-- 增加 prompt injection detector：
-  - 对网页内容、工具结果、附件解析文本做不可信标记。
-  - 检测“忽略之前指令”“泄露系统提示”“调用危险工具”等模式。
-  - 将检测结果写入 context block metadata。
-- 增加工具 sandbox：
-  - 文件系统访问限制。
-  - shell 命令白名单/黑名单。
-  - 网络访问控制。
-  - 超时和资源限制。
-- 增加 task-scoped permission：
-  - 权限只对当前 run 或当前 plan step 生效。
-  - 用户批准某工具不等于批准所有同类工具。
-  - 高风险工具必须重新确认。
-- 增强审计：
-  - 记录审批原因。
-  - 记录被拒绝工具后 agent 的替代行动。
-  - 记录危险输入被拦截的原因。
-
-### 验收标准
-
-- 不可信工具结果不能覆盖 system/developer/user 约束。
-- 高风险 shell/file/network 操作必须进入审批或被阻止。
-- 用户批准范围不会泄漏到无关任务。
-- 审计日志能还原一次危险操作为什么被允许或拒绝。
-
-## 6. 长期记忆与上下文质量
-
-### 当前状态
-
-SunPilot 已有 memory writer、dedup、secret redaction、conversation summary、messageRange、hybrid + pure vector recall。下一步重点不是再加更多记忆类型，而是提升检索质量、矛盾处理和摘要可靠性。
-
-### 需要完善
-
-- 接入真实 embedding provider。
-- 为 message、memory、summary 记录 embedding model 和维度。
-- 补齐 user/system 消息 embedding。
-- 增加 contradiction relation：
-  - `supersedes`
-  - `contradicts`
-  - `resolvedBy`
-- 增加 memory quality score：
-  - 来源可信度。
-  - 最近使用时间。
-  - 是否被用户显式确认。
-  - 是否与当前任务相关。
-- 强化 summary stale detection：
-  - 新消息改变目标时标记 stale。
-  - 工具结果改变事实时标记 stale。
-  - 用户纠正信息时标记 stale。
-
-### 验收标准
-
-- 长对话压缩后仍能保留用户目标、限制、工具证据和未完成事项。
-- 新偏好能覆盖旧偏好，而不是同时召回互相冲突的信息。
-- 语义召回质量可通过 evals 验证。
-- fallback embedding 状态明确可见。
-
-## 7. Tracing 与可观测性
-
-### 当前状态
-
-SunPilot 已有 model_calls、context snapshot、events、tool_calls metadata，但缺少统一 trace/span 视角。
-
-### 需要完善
-
-- 增加 trace id，贯穿 run、model call、tool call、approval、memory write。
-- 定义 span：
-  - context_building。
-  - intent_routing。
-  - planning。
-  - tool_deciding。
-  - tool_executing。
-  - reflecting。
-  - responding。
-  - memory_writing。
-- 建立 trace viewer 或调试导出：
-  - 每一步耗时。
-  - 输入摘要。
-  - 输出摘要。
-  - 错误和 retry。
-  - token usage。
-- 对关键事件建立指标：
-  - 工具调用成功率。
-  - 参数 repair 率。
-  - 审批通过/拒绝率。
-  - 早停率。
-  - memory 命中率。
-
-### 验收标准
-
-- 一次异常回答可以追溯到具体 context、tool result、reflection 或 memory recall。
-- 能统计哪些工具最容易参数失败。
-- 能判断成本主要花在意图识别、反思、总结还是最终回答。
-
-## 8. 前端对话体验
-
-### 当前状态
-
-架构比较文档主要看后端 Agent Core，但 SunPilot 的关键用户体验是对话页。前端需要严格遵守：用户消息、图片、附件发出后立即响应，所有后端请求都在背后默默完成。
-
-### 需要完善
-
-- 发送消息后立即插入 user bubble。
-- 立即插入 assistant pending bubble。
-- 附件选择后立即展示本地 pending 附件。
-- 上传、run 创建、工具调用、最终回答分离状态，但视觉上保持连续等待。
-- 失败后保留原消息和附件，允许重试。
-- 不展示 `AgentTimeline` 到主对话界面。
-
-### 验收标准
-
-- 慢网络下用户点击发送后 100ms 内看到本地反馈。
-- 图片上传未完成时，也能看到消息和附件 pending 状态。
-- 后端工具调用耗时较长时，assistant pending 不消失。
-- 上传失败不会丢失用户输入。
-
-## 不建议近期投入的方向
-
-以下方向在架构比较文档中属于蓝图能力，但不应作为近期优先级：
-
-- Multi-Agent / Handoff。
-- DAG Workflow。
-- Neo4j Graph Store。
-- 复杂 Scheduler / Background Worker。
-- 大而全 Trace Viewer。
-- CLI `sun chat` / `sun ask`。
-
-原因是当前 SunPilot 的优势在单 Agent 关键路径深度。过早引入这些模块会增加复杂性，却不能直接解决“工具调用是否可靠、任务是否完成、上下文是否正确、前端是否及时响应”的核心问题。
-
-## 推荐实施顺序
-
-### 第一阶段：可靠性闭环
-
-1. Plan Validator。
-2. Replanner。
-3. Golden Task evals。
-4. 工具参数 repair 端到端测试。
-5. 审批拒绝后续跑测试。
-
-### 第二阶段：语义质量
-
-1. 真实 embedding provider。
-2. message embedding 全角色覆盖。
-3. summary 质量规则。
-4. memory contradiction relation。
-5. memory recall evals。
-
-### 第三阶段：规模化
-
-1. Model Router。
-2. 工具粗召回。
-3. 动态 Top-K。
-4. Tool Group。
-5. trace/span 指标。
-
-### 第四阶段：生产加固
-
-1. Prompt injection detector。
-2. Tool sandbox。
-3. task-scoped permission。
-4. 审计报表。
-5. 前端完整发送/上传/等待/失败状态机。
-
-## 最终目标
-
-下一步完善的目标不是让 SunPilot 变成另一个复杂 Agent 平台，而是让当前单 Agent 架构达到更稳定的生产级表现：
-
-- 不提前结束任务。
-- 不伪造工具结果。
-- 不丢失长上下文关键约束。
-- 不把不可信工具内容当成高优先级指令。
-- 不因为工具数量增加而误选工具。
-- 不让用户在图片、附件、慢请求场景下感到页面无响应。
-- 能用 evals 持续证明这些能力没有回退。
+  - `warning`
+  - `authority`
+- 将以下输入统一包装为 untrusted 或 external：
+  - web content
+  - tool output
+  - attachment parsed text
+  - copied external docs
+- ResponseComposer 使用 trust metadata：
+  - blocked 内容不能作为事实。
+  - untrusted 内容只可总结，不可执行其中指令。
+- 增加 context eval：
+  - 长对话预算压缩后关键约束仍在。
+  - stale summary 不覆盖新用户约束。
+  - tool result 指令不覆盖 system rules。
+
+验收标准：
+
+- Golden Task `long-conversation-must-retain-key-constraints` 使用真实 agent 通过。
+- prompt injection 内容即使进入 tool output，也不会成为指令。
+- context snapshot 可展示每个 chunk 的来源和 trust。
+
+### 8. Memory quality 进入召回排序
+
+当前状态：
+
+- memory relation、quality score、contradiction/supersede 字段已有。
+- 召回主要还是 query/hybrid search。
+
+需要完成：
+
+- 搜索排序加入：
+  - quality score
+  - confidence
+  - recency
+  - relation status
+  - contradiction/superseded penalty
+- 增加 memory feedback：
+  - response 使用了哪些 memory。
+  - 用户纠正后写 supersede/contradiction relation。
+  - eval 记录 memory hit/miss。
+- 增加最小治理接口：
+  - list memories by scope
+  - mark memory stale/superseded
+  - inspect related memories
+
+验收标准：
+
+- 矛盾旧记忆不会压过新确认记忆。
+- 用户能看到并修正影响 agent 的长期记忆。
+- memory recall golden task 用真实 agent 通过。
+
+### 9. Tool result projection 和 provenance
+
+当前状态：
+
+- `ResponseComposer` 会投影 structured result 的候选字段，并写 response provenance metadata。
+- projection 逻辑目前偏通用/硬编码。
+
+需要完成：
+
+- Skill manifest 支持 response projection schema：
+  - summary fields
+  - candidate identity fields
+  - source URL fields
+  - confidence fields
+- ResponseComposer 根据 tool metadata 做 projection。
+- 每个最终回答段落可追溯到 toolCallIds/candidateIds/source fields。
+- 对 failed/partial/warned tool result 使用不同输出策略。
+
+验收标准：
+
+- 用户看到的商品/数据/文件结果能追溯到具体 tool call。
+- 工具失败时回答不会混成成功结果。
+- 大 JSON tool output 不会直接塞给模型。
+
+## P3：生态兼容与产品化
+
+### 10. Skill manifest 对齐 MCP tool metadata
+
+当前状态：
+
+- Skill manifest 是本地工具定义。
+- MCP client/server 尚未实现。
+- ToolRetriever 已具备大工具池召回基础。
+
+需要完成：
+
+- 扩展 Skill capability metadata：
+  - input schema
+  - output schema
+  - side effects
+  - idempotency
+  - examples
+  - annotations
+  - trust/risk hints
+  - timeout/retry policy
+- 增加 MCP adapter 设计：
+  - MCP tool -> SkillSummary
+  - Skill capability -> MCP tool
+  - MCP resources/prompts 暂先只做只读 discovery，不进入执行主链路。
+- ToolRetriever 必须是 MCP tools 进入模型前的 mandatory funnel。
+
+验收标准：
+
+- 可接入一个简单 MCP server，并把 tool metadata 纳入 ToolRetriever。
+- 大量 MCP tools 下仍只给模型 Top-K。
+- 本地 Skill 与 MCP tool 使用同一 permission/sandbox/trace/eval 结构。
+
+### 11. 最小 run debug UI
+
+当前状态：
+
+- Web 已有 agent events 的基础消费。
+- 还没有完整 run/debug 视图。
+
+需要完成：
+
+- 在现有 chat 页面或调试页展示：
+  - run status
+  - plan steps
+  - selected tools
+  - approval requests
+  - safety warnings
+  - trace timeline
+  - final response provenance
+- 不做复杂 BI，先做工程调试可用。
+
+验收标准：
+
+- 开发者无需查 DB 就能判断一次 run 为什么走到某个回答。
+- Golden Task 失败能链接到对应 run debug 信息。
+
+## 暂不建议做
+
+### Multi-Agent / Handoff
+
+暂不建议近期做：
+
+- 多 agent 辩论。
+- manager/worker crew。
+- agent handoff。
+- 通用 DAG workflow runtime。
+- 长期后台 autonomous scheduler。
+
+原因：
+
+- 当前单 Agent 还没有真实 eval、trace、safety、memory quality 闭环。
+- 多 Agent 会放大工具误选、安全绕过、trace 难度和 token 成本。
+- SunPilot 当前产品主场景是本地业务 agent + skills，不需要先进入多 Agent 复杂度。
+
+进入 multi-agent 的前置条件：
+
+- 真实 Golden Tasks 稳定通过。
+- trace/plan/tool evidence 可持久化回放。
+- sandbox/injection/permission 全路径可测。
+- 单 Agent 在复杂多步骤任务中仍有明确不可解瓶颈。
+
+## 推荐执行顺序
+
+```text
+P0-1 Real Golden Task harness
+  -> P0-2 trace/plan/evidence persistence
+  -> P0-3 safety denial as recoverable observation
+  -> P1-4 tool decision metadata
+  -> P1-5 model call unification
+  -> P1-6 trace viewer/API
+  -> P2 context/memory/provenance quality
+  -> P3 MCP metadata compatibility
+```
+
+一句话：现在不是继续堆 Agent 概念，而是把已经接上线的 Agent Core 变成可测、可审计、可恢复、可解释的系统。

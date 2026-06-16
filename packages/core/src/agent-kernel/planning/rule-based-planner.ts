@@ -39,6 +39,7 @@ export class RuleBasedPlanner implements Planner {
       availableSkillIds.has(skillId),
     );
 
+    const now = new Date().toISOString();
     if (intent.requiresTool && matchedSkillIds.length > 0) {
       for (const skillId of matchedSkillIds) {
         const skill = context.availableSkills.find(
@@ -54,6 +55,8 @@ export class RuleBasedPlanner implements Planner {
           input: {},
           expectedOutput: skill?.description,
           riskLevel: intent.riskLevel,
+          status: "pending",
+          updatedAt: now,
         });
       }
     }
@@ -68,6 +71,8 @@ export class RuleBasedPlanner implements Planner {
       type: "reasoning",
       dependsOn: steps.length === 0 ? [] : [steps[steps.length - 1]!.id],
       riskLevel: "low",
+      status: "pending",
+      updatedAt: now,
     });
 
     steps.push({
@@ -77,6 +82,8 @@ export class RuleBasedPlanner implements Planner {
       type: "response",
       dependsOn: [steps[steps.length - 1]!.id],
       riskLevel: "low",
+      status: "pending",
+      updatedAt: now,
     });
 
     const finalSteps = steps.slice(0, this.maxSteps);

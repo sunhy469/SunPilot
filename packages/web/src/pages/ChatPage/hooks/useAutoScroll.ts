@@ -49,7 +49,7 @@ export function useAutoScroll(
       // JSDOM fallback (scrollTo not available on elements)
       container.scrollTop = container.scrollHeight;
     }
-  }, deps); // eslint-disable-line react-hooks/exhaustive-deps
+  }, deps); // eslint-disable-line
 
   return containerRef;
 }

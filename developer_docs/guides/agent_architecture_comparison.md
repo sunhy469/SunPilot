@@ -1,290 +1,291 @@
-# SunPilot vs 主流 Agent 架构对比分析
+# SunPilot Agent 架构对比评测
 
-> 生成日期：2026-06-15  
-> 对比基准：`developer_docs/guides/agent_core_architecture_implementation.md`（以下简称"蓝图"）  
-> 参考来源：OpenAI Agents SDK、LangGraph、Anthropic Building Effective Agents、MemGPT、MCP Specification 等
+更新时间：2026-06-16
+评测对象：SunPilot 本地实现代码
+参考蓝图：`developer_docs/guides/agent_core_architecture_implementation.md`
 
----
+## 参考基准
 
-## 1. 总体定位对比
+`agent_core_architecture_implementation.md` 给出的目标不是“聊天 prompt”，而是一个可持续运行的 Agent Core：
 
-| 维度 | 蓝图 Agent Core | SunPilot 实际实现 |
-|------|----------------|-------------------|
-| 架构哲学 | "模型驱动的任务操作系统" — 完整内核，覆盖从 Gateway 到 Evaluation 的全部层次 | "实用主义 Agent Loop" — 以 ReAct Loop 为核心，在关键路径上做深而非做全 |
-| 设计重心 | 模块齐全（18+ 模块），强调生产级完备性 | 模块聚焦（12 个核心模块），强调端到端闭环 |
-| 多 Agent | 支持 Handoff、Orchestrator-Workers、DAG Agents | 明确单 Agent + 多 Skill 策略，不做多 Agent |
-| 部署模式 | 支持 Daemon/Scheduler 长期运行 | 以请求-响应为主，daemon 仅做进程托管 |
-
-**核心差异：蓝图追求"全"，SunPilot 追求"深"。蓝图设计了一个可以支撑多 Agent、多租户、长期运行的操作系统级内核；SunPilot 选择在单 Agent 场景下把工具参数链路、记忆检索、上下文压缩、审批策略这些关键路径做到生产可用。**
-
----
-
-## 2. 模块清单逐项对比
-
-### 2.1 Agent Gateway
-
-| 特性 | 蓝图设计 | SunPilot 实现 |
-|------|---------|---------------|
-| 统一入口 | ✅ Agent Gateway 独立模块 | ✅ `JsonRpcRouter`（WebSocket）+ `registerRoutes`（REST） |
-| 鉴权 | ✅ auth-context | ⚠️ 未实现独立鉴权层，依赖部署层 |
-| 限流 | ✅ rate-limiter | ❌ 未实现 |
-| 会话解析 | ✅ session-resolver | ✅ `conversationId` 贯穿全链路 |
-| 幂等请求 | ✅ 通过 requestHash | ✅ `IdempotencyRepository` + `clientRequestId` |
-| 多租户 | ✅ | ❌ 单租户设计 |
-
-**差异分析：** 蓝图把 Gateway 作为独立安全边界，SunPilot 把 Gateway 逻辑分散在 JSON-RPC Router 和 AgentService 中。这是典型的"先做功能、后加固边界"策略。对于单用户本地部署场景，当前设计足够；要支持多租户 SaaS 则需要补鉴权/限流层。
-
----
-
-### 2.2 Intent Router
-
-| 特性 | 蓝图设计 | SunPilot 实现 |
-|------|---------|---------------|
-| 意图类型 | 11 种（casual_chat, knowledge_query, tool_action, multi_step_task, plan_only 等） | 7 种（casual_chat, file_operation, shell_operation, memory_update, artifact_generation, automation_execution, use_skill） |
-| 路由策略 | 三层：规则 → 小模型分类 → 主模型确认 | 两层：规则（regex + keyword）→ 可选 LLM |
-| 输出结构 | `IntentResult` (type, confidence, reason, requiresPlanning, requiresTool, requiresApproval, candidateTools, candidateSkills, riskLevel) | `RoutedIntent` (type, confidence, requiresPlanning, requiresTool, requiresApproval, riskLevel, candidateSkills, reason) |
-| 小模型专用 | ✅ 推荐独立分类模型 | ❌ 未实现，直接用主模型 |
-
-**差异分析：** 蓝图设计了更丰富的意图类型（plan_only、approval_response、debug_previous_run、schedule_task），SunPilot 的意图类型更贴近当前实际支持的功能。两者的输出结构高度一致，SunPilot 的 `RoutedIntent` 实际上是 `IntentResult` 的子集。SunPilot 没有独立分类模型，这在当前工具数量少时不是问题，但工具规模增大后可能需要补上。
-
----
-
-### 2.3 Context Builder
-
-| 特性 | 蓝图设计 | SunPilot 实现 |
-|------|---------|---------------|
-| 上下文分层 | 10 层（System/Developer/User/Session/Project/Task/Tool/Memory/File/Environment） | 7 层（system_persona/system_rules/safety_policy/current_message/conversation_history/memories/skill_catalog/tool_results/artifacts/run_state） |
-| Token 预算 | ✅ 百分比分配策略 | ✅ `TokenBudgeter` 按优先级裁剪 |
-| 上下文排序 | ✅ 公式：semantic×0.35 + recency×0.15 + authority×0.20 + relevance×0.20 + pin×0.10 | ✅ 基于 priority 数值的排序 + stale penalty |
-| 上下文快照 | ✅ 保存到 trace | ✅ 保存到 `model_calls.metadata.context` |
-| 防污染 | ✅ untrusted 标注、isolated context blocks | ✅ `TOOL_RESULT_RELIABILITY_RULES` + tool result 标注 |
-| 历史附件 | ✅ | ✅ 历史消息附件通过 metadata 进入上下文 |
-| 摘要压缩 | ✅ Compressor | ✅ conversation_summary + messageRange 跳过已摘要消息 |
-
-**差异分析：** 这是 SunPilot 和蓝图最接近的模块。两者都实现了 token-aware 的上下文装配、优先级排序、快照保存。主要差异是蓝图设计了更细粒度的 context block 类型（developer、project、environment），而 SunPilot 更专注于当前对话工作集。蓝图的防污染策略更系统化（untrusted 标注），SunPilot 依赖 prompt 中的 reliability rules。
-
----
-
-### 2.4 Memory Manager
-
-| 特性 | 蓝图设计 | SunPilot 实现 |
-|------|---------|---------------|
-| 记忆分层 | 6 层（L0 Working → L5 Reflective） | 3 层：explicit（用户显式）/ intent-based / task_summary |
-| 写入流程 | 6 步：观察→候选→过滤→结构化→存储→后处理 | 4 步：candidate extraction → secret redaction → dedup → create/supersede/reject |
-| 语义检索 | ✅ hybrid（keyword + vector + graph） | ✅ hybrid（keyword + pure vector），两段召回 |
-| 矛盾处理 | ✅ supersedes/contradictedBy 关系 | ✅ supersede（`MemoryPolicy.classify()`），无 explicit contradiction |
-| 记忆过期 | ✅ expiresAt | ✅ expiresAt |
-| 记忆类型 | 12 种 | 10 种（user_preference, project_profile, technical_stack, deployment_info, error_solution, long_term_goal, conversation_summary, tool_observation, manual_note, workflow_pattern） |
-| Vector DB | pgvector / Milvus / Qdrant | pgvector（HNSW index） |
-| Graph Store | ✅ Neo4j 可选 | ❌ 未实现 |
-
-**差异分析：** SunPilot 的记忆系统在写入过滤（secret redaction + dedup + policy）和检索（hybrid + pure vector）上已经比较完整。蓝图的最大差异是矛盾记忆处理（contradictedBy 关系）和图存储（实体关系），这两项对于当前单用户场景不是瓶颈，但在跨会话长期记忆中会变得重要。
-
----
-
-### 2.5 Tool System
-
-| 特性 | 蓝图设计 | SunPilot 实现 |
-|------|---------|---------------|
-| Tool Registry | ✅ `ToolRegistry` 接口 | ✅ `SkillRegistry`（skill 即 tool 的载体） |
-| Tool Manifest | ✅ 20+ 字段 | ✅ `SkillSummary`（id, name, description, category, permissions, inputSchema, riskHints, timeout） |
-| 三层漏斗 | Layer1 粗召回 → Layer2 精排 → Layer3 LLM Binding | Layer1 Regex rules → Layer2 Deterministic scoring → Layer3 LLM semantic |
-| 粗召回评分 | embedding×0.40 + keyword×0.20 + tag×0.15 + category×0.10 + intent×0.10 | N/A（SunPilot 跳过粗召回，直接从 candidateSkills 匹配） |
-| 精排评分 | recall×0.30 + task_fit×0.25 + permission×0.15 + history×0.10 + ... | `scoreSkills()` 基于 id/name/description/bigram 匹配 |
-| 动态 Top-K | ✅ 按 intent 类型 | ❌ 未实现 |
-| 工具去重/分组 | ✅ ToolGroup | ❌ 未实现 |
-| 参数生成 | 模型直接输出 | ✅ `DefaultToolArgumentBuilder`（7 优先级策略） |
-| 参数校验 | ✅ schema validate | ✅ `validateArguments()` + repair loop |
-| 工具执行 | ✅ Tool Executor（sandbox、timeout、retry） | ✅ `ExecutionOrchestrator`（并发控制、retry、event emit） |
-
-**差异分析：** 这是 SunPilot 设计上最有特色的模块。蓝图的三层漏斗从"海量工具中筛选"的角度设计，假设工具池很大（100+）；SunPilot 的三层漏斗从"精准匹配"的角度设计，假设工具通过 intent 已经预筛选。SunPilot 独有的亮点是 **schema-aware 参数生成器**（7 级优先级）和 **参数 repair loop**，这两点在蓝图中没有细化到同等程度。
-
-SunPilot 目前缺少工具去重/分组机制和基于 intent 的动态 Top-K。在当前工具数量（<30）下不是问题，但如果接入 MCP 或大量第三方工具，需要补上粗召回层。
-
----
-
-### 2.6 Planning Engine
-
-| 特性 | 蓝图设计 | SunPilot 实现 |
-|------|---------|---------------|
-| ReAct Loop | ✅ | ✅ `AgentLoopEngine` 核心模式 |
-| Plan-then-Execute | ✅ 独立 Planner + Plan Validator + Replanner | ✅ `RuleBasedPlanner` + plan steps |
-| DAG Workflow | ✅ dag-planner | ❌ 未实现 |
-| Plan 数据结构 | ✅ AgentPlan（goal, assumptions, steps, risk, status） | ✅ AgentPlan（id, goal, summary, steps） |
-| Plan Validator | ✅ 循环检测、依赖、权限、风险 | ❌ 未实现（规划验证依赖模型自身） |
-| Replanning | ✅ 7 种触发条件 | ❌ 未实现（只有 reflection continue/respond 二选一） |
-
-**差异分析：** SunPilot 的规划能力相对蓝图较弱。蓝图有完整的 Plan → Validate → Execute → Replan 循环，SunPilot 的 Planner 目前只是生成 plan 步骤但不做深度验证。Replanning 在 SunPilot 中由 reflection 引擎部分覆盖（`nextAction: continue`），但没有蓝图那种结构化的 replan 触发条件（工具失败、结果不符合预期、用户改目标等）。
-
-这是 SunPilot 如果要处理更复杂任务时最需要补强的模块。
-
----
-
-### 2.7 Agent Loop Engine
-
-| 特性 | 蓝图设计 | SunPilot 实现 |
-|------|---------|---------------|
-| 状态机 | created → running → waiting_approval → completed/failed/cancelled | created → context_building → intent_routing → planning? → tool_deciding → executing → reflecting → responding → completed/failed/cancelled/interrupted |
-| 运行模式 | chat/agent/workflow/plan/auto/approval_required/dry_run | chat/agent |
-| 最大迭代 | 未明确 | `MAX_TOOL_ITERATIONS = 5` |
-| 停止条件 | ✅ stop-condition 模块 | ✅ reflection stopReason + max_iterations |
-| 审批恢复 | ✅ checkpoint → resume | ✅ `resumeApprovedTool()` + `continueAfterRejection()` |
-
-**差异分析：** SunPilot 的 Agent Loop Engine 状态粒度比蓝图更细。蓝图只有 5 个宏观状态，SunPilot 有 10 个微观状态（context_building、intent_routing、tool_deciding、executing、reflecting、responding 等）。这种细粒度设计让事件流和前端状态跟踪更精确。蓝图的运行模式更丰富（workflow、plan、dry_run），SunPilot 目前只支持 chat/agent 两种。
-
----
-
-### 2.8 Safety / Guardrails
-
-| 特性 | 蓝图设计 | SunPilot 实现 |
-|------|---------|---------------|
-| Risk Classifier | ✅ 独立 risk-classifier | ✅ `classifyRisk()` in safety-types |
-| Policy Engine | ✅ policy-engine | ✅ `PermissionPolicy`（支持 ask/auto/full 三种模式） |
-| Approval Manager | ✅ approval-manager | ✅ `RepositoryApprovalGate` + `RepositoryApprovalDecisionService` |
-| Prompt Injection 检测 | ✅ | ❌ 未实现（依赖 prompt 层面的 reliability rules） |
-| Sandbox | ✅ sandbox-policy | ❌ 未实现（工具执行依赖 skill-runner 自身的沙箱） |
-| PII Redaction | ✅ pii-redactor | ✅ `PatternSecretRedactor`（密钥/密码等敏感信息扫描） |
-| Least Privilege | ✅ task-scoped tool access | ⚠️ 部分：基于 risk level 的权限控制，但非 task-scoped |
-
-**差异分析：** SunPilot 在审批和风险分级上做得比较完整（三种 permission mode + risk-based decision + 三种 rejection strategy）。但蓝图有两个 SunPilot 缺失的关键安全层：prompt injection detection 和 sandbox。对于当前本地使用场景，风险可控；生产部署需要补上。
-
----
-
-### 2.9 State Manager
-
-| 特性 | 蓝图设计 | SunPilot 实现 |
-|------|---------|---------------|
-| Run State | ✅ agent_runs 表 | ✅ runs 表 |
-| Step State | ✅ agent_steps 表 | ✅ steps 表 |
-| Tool Call State | ✅ tool_calls 表 | ✅ tool_calls 表（含 metadata/repairHistory） |
-| Approval State | ✅ approvals 表 | ✅ approvals 表 |
-| Checkpoint | ✅ RunCheckpoint（context + plan + step + tool result） | ✅ context snapshot 保存到 model_calls.metadata |
-| State Machine | ✅ LEGAL_TRANSITIONS | ✅ LEGAL_TRANSITIONS（run-state-machine.ts） |
-| Resume | ✅ checkpoint load → resume | ✅ resumeRun / retryRun |
-| Task State 持久化 | 未明确 | ✅ taskState（completedSteps, pendingSteps, gatheredFacts, openQuestions） |
-
-**差异分析：** SunPilot 在状态管理上甚至比蓝图多了一些设计——taskState 持久化在蓝图中没有明确提及，SunPilot 实现了跨迭代的 task state 追踪和持久化。两者的数据库表结构高度相似。
-
----
-
-### 2.10 Event Bus
-
-| 特性 | 蓝图设计 | SunPilot 实现 |
-|------|---------|---------------|
-| 事件类型 | 17 种 | 30 种（agent.run.*, agent.context.*, agent.intent.*, agent.plan.*, agent.tool.*, agent.approval.*, agent.model.*, agent.response.*, agent.memory.*, agent.error） |
-| 事件结构 | AgentEvent（id, runId, type, timestamp, payload, visibility） | AgentEventEnvelope（eventId, sequence, runId, conversationId, type, payload, createdAt） |
-| 持久化 | 未明确 | ✅ `RepositoryAgentEventSink` → events 表 |
-| WebSocket 推送 | ✅ | ✅ `JsonRpcRouter` → WebSocket notify |
-| 去重 | 未明确 | ✅ sequence-based dedup（`lastSequenceRef`） |
-| Replay | 未明确 | ✅ `replayConversationEvents` |
-
-**差异分析：** SunPilot 的事件系统比蓝图更完善——更多事件类型、持久化、去重、replay 都实现了。蓝图的事件设计相对简洁，偏向"推送 UI 更新"，SunPilot 的设计偏向"可审计的事件溯源"。
-
----
-
-### 2.11 蓝图有但 SunPilot 没有的模块
-
-| 模块 | 蓝图定位 | 缺失原因分析 |
-|------|---------|-------------|
-| **Tracing** | LLM call/tool call/context 全链路追踪 | SunPilot 有 context snapshot + model_calls 表，但缺少独立的 trace viewer 和 span 结构 |
-| **Evaluation** | 单元评估 + Golden Task + 人工评估 | 未实现。对于当前阶段，代码审查和手动测试替代了自动评估 |
-| **Model Router** | 按任务类型路由到不同模型 | SunPilot 使用单一 LlmProvider。小模型分类、embedding 等场景未做模型隔离 |
-| **Scheduler/Daemon** | 定时任务、条件触发、后台监控 | SunPilot 的 daemon 包只做进程托管，无任务调度能力 |
-| **Handoff/Multi-Agent** | Router Agent → Specialist Agents | 明确选择不做。SunPilot 采用"单 Agent + 多 Skill"策略 |
-| **Graph Store** | Neo4j 实体关系 | 未实现。当前 memory 仅使用 pgvector，不做图关系 |
-
-**这些缺失大部分是刻意的架构选择，而非遗漏。** SunPilot 遵循 Anthropic "Building Effective Agents" 的建议——优先单 Agent + 多工具，不被多 Agent 复杂性拖累。
-
----
-
-## 3. SunPilot 相对蓝图的独特设计
-
-### 3.1 Schema-Aware Argument Builder
-
-蓝图的工具参数生成依赖模型直接输出。SunPilot 设计了 7 级优先级的参数生成器：
-
-```
-Plan step input → Schema required fields → Message URLs/IDs/Filenames
-→ Attachments → Previous structured result → LLM structured output
-→ ask_clarification
+```text
+用户目标
+  -> gateway/session
+  -> intent/context/memory
+  -> planning/tool routing
+  -> permission/approval/sandbox
+  -> execution/reflection/replanning
+  -> response/memory write
+  -> event/state/audit/trace/eval
 ```
 
-这是 SunPilot 最独特的工程贡献——不是"让模型生成参数然后祈祷"，而是"系统性地从多个来源收集参数，最后才求助 LLM"。
+对照 OpenAI Agents SDK、LangGraph、MCP、Anthropic agent engineering/evals 等主流实践，生产级 agent 的关键不是先做 multi-agent，而是先让单 Agent 具备可恢复状态、工具治理、上下文可信度、安全边界、可观测性和回归评估。
 
-### 3.2 Parameter Repair Loop
+## 本地实现依据
 
-蓝图没有细化的参数修复机制。SunPilot 实现了：
+本次重新核对了以下代码路径：
 
+- Agent service/loop：`packages/core/src/agent/agent.service.ts`、`packages/core/src/agent-kernel/agent-loop-engine.ts`
+- 组合根：`packages/daemon/src/composition-root.ts`
+- Context/Intent/Planning：`packages/core/src/agent-kernel/context/*`、`intent/*`、`planning/*`
+- Tool decision/argument/retrieval/execution：`packages/core/src/agent-kernel/tools/*`、`execution/*`
+- Safety：`packages/core/src/agent-kernel/safety/*`
+- Memory：`packages/core/src/agent-kernel/memory/*`
+- Persistence：`packages/core/src/agent-kernel/persistence/*`、`packages/storage/src/postgres/*`、`packages/storage/src/migrations/*`
+- Observability/evals：`packages/core/src/agent-kernel/trace-manager.ts`、`evals/agent/*`
+- Protocol/UI events：`packages/protocol/src/agent-events.ts`、`packages/web/src/features/chat/types.ts`
+
+## 总体结论
+
+SunPilot 当前已经是一个较完整的 local-first 单 Agent runtime，而不是普通聊天机器人：
+
+```text
+WebSocket/REST
+  -> AgentService
+  -> AgentLoopEngine
+  -> ContextBuilder
+  -> IntentRouter
+  -> RuleBasedPlanner + PlanValidator
+  -> ToolDecisionEngine + ToolRetriever + ToolArgumentBuilder
+  -> PermissionPolicy + Approval + Sandbox + scoped permission
+  -> ExecutionOrchestrator + SkillToolExecutor
+  -> ReflectionEngine + Replanner
+  -> ResponseComposer
+  -> MemoryWriter
+  -> Events + State + Persistence + Trace
 ```
-validate → fail → heuristic repair (type coercion, enum matching)
-→ LLM repair → re-validate → execute
+
+和旧评测相比，几个原本“未接入”的模块已经进入主链路：
+
+- `PlanValidator`、`Replanner` 已在 `composition-root.ts` 实例化并注入 `AgentLoopEngine`。
+- `ToolRetriever` 已注入 `ToolDecisionEngine`，用于工具 Top-K 召回和重排。
+- `ModelRouter` 已通过 purpose-specific `LlmProvider` adapter 接入 intent、tool argument、planning、reflection、response、replanning。
+- `PromptInjectionDetector` 已扫描历史 tool results 与最新 observation tool summaries。
+- `ToolSandbox` 与 `TaskScopedPermissionManager` 已在 `AgentLoopEngine.handleUseTool` 执行前参与校验。
+- `TraceManager` 已注入 loop，并覆盖 context、intent、tool execution、reflection、response 等核心 span。
+
+因此当前主要问题已经从“模块缺失”变为“接入质量、持久化程度、事件/trace/eval 闭环和真实验收不足”。
+
+## 与主流 Agent 架构对比
+
+| 维度 | 主流架构趋势 | SunPilot 当前状态 | 评测 |
+|---|---|---|---|
+| 架构范式 | 先单 Agent + tools，复杂任务再引入 handoff/multi-agent | 明确采用单 Agent + 多 Skill | 方向正确，复杂度控制合理 |
+| Orchestration | graph/state/checkpoint/resume/human-in-loop | 显式状态机 + persisted runs/events/approvals | 对本地业务 agent 足够，DAG workflow 较弱 |
+| Planning | plan validation、replan、step evidence | RuleBasedPlanner + PlanValidator + Replanner 已接入 | 已进入主链路，但 plan 持久化和恢复仍弱 |
+| Tool Use | schema、retrieval、guardrails、repair、sandbox | ToolRetriever + argument builder + repair + sandbox | 工具参数链路强，metadata/eval 仍需补 |
+| Context | context engineering、压缩、来源可信度 | TokenBudgeter、summary、memories、tool results、artifacts | 可用度高，缺统一 trust/untrusted 数据模型 |
+| Memory | short-term state + long-term vector/relational memory | pgvector/hybrid search、relation、quality、summary memory | 基础较强，召回质量反馈和治理 UI 不足 |
+| Human-in-loop | approval/interrupt/resume/reject strategy | DB approval、resumeApprovedTool、continueAfterRejection | 本地体验较完整 |
+| Guardrails | policy、injection isolation、sandbox、least privilege | injection/sandbox/scoped permission 已接入 | 已有边界，但拒绝路径和安全事件还粗 |
+| Observability | trace/model/tool/event/cost/eval 一体化 | events/model_calls/tool_calls + in-memory TraceManager | 数据多但未形成可查询 trace/eval 飞轮 |
+| Evaluation | golden tasks、deterministic harness、CI gate | `evals/agent` 有任务和 runner，但测试仍是 mock executor | 最大可靠性缺口 |
+| MCP 生态 | 动态工具/资源/prompt discovery，工具池检索 | Skill 是本地工具载体，未实现 MCP client/server | 未来扩展关键缺口 |
+| Multi-Agent | handoff/crew/worker 只在必要时引入 | 暂不做 multi-agent | 当前选择合理 |
+
+## 模块评测
+
+### 1. Gateway / Transport
+
+当前实现：
+
+- WebSocket JSON-RPC 与 REST API 由 daemon 层提供。
+- run/conversation/message 贯穿，`clientRequestId` 走 idempotency repository。
+- persisted event bus 会给外部消费端转发带 DB sequence 的事件。
+- Origin 检查、idle timeout、recover/replay 基础存在。
+
+差距：
+
+- Gateway 仍不是独立 policy boundary；多租户 auth、quota、rate limit、API key/session permission 还没有系统化。
+- 本地单用户足够，团队/SaaS 模式不足。
+
+结论：当前适合 local-first runtime。若产品形态走团队协作，Gateway 必须升级为第一层安全与配额边界。
+
+### 2. Agent Loop / State
+
+当前实现：
+
+- 主状态包括 `created -> context_building -> intent_routing -> planning -> tool_deciding -> executing/waiting_approval -> reflecting -> responding -> completed`。
+- 支持 cancel、approval resume、approval rejection continue、max tool iterations。
+- `taskState` 会保存 completed/pending steps、facts、open questions、iteration，并写入 run context。
+- events 表有 sequence，可支持 replay。
+
+差距：
+
+- plan 对象本身没有作为一等实体持久化；恢复时主要依赖 run context/taskState，而不是 checkpointed plan graph。
+- `TraceManager` 是内存态，不随 run 持久化。
+- 不支持 LangGraph 式 DAG/fork/checkpoint rewind。
+
+结论：显式状态机适合当前对话式业务 agent。近期不应改造成通用 graph runtime，应该先把 plan/task evidence、trace 和 eval 做实。
+
+### 3. Planning / Replanning
+
+当前实现：
+
+- `RuleBasedPlanner` 创建 tool/reasoning/response steps。
+- `PlanValidator` 校验 skill availability、依赖、环、风险、输入等；error 会阻断执行并发 `PLAN_VALIDATION_FAILED`。
+- `Replanner` 能基于 tool failure、goal change、approval rejection、insufficient result、missing parameters、max iterations 等触发改 plan。
+- `agent.plan.created`、`agent.plan.warnings`、`agent.plan.validated`、`agent.plan.revised` 已进入协议事件。
+- plan step status 已扩展到 `pending/in_progress/completed/verified/blocked/skipped/waiting_approval/failed_retryable/failed_terminal` 等，并支持 `completionEvidence`。
+
+差距：
+
+- plan validation error 当前直接使 run failed，尚未优雅转成 clarification/fallback response。
+- revised plan 没有持久化为可回放版本历史。
+- step 与 toolCall 的匹配主要按 `skillId`，同一 skill 多次出现时证据绑定可能不稳定。
+
+结论：Planning 已从“补模块”进入“补恢复语义和证据精度”阶段。
+
+### 4. Tool System
+
+当前实现：
+
+- Skill capability 使用 `<skill-id>:<capability-name>` 作为工具 ID。
+- `ToolDecisionEngine` 优先处理 reflection priority、plan tool steps、no_tool、intent candidate、ToolRetriever、deterministic clear winner、LLM semantic selection、fallback。
+- `ToolRetriever` 支持 keyword/category/permission/risk/embedding/history 等多层打分。
+- `DefaultToolArgumentBuilder` 支持 schema-aware 参数生成、来源记录、历史附件、previous tool result、LLM structured output、缺参澄清。
+- `ExecutionOrchestrator` 负责并发分组、retry、schema validation、repair loop、tool call metadata。
+- `SkillToolExecutor` 统一执行 skill 并收集 artifact。
+
+差距：
+
+- tool selection 的 Top-K 分数、match reasons、fallbackUsed 未系统写入事件或 tool call metadata。
+- `SkillToolExecutor` 自身不持有 sandbox，sandbox 在 loop 执行前做；若未来有其它执行入口，容易绕过。
+- Skill manifest 与 MCP tool metadata 还未完全对齐，例如 output schema、side effects、idempotency、examples、annotations。
+
+结论：参数生成和 repair 是当前强项。下一步要让工具选择、执行边界和结果 provenance 更可审计。
+
+### 5. Context
+
+当前实现：
+
+- `ContextBuilder` 组装 system rules、safety policy、current message、history、conversation summaries、memories、skill catalog、artifacts、tool results。
+- `TokenBudgeter` 负责按优先级裁剪。
+- conversation summary 支持 messageRange、stale detection。
+- tool results 和 latest observation 已有 injection scan。
+- response metadata 保存 toolCall/candidate provenance。
+
+差距：
+
+- 不可信内容缺统一数据结构；当前更多是 content 被改写或 warning 被前置。
+- attachment parsed content、web content、tool result、external memory 的 trust/source/authority 还没有贯穿所有模块。
+- 缺 context eval：裁剪/总结后关键约束是否仍在。
+
+结论：Context 可用度高，但安全与质量要从“文本提示”升级为结构化 metadata 流转。
+
+### 6. Memory
+
+当前实现：
+
+- 支持 explicit、intent-based、task summary、conversation summary 等写入。
+- `PatternSecretRedactor` 做敏感信息扫描。
+- `DefaultMemoryPolicy` 支持 create/supersede/reject/contradiction。
+- Memory repository 支持 embedding、relations、quality score，Postgres/pgvector migration 已有 HNSW index。
+- 用户、系统、助手消息保存路径会尽量生成 embedding。
+
+差距：
+
+- relation/quality 还没有明显影响召回排序和冲突降权。
+- 缺 memory hit/miss 反馈、冲突解决 UI、用户可控治理流程。
+- embedding fallback reason/model/dimension metadata 仍可更系统。
+
+结论：Memory 底座已经不错。下一步是把质量信号变成召回行为和用户可见治理。
+
+### 7. Safety / Guardrails
+
+当前实现：
+
+- `PermissionPolicy` 支持 ask/auto/full。
+- DB approval request/decision/gate 完整。
+- `PromptInjectionDetector` 支持多类注入模式和中英文检测，并已接入 context tool results 与最新 observation summaries。
+- `ToolSandbox` 已在 loop 执行前校验 filesystem/shell/network。
+- `TaskScopedPermissionManager` 已参与同 run/同参数授权复用与高风险强制重审。
+
+差距：
+
+- sandbox 拒绝目前多为抛错后 run failed，未统一转成 tool call `SANDBOX_DENIED`、reflection/replan 或用户可操作说明。
+- 注入事件目前复用 `agent.error`，没有独立 `agent.safety.*` 协议事件。
+- 安全测试仍没有真实 agent harness。
+
+结论：安全边界已经接入，但拒绝路径、事件语义和红队 eval 还需要产品化。
+
+### 8. Observability / Evaluation
+
+当前实现：
+
+- agent event 类型较完整，events 表有 sequence。
+- `model_calls` 记录 provider/model/purpose/token/status/metadata/context snapshot。
+- `tool_calls` 有 metadata，可存 argument source 与 repair history。
+- `run_status_history`、audit、approval、steps、artifacts 均有 repository/migration 支撑。
+- `TraceManager` 已产生内存 trace/span 和 aggregate metrics。
+- `evals/agent` 已有 7 个 core golden tasks、runner 和类型。
+
+差距：
+
+- `TraceManager` 未持久化，也没有 API/UI viewer。
+- ModelRouter 自己的 purpose stats 与 `model_calls` repository 不是同一条记录链；多数模块的 LLM 调用仍未全部落 DB model_calls。
+- Golden Task 测试当前使用 mock executor，明确“validate eval harness, not agent behavior”，不能证明真实 AgentService 行为。
+- 根 `package.json` 没有 `eval:agent` 脚本。
+
+结论：可靠性最大短板是 eval 和 trace 没有闭环。当前数据底座足够，缺的是真实 harness 和可查询视图。
+
+### 9. MCP / Workflow / Multi-Agent
+
+当前实现：
+
+- 本地 Skill registry 是工具载体。
+- 无 MCP client/server adapter。
+- 无通用 DAG workflow runtime。
+- 无 multi-agent handoff。
+
+评测：
+
+- 不做 multi-agent 是正确选择；当前单 Agent 仍有 eval、安全、trace、tool provenance 的硬缺口。
+- MCP 兼容值得提前设计，因为 ToolRetriever 已经具备工具池扩展的基础。
+
+结论：近期优先 MCP metadata 兼容层，不优先 multi-agent。
+
+## 成熟度评分
+
+| 模块 | 分数 | 说明 |
+|---|---:|---|
+| Agent Loop / State | 8 | 主链路完整，恢复语义仍需加强 |
+| Gateway / Transport | 7 | 本地充分，团队/SaaS 边界不足 |
+| Context | 8 | 预算、summary、memory、tool results 都有，trust metadata 不足 |
+| Memory | 7 | pgvector/relation/quality 已有，治理闭环不足 |
+| Tool Decision / Argument | 8 | 参数和 repair 强，selection metadata 不足 |
+| Planning / Replanning | 7 | 已接入，持久化和证据精度不足 |
+| Safety / Guardrails | 7 | 已接入，拒绝路径和安全 eval 不足 |
+| Observability | 6 | 数据多，trace 未持久化，viewer 缺失 |
+| Evaluation | 4 | golden tasks 有框架，但真实 AgentService harness 缺失 |
+| MCP / Tool Ecosystem | 4 | Skill 本地可用，MCP 未接 |
+| Workflow / Multi-Agent | 3 | 当前刻意不做，不影响近期目标 |
+
+## 推荐定位
+
+SunPilot 最适合继续定位为：
+
+```text
+Local-first business agent runtime
+Single Agent core
+Skill-first tool ecosystem
+Postgres-backed state/memory/event store
+MCP-compatible in the future
 ```
 
-且有完整的 `repairHistory` 审计（original args, validation errors, repair attempts, final args）。
+不建议近期做：
 
-### 3.3 Reflection-Driven Multi-Turn
+- 改造成 LangGraph 式通用 DAG runtime。
+- 优先引入 multi-agent/handoff。
+- 把所有工具一次性暴露给模型。
+- 在没有真实 Golden Task harness 前继续堆 agent 行为复杂度。
 
-SunPilot 的 reflection 引擎不只是判断"目标是否完成"，还输出 `nextToolCandidates`（带 `argumentsHint`），这些候选会作为 `prioritySkills` 直接驱动下一轮工具选择。蓝图对此的描述是"Replanning"，但 SunPilot 实现得更具体。
+建议近期做：
 
-### 3.4 Permission Mode（ask/auto/full）
+- 把 Golden Tasks 接到真实 `AgentService`。
+- 持久化 trace/plan/replan/evidence，让 run 可以被审计和回放。
+- 把 sandbox/injection denial 变成可恢复、可解释的 tool observation。
+- 将 ToolRetriever/ModelRouter 的决策记录统一写入 metadata。
+- 设计 Skill manifest 与 MCP tool metadata 的兼容层。
 
-蓝图把审批策略放在服务端。SunPilot 把权限模式的选择权交给用户——前端 ChatComposer 中的 ask/auto/full 选择器会贯穿全链路影响 `PermissionPolicy` 的决策。这是用户体验上的差异化设计。
-
-### 3.5 Conversation Summary with Stale Detection
-
-蓝图的 summary 设计是"写 summary 替换旧消息"。SunPilot 在此基础上加了：
-
-- **messageRange** 精确跟踪覆盖范围
-- **stale detection** 检查 summary 之后是否有新消息
-- **quality scoring** 基于 reflection confidence + tool success rate
-- **version tracking** 每 10 条消息递增版本号
-
----
-
-## 4. 架构选型的关键差异总结
-
-| 设计决策 | 蓝图偏好 | SunPilot 选择 | 判断 |
-|---------|---------|---------------|------|
-| Agent 数量 | 支持 Multi-Agent | 单 Agent | ✅ 符合 Anthropic 建议，当前阶段正确 |
-| 规划模式 | Plan-then-Execute + DAG | ReAct + 简单 Plan | ⚠️ 复杂任务可能需要更强规划 |
-| 工具匹配 | 全量粗召回 → 精排 | Intent 预筛选 → 评分匹配 | ✅ 工具少时更高效，多了需要补粗召回 |
-| 参数生成 | 模型直接生成 | 7 级优先级 + repair loop | ✅ SunPilot 方案更可靠 |
-| 权限控制 | 服务端策略 | 用户可选模式 | ✅ 差异化设计 |
-| 记忆检索 | keyword + vector + graph | keyword + pure vector | ⚠️ 缺少图关系，长期间可能不足 |
-| 模型路由 | 按任务类型分模型 | 单一模型 | ⚠️ 成本优化空间大 |
-| 安全沙箱 | 独立 sandbox 模块 | 依赖 skill-runner | ⚠️ 生产部署需要加强 |
-
----
-
-## 5. 成熟度评估
-
-按蓝图的 6 个 Phase 评估 SunPilot 的完成度：
-
-| Phase | 蓝图目标 | SunPilot 完成度 |
-|-------|---------|----------------|
-| Phase 1: 单 Agent 可运行 | run/step/tool_call 表 + 内置工具 + Plan-Execute + WebSocket | ✅ **100%** |
-| Phase 2: 上下文与记忆 | Context Builder + Memory + Embedding + Summary | ✅ **90%**（缺 graph store） |
-| Phase 3: 工具三层漏斗 | Tool Manifest + Embedding + 粗召回 + 精排 + 动态 Top-K | ✅ **80%**（缺粗召回层和动态 Top-K） |
-| Phase 4: 审批与安全 | Risk Classifier + Approval + Policy + Sandbox + Audit | ✅ **75%**（缺 sandbox 和 prompt injection detection） |
-| Phase 5: Skill System | Skill Manifest + Registry + Router + Plan 编译 | ✅ **85%**（有完整的 skill-runner 和 skill-sdk） |
-| Phase 6: Daemon 与长期运行 | Scheduler + Background Worker + Checkpoint Resume + Evaluation | ⚠️ **30%**（只有 daemon 进程托管和 checkpoint resume） |
-
----
-
-## 6. 结论
-
-**SunPilot 不是一个"蓝图的不完整实现"，而是一个有独立架构判断的 Agent Core。**
-
-它的核心策略是：
-
-1. **在关键路径上做深**：工具参数生成、参数修复、记忆混合检索、上下文 token 预算、审批策略都比蓝图更细化。
-2. **在不需要的地方做减**：不做多 Agent、不做图数据库、不做复杂调度。这些在当前阶段是正确选择。
-3. **有差异化设计**：permission mode 用户可选、reflection 驱动下一轮工具选择、summary stale detection 是蓝图没有覆盖的工程细节。
-
-如果 SunPilot 要继续演进，最值得补的三个模块是：
-
-1. **Planning 增强**：Plan Validator + Replanner，让复杂多步骤任务更可靠。
-2. **Evaluation 框架**：Golden Task 回归测试，让 Agent 行为可量化验证。
-3. **Model Router**：不同任务用不同模型（小模型分类、embedding 专用模型），降低 token 成本。
-
-但就当前阶段而言，SunPilot 的 Agent Core 已经达到了"可在本地可靠运行"的水平，核心闭环（context → intent → tools → execute → reflect → respond → memory）是完整且经过验证的。
+下一步完善清单见：`developer_docs/guides/agent_architecture_next_steps.md`。

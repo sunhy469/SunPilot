@@ -38,6 +38,7 @@ export interface DaemonOptions {
   chatAgent?: Pick<
     AgentService,
     | "handleChatCommand"
+    | "startChatCommand"
     | "stopChat"
     | "cancelRun"
     | "resumeRun"

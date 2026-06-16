@@ -131,6 +131,7 @@ export class ExecutionOrchestrator implements ExecutionOrchestratorInterface {
         source: string;
         ref?: string;
       }>;
+      metadata?: Record<string, unknown>;
     },
     signal: AbortSignal,
   ): Promise<{
@@ -285,6 +286,7 @@ export class ExecutionOrchestrator implements ExecutionOrchestratorInterface {
       riskLevel: normalizeRiskLevel(call.riskLevel),
       startedAt: now,
       metadata: {
+        ...(call.metadata ?? {}),
         argumentSources: call.argumentSources ?? [],
         inputSchema: call.inputSchema ? true : false,
         repairHistory:
