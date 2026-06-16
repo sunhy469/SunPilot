@@ -108,6 +108,10 @@ export interface RunRecord {
   cancelledAt?: string;
   input: unknown;
   context: Record<string, unknown>;
+  /** Live plan state with step evidence (§P0-2). */
+  activePlanJson?: Record<string, unknown> | null;
+  /** Number of plan revisions during this run (§P0-2). */
+  planRevisionCount?: number;
 }
 
 export interface StepRecord {
@@ -171,6 +175,52 @@ export interface ArtifactRecord {
   createdAt: string;
 }
 
+// ── Memory relations ─────────────────────────────────────────────────
+// Tracks how memories relate to each other for contradiction detection,
+// merge policy, and stale detection (§6 of architecture next steps).
+
+export const MEMORY_RELATIONS = [
+  "supersedes",
+  "contradicts",
+  "resolvedBy",
+  "confirmedBy",
+  "sourceOfTruth",
+] as const;
+
+export type MemoryRelation = (typeof MEMORY_RELATIONS)[number];
+
+export interface MemoryRelationEntry {
+  /** The target memory ID this relation points to. */
+  targetId: string;
+  relation: MemoryRelation;
+  /** When this relation was established. */
+  establishedAt: string;
+  /** Human-readable reason for this relation. */
+  reason: string;
+  /** Confidence in this relation (0–1). */
+  confidence?: number;
+}
+
+/** Quality score for a memory record. */
+export interface MemoryQualityScore {
+  /** Overall quality score (0.0–1.0). */
+  score: number;
+  /** Source credibility factor (0.0–1.0). */
+  sourceCredibility: number;
+  /** Recency factor based on last access (0.0–1.0). */
+  recency: number;
+  /** Whether the user has explicitly confirmed this memory. */
+  userConfirmed: boolean;
+  /** Task relevance factor (0.0–1.0). */
+  taskRelevance: number;
+  /** Whether this memory is backed by tool evidence. */
+  toolEvidence: boolean;
+  /** Whether this memory conflicts with existing memories. */
+  hasConflicts: boolean;
+  /** When the quality score was last computed. */
+  computedAt: string;
+}
+
 export interface MemoryRecord {
   id: string;
   runId?: string;
@@ -195,6 +245,14 @@ export interface MemoryRecord {
   expiresAt?: string;
   supersededBy?: string;
   deletedAt?: string;
+  /** Relations to other memories (contradicts, resolvedBy, etc.). */
+  relations?: MemoryRelationEntry[];
+  /** Quality score for recall prioritization. */
+  quality?: MemoryQualityScore;
+  /** If this memory has been marked stale, the reason. */
+  staleReason?: string;
+  /** When this memory was marked stale. */
+  staleSince?: string;
 }
 
 export const MEMORY_SCOPES = [

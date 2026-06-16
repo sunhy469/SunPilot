@@ -6,11 +6,15 @@ import type {
   AgentContext,
   AgentObservation,
   AgentPlan,
+  AgentPlanStepStatus,
+  AgentReflection,
   AgentTaskState,
   RoutedIntent,
   Permission,
   RiskLevel,
   ToolDecision,
+  PlannedToolCall,
+  ToolCallSummary,
   ApprovalGate,
   ContextBuilder,
   ExecutionOrchestrator,
@@ -23,6 +27,15 @@ import type {
 } from "./loop-types.js";
 import type { RunStateManager } from "./run-state-manager.js";
 import type { MemoryWriter } from "./memory/memory-types.js";
+import type { PlanValidator } from "./planning/plan-validator.js";
+import type { Replanner, ReplanTrigger } from "./planning/replanner.js";
+import type { ModelRouter, ModelPurpose } from "./model-router.js";
+import type { TraceManager } from "./trace-manager.js";
+import type { RepositoryTraceManager } from "./trace-persistence.js";
+import type { PromptInjectionDetector } from "./safety/prompt-injection-detector.js";
+import type { ToolSandbox } from "./safety/tool-sandbox.js";
+import type { TaskScopedPermissionManager, TaskScopedPermission } from "./safety/task-scoped-permission-manager.js";
+import type { PlanSnapshotRepository } from "@sunpilot/storage";
 
 const MAX_TOOL_ITERATIONS = 5;
 
@@ -40,6 +53,22 @@ export interface AgentLoopEngineDeps {
   eventBus: AgentEventBus;
   approvalRequestService?: RepositoryApprovalRequestService;
   memoryWriter?: MemoryWriter;
+  /** Optional — validates plans before execution for structural issues. */
+  planValidator?: PlanValidator;
+  /** Optional — revises plans when tool execution doesn't go as expected. */
+  replanner?: Replanner;
+  /** Optional — routes LLM calls to different models by purpose (§3). */
+  modelRouter?: ModelRouter;
+  /** Optional — creates trace/spans for observability (§7, §P0-2). */
+  traceManager?: TraceManager | RepositoryTraceManager;
+  /** Optional — detects prompt injection in untrusted content (§5). */
+  injectionDetector?: PromptInjectionDetector;
+  /** Optional — sandboxes tool execution for security (§5). */
+  toolSandbox?: ToolSandbox;
+  /** Optional — enforces task-scoped permission boundaries (§5). */
+  scopedPermissionManager?: TaskScopedPermissionManager;
+  /** Optional — persists plan snapshots (§P0-2). */
+  planSnapshotRepo?: PlanSnapshotRepository;
 }
 
 export interface ApprovalResumeInput {
@@ -76,7 +105,17 @@ export interface ApprovalResumeInput {
  * WebSocket/REST 的接线由 daemon 层处理。
  */
 export class AgentLoopEngine {
+  /** Accumulated task-scoped permission grants keyed by runId. */
+  private readonly grantsByRun = new Map<string, TaskScopedPermission[]>();
+  /** Tracks plan revision counts per run for snapshot versioning (§P0-2). */
+  private _planRevisionCounts?: Map<string, number>;
+
   constructor(private readonly deps: AgentLoopEngineDeps) {}
+
+  /** Release permission grants for a run to prevent unbounded memory growth. */
+  private cleanupGrants(runId: string): void {
+    this.grantsByRun.delete(runId);
+  }
 
   /**
    * 主流程编排器 — 将 Agent Loop 各阶段委托给专用 private 方法。
@@ -250,78 +289,140 @@ export class AgentLoopEngine {
     taskState?: AgentTaskState,
   ): Promise<AgentLoopResult> {
     const { runId, conversationId } = input;
+    const deniedToolCalls = new Set<string>();
 
     for (const tc of decision.toolCalls) {
       this.deps.eventBus.emit(
         "agent.tool.selected",
-        {
-          runId,
-          toolCallId: tc.id,
-          skillId: tc.skillId,
-          name: tc.name,
-          riskLevel: tc.riskLevel,
-        },
+        { runId, toolCallId: tc.id, skillId: tc.skillId, name: tc.name, riskLevel: tc.riskLevel },
         { runId, conversationId },
       );
     }
 
+    // ── Safety pre-validation (§P0-3): sandbox + permission + scope ──
     for (const tc of decision.toolCalls) {
+      // Layer 1: Sandbox validation — deny dangerous operations without throwing
+      let sandboxDenied = false;
+      if (this.deps.toolSandbox) {
+        sandboxDenied = validateSandbox(this.deps.toolSandbox, tc, (op, reason) => {
+          this.deps.eventBus!.emit(
+            "agent.safety.sandbox_denied",
+            { runId, conversationId, toolCallId: tc.id, skillId: tc.skillId, operation: op, reason, mode: this.deps.toolSandbox!.config.mode, recoverable: true },
+            { runId, conversationId },
+          );
+        });
+        if (sandboxDenied) {
+          deniedToolCalls.add(tc.id);
+          tc.metadata = { ...(tc.metadata ?? {}), safety: { deniedBy: "sandbox", blocked: true } };
+          continue;
+        }
+      }
+
+      // Layer 2: Scoped permission check — detect reauth needs
+      if (this.deps.scopedPermissionManager) {
+        const existingGrants = this.grantsByRun.get(runId) ?? [];
+        const planStepId = plan?.steps.find(
+          (s) => s.skillId === tc.skillId && (s.status === "pending" || s.status === "in_progress"),
+        )?.id;
+        const scopedCheck = this.deps.scopedPermissionManager.check({
+          requestedPermission: tc.permissions[0] ?? "shell.execute",
+          runId, planStepId, toolCallId: tc.id, skillId: tc.skillId,
+          arguments: tc.arguments, existingGrants,
+          permissionMode: input.permissionMode ?? "ask",
+        });
+        if (scopedCheck.needsReapproval) {
+          this.deps.eventBus.emit(
+            "agent.safety.scope_reauth_required",
+            { runId, conversationId, toolCallId: tc.id, skillId: tc.skillId, reason: scopedCheck.reason },
+            { runId, conversationId },
+          );
+          tc.requiresApproval = true;
+        }
+      }
+
+      // Layer 3: Permission policy evaluation
       const permDecision = await this.deps.permissionPolicy.evaluate({
-        userId: input.userId,
-        runId,
-        skillId: tc.skillId,
-        permissions: tc.permissions,
-        arguments: tc.arguments,
-        context,
-        permissionMode: input.permissionMode,
-        riskHints: tc.riskHints,
+        userId: input.userId, runId, skillId: tc.skillId, permissions: tc.permissions,
+        arguments: tc.arguments, context, permissionMode: input.permissionMode, riskHints: tc.riskHints,
       });
 
       if (!permDecision.allowed) {
-        throw Object.assign(
-          new Error(
-            `Permission denied for ${tc.name}: ${permDecision.reasons.join(", ")}`,
-          ),
-          { code: "AGENT_PERMISSION_DENIED", category: "permission" },
+        this.deps.eventBus.emit(
+          "agent.safety.scope_reauth_required",
+          { runId, conversationId, toolCallId: tc.id, skillId: tc.skillId,
+            reason: `Permission denied: ${permDecision.reasons.join(", ")}` },
+          { runId, conversationId },
         );
+        deniedToolCalls.add(tc.id);
+        tc.metadata = { ...(tc.metadata ?? {}), safety: { deniedBy: "permission", reasons: permDecision.reasons, blocked: true } };
+        continue;
       }
 
       if (permDecision.requiresApproval) {
         await this.requestApproval({
-          runId,
-          conversationId,
-          toolCallId: tc.id,
+          runId, conversationId, toolCallId: tc.id,
           title: `Approve ${tc.name}`,
           description: `Run tool ${tc.name} with arguments: ${JSON.stringify(summarizeArguments(tc.arguments))}`,
           riskLevel: maxRiskLevel(tc.riskLevel, permDecision.riskLevel),
-          requestedAction: {
-            skillId: tc.skillId,
-            arguments: tc.arguments,
-            permissions: tc.permissions,
-            toolCallId: tc.id,
-          },
+          requestedAction: { skillId: tc.skillId, arguments: tc.arguments, permissions: tc.permissions, toolCallId: tc.id },
         });
+        return { runId, conversationId, status: "waiting_approval", artifacts: [], toolCalls: [] };
+      }
 
-        return {
-          runId,
-          conversationId,
-          status: "waiting_approval",
-          artifacts: [],
-          toolCalls: [],
-        };
+      // Record grant for completed permission checks
+      if (this.deps.scopedPermissionManager) {
+        const grants = this.grantsByRun.get(runId) ?? [];
+        grants.push({
+          permission: tc.permissions[0] ?? "shell.execute", runId, toolCallId: tc.id,
+          skillId: tc.skillId, approvedArgs: { ...tc.arguments },
+          grantedAt: new Date().toISOString(),
+          expiresAt: new Date(Date.now() + 30 * 60_000).toISOString(),
+          grantedBy: "agent", riskLevel: tc.riskLevel as RiskLevel, scope: "this_run" as const,
+        });
+        this.grantsByRun.set(runId, grants);
+      }
+    }
+
+    // If all tool calls were denied by sandbox/permission, create synthetic observation
+    // and enter reflection directly — the agent can explain the denial (§P0-3).
+    if (deniedToolCalls.size > 0 && deniedToolCalls.size === decision.toolCalls.length) {
+      const deniedSummaries = decision.toolCalls.map((tc) => ({
+        id: tc.id, skillId: tc.skillId, name: tc.name,
+        status: "failed" as const,
+        summary: `[SAFETY_DENIED] ${tc.name} was blocked`,
+        metadata: { safety: (tc.metadata as Record<string, unknown>)?.["safety"], trust: "untrusted" as const, blocked: true },
+      }));
+      const safetyObservation: AgentObservation = {
+        runId, toolCalls: deniedSummaries, artifacts: [],
+        summary: `Safety denied ${deniedToolCalls.size} tool(s): ${deniedSummaries.map((d) => d.skillId).join(", ")}`,
+      };
+      // Skip execution, go directly to reflection/response
+      await this.deps.runStateManager.markStatus(runId, "reflecting");
+      const reflectResult = await this.deps.reflectionEngine.reflect(
+        { context, intent, plan, observation: safetyObservation, taskState: taskState ?? emptyTaskState() },
+        signal,
+      );
+      return this.respondAfterReflection(input, context, intent, plan, safetyObservation, reflectResult, signal);
+    }
+
+    // Build safe decision without denied calls
+    const safeCalls = decision.toolCalls.filter((tc) => !deniedToolCalls.has(tc.id));
+    const safeDecision: ToolDecision & { type: "use_tool" } = { ...decision, toolCalls: safeCalls };
+
+    // Mark plan steps in_progress and bind planStepId
+    if (plan) {
+      for (const tc of safeCalls) {
+        const matchingStep = plan.steps.find((s) => s.skillId === tc.skillId && s.status === "pending");
+        if (matchingStep) {
+          matchingStep.status = "in_progress";
+          matchingStep.updatedAt = new Date().toISOString();
+          tc.metadata = { ...(tc.metadata ?? {}), planStepId: matchingStep.id };
+        }
       }
     }
 
     return this.executeToolDecision(
-      input,
-      context,
-      intent,
-      plan,
-      decision,
-      signal,
-      iteration,
-      accumulatedObservation,
-      taskState,
+      input, context, intent, plan, safeDecision, signal, iteration, accumulatedObservation, taskState,
     );
   }
 
@@ -881,6 +982,29 @@ export class AgentLoopEngine {
         // Best effort — non-blocking
       });
 
+    // ── Injection scan on latest execution results (§P0-3) ───────────
+    if (this.deps.injectionDetector) {
+      for (const tc of latestObservation.toolCalls) {
+        if (tc.summary) {
+          const detection = this.deps.injectionDetector.detect(tc.summary);
+          if (detection.shouldBlock) {
+            tc.summary = `[BLOCKED] Content blocked due to potential prompt injection (${detection.matches.length} matches).`;
+            (tc as unknown as Record<string, unknown>).trust = "untrusted";
+            (tc as unknown as Record<string, unknown>).blocked = true;
+            this.deps.eventBus.emit(
+              "agent.safety.injection_detected",
+              { runId, conversationId, toolCallId: tc.id, source: "tool_result",
+                matches: detection.matches.map((m) => ({ category: m.category, severity: m.severity, explanation: m.explanation })),
+                blocked: true, contentSnippet: tc.summary.slice(0, 200) },
+              { runId, conversationId },
+            );
+          } else if (detection.shouldWarn && detection.warningMessage) {
+            tc.summary = `${detection.warningMessage}\n\n${tc.summary}`;
+          }
+        }
+      }
+    }
+
     await this.deps.runStateManager.markStatus(runId, "reflecting");
     const reflection = await this.deps.reflectionEngine.reflect(
       {
@@ -1064,6 +1188,38 @@ export class AgentLoopEngine {
       );
     }
   }
+
+  /**
+   * Compose a response after safety-denial reflection (§P0-3).
+   * Used when all tool calls were blocked by sandbox/permission.
+   */
+  private async respondAfterReflection(
+    input: AgentLoopInput,
+    context: AgentContext,
+    intent: RoutedIntent,
+    plan: AgentPlan | undefined,
+    observation: AgentObservation,
+    reflection: AgentReflection,
+    signal: AbortSignal,
+  ): Promise<AgentLoopResult> {
+    const { runId, conversationId } = input;
+    await this.deps.runStateManager.markStatus(runId, "responding");
+    const response = await this.deps.responseComposer.composeFromObservation(
+      { input, context, observation, reflection },
+      signal,
+    );
+    if (this.deps.traceManager) {
+      this.deps.traceManager.endTrace(runId);
+    }
+    this.cleanupGrants(runId);
+    return {
+      runId, conversationId,
+      assistantMessageId: response.messageId,
+      status: "completed",
+      artifacts: observation.artifacts,
+      toolCalls: observation.toolCalls as ToolCallSummary[],
+    };
+  }
 }
 
 function intentFromSkillId(skillId: string): RoutedIntent["type"] {
@@ -1154,14 +1310,18 @@ function updateTaskState(
     }
   }
 
-  // Mark tool steps as completed based on observation
+  // Mark tool steps as completed based on observation.
+  // Prefer planStepId from metadata for stable binding when same skill
+  // appears multiple times in the plan (§P0-2).
   for (const tc of observation.toolCalls) {
-    const stepId = `tool:${tc.skillId}`;
+    const planStepId = (tc.metadata as Record<string, unknown> | undefined)?.["planStepId"] as string | undefined;
+    const stepId = planStepId ?? `tool:${tc.skillId}`;
     if (tc.status === "completed") {
       if (!completedSteps.includes(stepId)) {
         completedSteps.push(stepId);
       }
-      pendingSteps.splice(pendingSteps.indexOf(stepId), 1);
+      const pendingIdx = pendingSteps.indexOf(stepId);
+      if (pendingIdx >= 0) pendingSteps.splice(pendingIdx, 1);
     }
   }
 
@@ -1258,4 +1418,49 @@ function buildRiskReasons(
     reasons.push("Low-risk operation");
   }
   return reasons;
+}
+
+// ── Safety helpers (§P0-3) ────────────────────────────────────────────────
+
+/**
+ * Validate a planned tool call against sandbox rules.
+ * Returns true if the tool was denied, and calls onDenied with operation + reason.
+ */
+function validateSandbox(
+  sandbox: NonNullable<AgentLoopEngineDeps["toolSandbox"]>,
+  tc: PlannedToolCall,
+  onDenied: (operation: string, reason: string) => void,
+): boolean {
+  // Filesystem validation
+  if (tc.permissions.some((p) => p.startsWith("filesystem."))) {
+    const path = (tc.arguments["path"] ?? tc.arguments["target"] ?? tc.arguments["file"]) as string | undefined;
+    if (path) {
+      const op = tc.permissions.includes("filesystem.delete") ? "delete"
+        : tc.permissions.includes("filesystem.write") ? "write" : "read";
+      const result = sandbox.validateFilesystem({ operation: op as "read" | "write" | "delete", path });
+      if (!result.allowed) { onDenied(`filesystem.${op}`, result.reason!); return true; }
+    }
+  }
+  // Shell validation
+  if (tc.permissions.includes("shell.execute")) {
+    const command = tc.arguments["command"] as string | undefined;
+    if (command) {
+      const result = sandbox.validateShell({ command, arguments: tc.arguments["args"] as string[] | undefined });
+      if (!result.allowed) { onDenied("shell.execute", result.reason!); return true; }
+    }
+  }
+  // Network validation
+  if (tc.permissions.includes("network.request")) {
+    const url = tc.arguments["url"] as string | undefined;
+    if (url) {
+      const result = sandbox.validateNetwork({ url });
+      if (!result.allowed) { onDenied("network.request", result.reason!); return true; }
+    }
+  }
+  return false;
+}
+
+/** Create an empty task state for initial safety-denial reflection. */
+function emptyTaskState(): AgentTaskState {
+  return { goal: "", completedSteps: [], pendingSteps: [], gatheredFacts: {}, openQuestions: [], iteration: 1 };
 }
