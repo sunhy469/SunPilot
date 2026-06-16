@@ -16,7 +16,9 @@
     "test": "pnpm -r test",
     "lint": "pnpm -r lint",
     "dev:daemon": "pnpm --filter @sunpilot/daemon dev",
-    "dev:web": "pnpm --filter @sunpilot/web dev"
+    "dev:web": "pnpm --filter @sunpilot/web dev",
+    "eval:agent": "pnpm --filter @sunpilot/evals eval:agent",
+    "eval:agent:real": "pnpm --filter @sunpilot/evals eval:agent:real"
   },
   "dependencies": {
     "@sunpilot/launcher": "workspace:*"
@@ -24,6 +26,7 @@
   "devDependencies": {
     "@types/node": "^22.15.29",
     "eslint": "^9.28.0",
+    "eslint-plugin-react-hooks": "^7.1.1",
     "prettier": "^3.5.3",
     "typescript": "^5.8.3",
     "typescript-eslint": "^8.33.1",

@@ -1,0 +1,23 @@
+{
+  "name": "@sunpilot/evals",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "vitest run --passWithNoTests",
+    "test:watch": "vitest",
+    "eval:agent": "vitest run agent/",
+    "eval:agent:real": "GOLDEN_TASKS_REAL_AGENT=true vitest run agent/"
+  },
+  "dependencies": {
+    "@sunpilot/core": "workspace:*",
+    "@sunpilot/daemon": "workspace:*",
+    "@sunpilot/storage": "workspace:*",
+    "@sunpilot/skill-runner": "workspace:*",
+    "@sunpilot/protocol": "workspace:*"
+  },
+  "devDependencies": {
+    "typescript": "^5.8.3",
+    "vitest": "^3.2.1"
+  }
+}

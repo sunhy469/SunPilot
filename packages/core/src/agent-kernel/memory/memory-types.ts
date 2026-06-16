@@ -3,6 +3,8 @@ import type {
   MemoryScope,
   MemorySearchInput,
   MemoryType,
+  MemoryRelationEntry,
+  MemoryQualityScore,
   RetrievedMemoryRecord,
 } from "@sunpilot/protocol";
 import type {
@@ -74,6 +76,15 @@ export interface MemoryPolicyDecision {
   action: "create" | "supersede" | "reject";
   reason: string;
   supersedeMemoryId?: string;
+  /** When a contradiction is detected, the contradiction details. */
+  contradiction?: {
+    /** ID of the existing memory that is contradicted. */
+    existingId: string;
+    /** Source of the existing memory. */
+    existingSource: string;
+    /** Human-readable reason for the contradiction. */
+    reason: string;
+  };
 }
 
 export interface MemoryPolicy {

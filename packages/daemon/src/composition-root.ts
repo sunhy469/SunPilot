@@ -51,6 +51,18 @@ import {
   type AgentLoopServiceConfig,
   ToolDecisionEngine,
   type Permission,
+  // ── New modules (architecture optimization §1–7) ─────────────────
+  PlanValidator,
+  Replanner,
+  ModelRouter,
+  createSingleModelRouter,
+  ToolRetriever,
+  PromptInjectionDetector,
+  ToolSandbox,
+  TaskScopedPermissionManager,
+  TraceManager,
+  RepositoryTraceManager,
+  type ModelPurpose,
 } from "@sunpilot/core";
 import type { DatabaseContext } from "@sunpilot/storage";
 import type { SkillRegistry } from "@sunpilot/skill-runner";
@@ -130,6 +142,35 @@ export function createAgentLoopService(deps: {
       "[embedding] FALLBACK mode — using keyword/hash vectors. Set SUNPILOT_LLM_API_KEY to enable semantic embeddings.",
     );
   }
+
+  // ── Model Router (§5 of architecture next steps) ────────────────
+  // Creates a single-model router for now — all purposes share the same
+  // LLM provider. When multi-model setup is needed, replace with
+  // createTieredModelRouter({ lowCost, reasoning, primary, fallback }).
+  const modelRouter = createSingleModelRouter(
+    deps.llmProvider,
+    undefined,
+    deps.database.modelCalls, // DB recorder for model call persistence (§P1-5)
+  );
+
+  // Purpose-specific LlmProvider adapters — each delegates to ModelRouter
+  // with a fixed purpose so that model calls are tracked per-purpose.
+  function createPurposeProvider(purpose: ModelPurpose): LlmProvider {
+    return {
+      id: `router:${purpose}`,
+      model: modelRouter.getModelForPurpose(purpose),
+      streamChat(request) {
+        return modelRouter.streamChat(purpose, request);
+      },
+    };
+  }
+
+  const intentLlm = createPurposeProvider("intent_classification");
+  const toolArgLlm = createPurposeProvider("tool_argument_generation");
+  const reflectionLlm = createPurposeProvider("reflection");
+  const responseLlm = createPurposeProvider("response_composition");
+  const planningLlm = createPurposeProvider("planning");
+  const replanningLlm = createPurposeProvider("replanning");
 
   // ── Context ────────────────────────────────────────────────────
   const contextBuilder = new ContextBuilder({
@@ -241,15 +282,19 @@ export function createAgentLoopService(deps: {
 
   // ── Intent ─────────────────────────────────────────────────────
   const intentRouter = new IntentRouter({
-    llm: deps.llmProvider,
+    llm: intentLlm,
   });
 
   // ── Tools ──────────────────────────────────────────────────────
   // Shared argument builder — used by both ToolDecisionEngine (build)
   // and ExecutionOrchestrator (repair loop).
   const toolArgBuilder = new DefaultToolArgumentBuilder({
-    llm: deps.llmProvider,
+    llm: toolArgLlm,
   });
+
+  // ToolRetriever — multi-layer tool retrieval pipeline (§2)
+  // Uses embedding service for semantic similarity scoring when available.
+  const toolRetriever = new ToolRetriever();
 
   const toolDecisionEngine = new ToolDecisionEngine({
     listSkills: async () => {
@@ -281,8 +326,13 @@ export function createAgentLoopService(deps: {
         })),
       );
     },
-    llm: deps.llmProvider,
+    llm: planningLlm,
     argumentBuilder: toolArgBuilder,
+    // ── ToolRetriever integration (§2) ──────────────────────────
+    // Enables 5-layer retrieval (keyword → category → permission →
+    // embedding → history) for tool selection at scale.
+    toolRetriever,
+    embeddingService,
   });
 
   // ── Safety ─────────────────────────────────────────────────────
@@ -297,6 +347,68 @@ export function createAgentLoopService(deps: {
 
   // ── Planner ────────────────────────────────────────────────────
   const planner = new RuleBasedPlanner();
+
+  // ── Plan Validator (§1 of architecture next steps) ──────────────
+  // Validates plans before execution for structural issues:
+  // missing skills, circular deps, risk mismatches, destructive args.
+  const planValidator = new PlanValidator({
+    listSkills: async () => {
+      const skills = deps.skillRegistry.list();
+      return skills.flatMap((s) =>
+        s.manifest.capabilities.map((capability) => ({
+          id: capabilityToolId(s.id, capability.name),
+          name: capability.title,
+          description: capability.description,
+          category: categoryFromCapability(capability.name),
+          enabled: s.enabled,
+          permissions: normalizeCapabilityPermissions(capability.permissions),
+          defaultTimeoutMs: 60_000,
+          maxTimeoutMs: 300_000,
+          supportsAbort: true,
+          idempotent: false,
+          riskHints: {
+            defaultRisk: capability.risk as
+              | "low"
+              | "medium"
+              | "high"
+              | "critical",
+          },
+        })),
+      );
+    },
+  });
+
+  // ── Replanner (§1 of architecture next steps) ──────────────────
+  // Handles 6 trigger types: tool_failed, goal_changed,
+  // approval_rejected, tool_result_insufficient, missing_parameters,
+  // max_iterations_approaching.
+  const replanner = new Replanner({
+    listSkills: async () => {
+      const skills = deps.skillRegistry.list();
+      return skills.flatMap((s) =>
+        s.manifest.capabilities.map((capability) => ({
+          id: capabilityToolId(s.id, capability.name),
+          name: capability.title,
+          description: capability.description,
+          category: categoryFromCapability(capability.name),
+          enabled: s.enabled,
+          permissions: normalizeCapabilityPermissions(capability.permissions),
+          defaultTimeoutMs: 60_000,
+          maxTimeoutMs: 300_000,
+          supportsAbort: true,
+          idempotent: false,
+          riskHints: {
+            defaultRisk: capability.risk as
+              | "low"
+              | "medium"
+              | "high"
+              | "critical",
+          },
+        })),
+      );
+    },
+    llm: replanningLlm,
+  });
 
   // ── Execution ──────────────────────────────────────────────────
   // Skill executor: delegates to SkillToolExecutor in core.
@@ -335,12 +447,12 @@ export function createAgentLoopService(deps: {
 
   // ── Reflection ─────────────────────────────────────────────────
   const reflectionEngine = new BasicReflectionEngine({
-    llm: deps.llmProvider,
+    llm: reflectionLlm,
   });
 
   // ── Response ───────────────────────────────────────────────────
   const responseComposer = new ResponseComposer({
-    llm: deps.llmProvider,
+    llm: responseLlm,
     eventBus: rawEventBus,
     modelCalls: deps.database.modelCalls,
     saveMessage: async (input) => {
@@ -374,6 +486,42 @@ export function createAgentLoopService(deps: {
     embeddingService,
   });
 
+  // ── Safety Hardening (§3, §4 of architecture next steps) ───────
+  // PromptInjectionDetector — scans untrusted content for injection patterns.
+  // Uses default patterns covering 6 categories (ignore_instructions,
+  // system_prompt_leak, dangerous_tool_call, role_confusion,
+  // delimiter_attack, data_exfiltration) with Chinese language support.
+  const injectionDetector = new PromptInjectionDetector({
+    blockCritical: true,
+    warnOnMatch: true,
+  });
+
+  // ToolSandbox — validates tool execution against sandbox rules.
+  // Mode from SUNPILOT_SANDBOX_MODE env var (strict|moderate|permissive),
+  // defaults to "moderate" for local dev.
+  const sandboxMode: "strict" | "moderate" | "permissive" =
+    (typeof process !== "undefined" &&
+      (process.env["SUNPILOT_SANDBOX_MODE"] === "strict" ||
+       process.env["SUNPILOT_SANDBOX_MODE"] === "permissive")
+        ? process.env["SUNPILOT_SANDBOX_MODE"] as "strict" | "permissive"
+        : "moderate");
+  const toolSandbox = new ToolSandbox(sandboxMode);
+  console.log(`[sandbox] Mode: ${sandboxMode}`);
+
+  // TaskScopedPermissionManager — enforces fine-grained permission
+  // boundaries per run/step/tool_call with argument-change re-evaluation
+  // and critical-risk forced re-approval.
+  const scopedPermissionManager = new TaskScopedPermissionManager();
+
+  // ── Trace Manager (§7, §P0-2 of architecture next steps) ──────
+  // Creates trace/span per run for per-phase latency, token, and error
+  // tracking. Uses RepositoryTraceManager when DB persistence is available
+  // so traces survive daemon restarts.
+  const tracePersistence = deps.database.agentTraces;
+  const traceManager = tracePersistence
+    ? new RepositoryTraceManager(tracePersistence, 1000)
+    : new TraceManager(1000);
+
   // ── Loop Engine ────────────────────────────────────────────────
   const loopEngine = new AgentLoopEngine({
     contextBuilder,
@@ -389,6 +537,16 @@ export function createAgentLoopService(deps: {
     eventBus: rawEventBus,
     approvalRequestService,
     memoryWriter,
+    // ── New optional modules (architecture optimization §1–7) ────
+    planValidator,
+    replanner,
+    modelRouter,
+    traceManager,
+    injectionDetector,
+    toolSandbox,
+    scopedPermissionManager,
+    // ── Plan snapshot persistence (§P0-2) ──────────────────────────
+    planSnapshotRepo: deps.database.planSnapshots,
   });
 
   // ── Agent Service ──────────────────────────────────────────────

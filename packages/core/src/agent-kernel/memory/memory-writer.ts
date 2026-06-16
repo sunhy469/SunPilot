@@ -1,4 +1,10 @@
-import type { MemoryRecord, MemoryScope, MemoryType } from "@sunpilot/protocol";
+import type {
+  MemoryRecord,
+  MemoryScope,
+  MemoryType,
+  MemoryRelationEntry,
+  MemoryQualityScore,
+} from "@sunpilot/protocol";
 import type {
   MemoryCandidate,
   MemoryPolicy,
@@ -31,7 +37,9 @@ export interface DefaultMemoryWriterDeps {
  *    - 工具任务完成 → 自动生成 task_summary 候选
  * 2. secretRedactor.scan：扫描敏感信息（密钥、密码等）并脱敏
  * 3. 查重：检索相似记忆，交由 memoryPolicy 决定 write/supersede/reject
- * 4. 写入或拒写，记录决策理由
+ * 4. Quality scoring: compute quality scores for recall prioritization (§6)
+ * 5. Contradiction relations: link contradictory memories (§6)
+ * 6. 写入或拒写，记录决策理由
  */
 export class DefaultMemoryWriter {
   private readonly policy: MemoryPolicy;
@@ -42,7 +50,8 @@ export class DefaultMemoryWriter {
   constructor(private readonly deps: DefaultMemoryWriterDeps) {
     this.policy = deps.policy ?? new DefaultMemoryPolicy();
     this.secretRedactor = deps.secretRedactor ?? new PatternSecretRedactor();
-    this.idGenerator = deps.idGenerator ?? (() => `memory_${crypto.randomUUID()}`);
+    this.idGenerator =
+      deps.idGenerator ?? (() => `memory_${crypto.randomUUID()}`);
     this.clock = deps.clock ?? (() => new Date());
   }
 
@@ -56,9 +65,14 @@ export class DefaultMemoryWriter {
       const secretScan = this.secretRedactor.scan(candidate.content);
       const similar = await this.deps.repository.search({
         query: candidate.title,
-        runId: candidate.scope === "run" ? input.input.runId : undefined,
-        conversationId: candidate.scope === "conversation" ? input.input.conversationId : undefined,
-        userId: candidate.scope === "user" ? input.input.userId : undefined,
+        runId:
+          candidate.scope === "run" ? input.input.runId : undefined,
+        conversationId:
+          candidate.scope === "conversation"
+            ? input.input.conversationId
+            : undefined,
+        userId:
+          candidate.scope === "user" ? input.input.userId : undefined,
         scopes: [candidate.scope],
         types: [candidate.type],
         limit: 5,
@@ -68,6 +82,18 @@ export class DefaultMemoryWriter {
         rejected.push({ candidate, reason: decision.reason });
         continue;
       }
+
+      // ── Compute quality score (§6) ──────────────────────────────────
+      const hasToolEvidence =
+        candidate.source === "agent_task_summary" ||
+        candidate.metadata?.trigger === "completed_tool_task";
+      const qualityScore = this.computeCandidateQuality(candidate, {
+        hasConflicts: !!decision.contradiction,
+        hasToolEvidence,
+      });
+
+      // ── Build contradiction relations (§6) ──────────────────────────
+      const relations = this.buildRelations(decision, similar, candidate);
 
       // Generate semantic embedding for hybrid retrieval (best-effort)
       let embedding: number[] | undefined;
@@ -82,13 +108,27 @@ export class DefaultMemoryWriter {
       }
 
       const record = await this.deps.repository.create(
-        this.toRecord(candidate, input, secretScan.redactedText, decision.reason, embedding),
+        this.toRecord(
+          candidate,
+          input,
+          secretScan.redactedText,
+          decision.reason,
+          embedding,
+          qualityScore,
+          relations,
+        ),
       );
       written.push(record);
 
       if (decision.action === "supersede" && decision.supersedeMemoryId) {
-        await this.deps.repository.supersede(decision.supersedeMemoryId, record.id);
-        superseded.push({ oldMemoryId: decision.supersedeMemoryId, newMemoryId: record.id });
+        await this.deps.repository.supersede(
+          decision.supersedeMemoryId,
+          record.id,
+        );
+        superseded.push({
+          oldMemoryId: decision.supersedeMemoryId,
+          newMemoryId: record.id,
+        });
       }
     }
 
@@ -142,8 +182,7 @@ export class DefaultMemoryWriter {
     // 1. A tool task completes successfully (goalAchieved), OR
     // 2. The conversation has grown large (forceSummary — token or turn trigger), OR
     // 3. Rolling trigger: every 8 tool turns to keep summary incremental
-    const turnCount =
-      input.observation?.toolCalls.length ?? 0;
+    const turnCount = input.observation?.toolCalls.length ?? 0;
     const shouldRollingSummarize =
       input.observation &&
       turnCount > 0 &&
@@ -157,7 +196,10 @@ export class DefaultMemoryWriter {
       const obs = input.observation;
       const refl = input.reflection;
       const toolDetails = obs.toolCalls
-        .map((tc) => `- ${tc.name} (${tc.skillId}): ${tc.status} — ${tc.summary}`)
+        .map(
+          (tc) =>
+            `- ${tc.name} (${tc.skillId}): ${tc.status} — ${tc.summary}`,
+        )
         .join("\n");
       const artifactDetails = obs.artifacts
         .map((a) => `- ${a.name} (${a.type})`)
@@ -201,9 +243,6 @@ export class DefaultMemoryWriter {
         };
 
         // ── Quality scoring ──────────────────────────────────────────
-        // Derive quality from reflection confidence, tool result richness,
-        // and whether any tools failed. This feeds into stale detection
-        // and summary prioritization in ContextBuilder.
         const toolSuccessRate =
           obs.toolCalls.length > 0
             ? obs.toolCalls.filter((tc) => tc.status === "completed").length /
@@ -213,9 +252,12 @@ export class DefaultMemoryWriter {
         const hasArtifacts = obs.artifacts.length > 0;
         const hasQuestions = (refl?.missingInfo?.length ?? 0) > 0;
         const qualityScore = Math.round(
-          (reflConfidence * 0.4 + toolSuccessRate * 0.3 +
-            (hasArtifacts ? 0.15 : 0) + (hasQuestions ? 0 : 0.15)) * 100,
-        ) / 100; // 0.0–1.0
+          (reflConfidence * 0.4 +
+            toolSuccessRate * 0.3 +
+            (hasArtifacts ? 0.15 : 0) +
+            (hasQuestions ? 0 : 0.15)) *
+            100,
+        ) / 100;
 
         // Dynamic importance: goal-achieved summaries more important
         const dynImportance = refl?.goalAchieved
@@ -226,10 +268,20 @@ export class DefaultMemoryWriter {
 
         // Summary version: increment for rolling updates
         const summaryVersion =
-          (typeof input.context?.messages?.length === "number"
+          typeof input.context?.messages?.length === "number"
             ? Math.floor(input.context.messages.length / 10)
-            : 1);
+            : 1;
         const now = new Date().toISOString();
+
+        // ── Stale detection metadata (§6) ────────────────────────────
+        // Summaries can become stale when goals change or facts are updated.
+        const staleSignals: string[] = [];
+        if (refl && !refl.goalAchieved && refl.missingInfo?.length) {
+          staleSignals.push("goal_not_achieved");
+        }
+        if (hasQuestions) {
+          staleSignals.push("has_open_questions");
+        }
 
         candidates.push({
           key: `task_summary:${input.input.runId}`,
@@ -257,10 +309,7 @@ export class DefaultMemoryWriter {
             goalAchieved: refl?.goalAchieved ?? false,
             confidence: refl?.confidence,
             timestamp: now,
-            // Rolling summary range: tracks which messages are covered
-            // ContextBuilder uses this to exclude summarized messages.
             messageRange: range,
-            // Quality feedback loop fields
             quality: {
               score: qualityScore,
               toolSuccessRate,
@@ -271,6 +320,10 @@ export class DefaultMemoryWriter {
             },
             version: summaryVersion,
             updatedAt: now,
+            // Stale detection signals
+            staleSignals:
+              staleSignals.length > 0 ? staleSignals : undefined,
+            staleCheckedAt: now,
           },
         });
       }
@@ -279,12 +332,108 @@ export class DefaultMemoryWriter {
     return candidates;
   }
 
+  /**
+   * Build memory relations based on the policy decision.
+   *
+   * When a contradiction is detected, adds a `contradicts` relation
+   * pointing to the existing memory, and marks the old memory with
+   * a `resolvedBy` relation in the new memory's metadata.
+   */
+  private buildRelations(
+    decision: { contradiction?: { existingId: string; reason: string } },
+    similar: Array<{ id: string; relevance: number }>,
+    candidate: MemoryCandidate,
+  ): MemoryRelationEntry[] {
+    const relations: MemoryRelationEntry[] = [];
+    const now = new Date().toISOString();
+
+    // Contradiction relation
+    if (decision.contradiction) {
+      relations.push({
+        targetId: decision.contradiction.existingId,
+        relation: "contradicts",
+        establishedAt: now,
+        reason: decision.contradiction.reason,
+        confidence: candidate.confidence,
+      });
+    }
+
+    // Confirmed-by relation: when a high-relevance similar memory exists
+    // but isn't a contradiction or supersede target, treat as confirmation
+    for (const sim of similar) {
+      if (
+        sim.relevance >= 0.85 &&
+        sim.id !== decision.contradiction?.existingId
+      ) {
+        relations.push({
+          targetId: sim.id,
+          relation: "confirmedBy",
+          establishedAt: now,
+          reason: `New memory "${candidate.title}" confirms existing memory ${sim.id}`,
+          confidence: sim.relevance,
+        });
+      }
+    }
+
+    return relations;
+  }
+
+  /**
+   * Compute a quality score for a memory candidate using the policy's
+   * scoring method if available, otherwise fall back to a simple heuristic.
+   */
+  private computeCandidateQuality(
+    candidate: MemoryCandidate,
+    opts: { hasConflicts: boolean; hasToolEvidence: boolean },
+  ): MemoryQualityScore {
+    // Use the policy's quality scoring if available
+    if (
+      this.policy instanceof DefaultMemoryPolicy &&
+      typeof this.policy.computeQualityScore === "function"
+    ) {
+      return this.policy.computeQualityScore({
+        candidate: {
+          source: candidate.source,
+          confidence: candidate.confidence,
+          importance: candidate.importance,
+          metadata: candidate.metadata,
+        },
+        hasConflicts: opts.hasConflicts,
+        userConfirmed: candidate.source === "user_explicit",
+        hasToolEvidence: opts.hasToolEvidence,
+      });
+    }
+
+    // Fallback: simple heuristic quality score
+    const sourceCred = candidate.source === "user_explicit" ? 0.95 : 0.6;
+    const score = Math.round(
+      (sourceCred * 0.4 +
+        candidate.confidence * 0.3 +
+        candidate.importance * 0.2 +
+        (opts.hasConflicts ? 0.0 : 0.1)) *
+        100,
+    ) / 100;
+
+    return {
+      score: Math.min(1.0, score),
+      sourceCredibility: sourceCred,
+      recency: 1.0,
+      userConfirmed: candidate.source === "user_explicit",
+      taskRelevance: candidate.importance,
+      toolEvidence: opts.hasToolEvidence,
+      hasConflicts: opts.hasConflicts,
+      computedAt: new Date().toISOString(),
+    };
+  }
+
   private toRecord(
     candidate: MemoryCandidate,
     input: MemoryWriteInput,
     redactedContent: string,
     policyReason: string,
     embedding?: number[],
+    quality?: MemoryQualityScore,
+    relations?: MemoryRelationEntry[],
   ): MemoryRecord {
     const now = this.clock().toISOString();
     return {
@@ -302,6 +451,9 @@ export class DefaultMemoryWriter {
       confidence: candidate.confidence,
       importance: candidate.importance,
       embedding,
+      quality,
+      relations:
+        relations && relations.length > 0 ? relations : undefined,
       metadata: {
         ...candidate.metadata,
         conversationId: input.input.conversationId,
@@ -329,21 +481,31 @@ function extractExplicitMemory(message: string): string | undefined {
 
 function classifyMemoryType(content: string): MemoryType {
   const normalized = content.toLowerCase();
-  if (/prefer|preference|喜欢|偏好|习惯/.test(normalized)) return "user_preference";
-  if (/deploy|deployment|docker|kubernetes|上线|部署/.test(normalized)) return "deployment_info";
-  if (/typescript|react|node|java|spring|postgres|技术栈|框架/.test(normalized)) return "technical_stack";
+  if (/prefer|preference|喜欢|偏好|习惯/.test(normalized))
+    return "user_preference";
+  if (/deploy|deployment|docker|kubernetes|上线|部署/.test(normalized))
+    return "deployment_info";
+  if (/typescript|react|node|java|spring|postgres|技术栈|框架/.test(normalized))
+    return "technical_stack";
   if (/goal|目标|长期/.test(normalized)) return "long_term_goal";
-  if (/error|fix|solution|报错|错误|解决/.test(normalized)) return "error_solution";
+  if (/error|fix|solution|报错|错误|解决/.test(normalized))
+    return "error_solution";
   if (/project|项目|repo|仓库/.test(normalized)) return "project_profile";
   return "manual_note";
 }
 
-function defaultScopeForType(type: MemoryType, userId?: string): MemoryScope {
+function defaultScopeForType(
+  type: MemoryType,
+  userId?: string,
+): MemoryScope {
   if (type === "user_preference" && userId) return "user";
   return "conversation";
 }
 
-function scopeIdFor(scope: MemoryScope, input: MemoryWriteInput): string | undefined {
+function scopeIdFor(
+  scope: MemoryScope,
+  input: MemoryWriteInput,
+): string | undefined {
   switch (scope) {
     case "user":
       return input.input.userId;
@@ -366,8 +528,10 @@ function titleFor(type: MemoryType, content: string): string {
 }
 
 function slug(content: string): string {
-  return content
-    .toLowerCase()
-    .replace(/[^a-z0-9\u4e00-\u9fa5]+/g, "-")
-    .replace(/^-+|-+$/g, "") || "memory";
+  return (
+    content
+      .toLowerCase()
+      .replace(/[^a-z0-9一-龥]+/g, "-")
+      .replace(/^-+|-+$/g, "") || "memory"
+  );
 }

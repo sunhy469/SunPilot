@@ -18,6 +18,9 @@ export const AGENT_EVENT_TYPES = [
   "agent.intent.detected",
   // Planning
   "agent.plan.created",
+  "agent.plan.warnings",
+  "agent.plan.validated",
+  "agent.plan.revised",
   // Tool
   "agent.tool.selected",
   "agent.tool.started",
@@ -46,6 +49,10 @@ export const AGENT_EVENT_TYPES = [
   "agent.clarification.requested",
   // Error
   "agent.error",
+  // Safety (§P0-3)
+  "agent.safety.injection_detected",
+  "agent.safety.sandbox_denied",
+  "agent.safety.scope_reauth_required",
 ] as const;
 
 export type AgentEventType = (typeof AGENT_EVENT_TYPES)[number];
@@ -304,4 +311,43 @@ export interface AgentErrorPayload {
   category?: string;
   retryable?: boolean;
   details?: Record<string, unknown>;
+}
+
+// ── Safety event payloads (§P0-3) ───────────────────────────────────
+
+export interface AgentSafetyInjectionDetectedPayload {
+  runId: string;
+  conversationId?: string;
+  toolCallId?: string;
+  source: "tool_result" | "web_content" | "attachment" | "user_message";
+  matches: Array<{
+    category: string;
+    severity: string;
+    explanation: string;
+  }>;
+  blocked: boolean;
+  contentSnippet: string;
+}
+
+export interface AgentSafetySandboxDeniedPayload {
+  runId: string;
+  conversationId?: string;
+  toolCallId: string;
+  skillId: string;
+  operation: string;
+  reason: string;
+  mode: string;
+  /** Whether the agent can suggest alternatives. */
+  recoverable: boolean;
+}
+
+export interface AgentSafetyScopeReauthRequiredPayload {
+  runId: string;
+  conversationId?: string;
+  toolCallId: string;
+  skillId: string;
+  reason: string;
+  previousArgs?: Record<string, unknown>;
+  newArgs?: Record<string, unknown>;
+  diffSummary?: string;
 }
