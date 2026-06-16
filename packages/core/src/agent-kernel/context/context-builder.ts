@@ -151,6 +151,8 @@ export class ContextBuilder implements ContextBuilderInterface {
       priority: 0,
       tokenEstimate: estimateTokens(persona),
       metadata: {},
+      trust: "system",
+      authority: 10,
     });
 
     const rulesContent = rules.map((r) => `- ${r}`).join("\n");
@@ -162,6 +164,8 @@ export class ContextBuilder implements ContextBuilderInterface {
       priority: 0,
       tokenEstimate: estimateTokens(rulesContent),
       metadata: {},
+      trust: "system",
+      authority: 10,
     });
 
     // ── Safety policy ─────────────────────────────────────────────
@@ -389,6 +393,8 @@ export class ContextBuilder implements ContextBuilderInterface {
               scopeId: mem.scopeId,
               score: mem.score,
             },
+            trust: "memory",
+            sourceUri: `memory:${mem.id}`,
           });
         }
       } catch {
@@ -443,6 +449,9 @@ export class ContextBuilder implements ContextBuilderInterface {
               content: result.content,
               structured: result.structured,
             },
+            trust: "tool",
+            sourceUri: `tool_call:${result.toolCallId}`,
+            generatedAt: new Date().toISOString(),
           });
         }
       } catch {

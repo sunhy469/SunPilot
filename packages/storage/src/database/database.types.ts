@@ -1,4 +1,5 @@
 import type {
+  AgentTraceRepository,
   ApprovalRepository,
   ArtifactRepository,
   AuditRepository,
@@ -8,6 +9,7 @@ import type {
   MemoryRepository,
   MessageRepository,
   ModelCallRepository,
+  PlanSnapshotRepository,
   RunRepository,
   RunStatusHistoryRepository,
   SkillRepository,
@@ -32,6 +34,10 @@ export interface DatabaseContext {
   audit: AuditRepository;
   idempotency: IdempotencyRepository;
   skills: SkillRepository;
+  /** Optional — agent trace persistence (§P0-2). */
+  agentTraces?: AgentTraceRepository;
+  /** Optional — plan snapshot persistence (§P0-2). */
+  planSnapshots?: PlanSnapshotRepository;
   transaction?<T>(work: (database: DatabaseContext) => Promise<T>): Promise<T>;
   close(): Promise<void>;
 }

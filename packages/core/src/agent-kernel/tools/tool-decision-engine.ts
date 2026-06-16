@@ -10,6 +10,31 @@ import type {
 } from "../loop-types.js";
 import { INTENT_SKILL_MAP, type SkillSummary } from "./tool-types.js";
 import type { ToolArgumentBuilder } from "./tool-argument-builder.js";
+import type { ToolRetriever, ToolCallHistoryEntry } from "./tool-retriever.js";
+import type { EmbeddingService } from "../context/embedding-service.js";
+
+// ── Decision metadata (§P1-4) ─────────────────────────────────────────────
+
+/** Audit metadata recorded on each PlannedToolCall for debugging tool selection. */
+export interface DecisionMetadata {
+  /** Which layer made the final selection. */
+  decisionPath: "plan" | "intent_match" | "priority" | "deterministic_scorer" | "llm_semantic" | "scorer_fallback" | "intent_skill_map" | "no_tool";
+  /** Whether an LLM call was involved in the selection. */
+  llmSelectionUsed: boolean;
+  /** Top-K candidates from ToolRetriever with scores and reasons. */
+  retrievalMetadata?: {
+    query: string;
+    topK: number;
+    candidates: Array<{
+      skillId: string;
+      score: number;
+      matchReasons: string[];
+    }>;
+    fallbackUsed: boolean;
+  };
+  /** Reason for asking clarification instead of selecting. */
+  clarificationReason?: string;
+}
 
 export interface ToolDecisionEngineDeps {
   /** List all available skills with their summaries. */
@@ -18,6 +43,14 @@ export interface ToolDecisionEngineDeps {
   llm?: LlmProvider;
   /** Optional schema-aware tool argument builder. Falls back to heuristics. */
   argumentBuilder?: ToolArgumentBuilder;
+  /** Optional ToolRetriever for multi-layer tool retrieval at scale (§2). */
+  toolRetriever?: ToolRetriever;
+  /** Optional embedding service for semantic similarity scoring. */
+  embeddingService?: EmbeddingService;
+  /** Recent tool call history for success/failure weighting. */
+  recentHistory?: ToolCallHistoryEntry[];
+  /** Current permission mode for safety-aware scoring. */
+  permissionMode?: "ask" | "auto" | "full";
 }
 
 /**
@@ -102,7 +135,12 @@ export class ToolDecisionEngine implements ToolDecisionEngineInterface {
       const toolSteps = plan.steps.filter(
         (s) => s.type === "tool" && s.skillId,
       );
+      const planMeta: DecisionMetadata = {
+        decisionPath: "plan",
+        llmSelectionUsed: false,
+      };
       const planToolCalls: PlannedToolCall[] = [];
+      const planClarifications: string[] = [];
       for (const step of toolSteps) {
         const skill = availableSkills.find(
           (item) => item.id === step.skillId,
@@ -112,7 +150,6 @@ export class ToolDecisionEngine implements ToolDecisionEngineInterface {
           step.riskLevel,
           skill.riskHints.defaultRisk ?? "low",
         );
-        // If plan step has explicit input, use it directly
         if (step.input && Object.keys(step.input).length > 0) {
           planToolCalls.push({
             id: `tc_${crypto.randomUUID()}`,
@@ -126,6 +163,7 @@ export class ToolDecisionEngine implements ToolDecisionEngineInterface {
             timeoutMs: Math.min(skill.defaultTimeoutMs, skill.maxTimeoutMs),
             riskHints: skill.riskHints,
             inputSchema: skill.inputSchema,
+            metadata: { decisionPath: "plan", llmSelectionUsed: false },
           });
         } else {
           const built = await this.buildPlannedToolCall(
@@ -134,15 +172,25 @@ export class ToolDecisionEngine implements ToolDecisionEngineInterface {
             `Plan step: ${step.description}`,
             previousObservation,
             signal,
+            planMeta,
           );
           if (built.call) {
             built.call.riskLevel = maxRisk(built.call.riskLevel, riskLevel);
             built.call.requiresApproval =
               built.call.riskLevel === "high" || built.call.riskLevel === "critical";
             planToolCalls.push(built.call);
+          } else if (built.clarification) {
+            planClarifications.push(built.clarification);
           }
-          // If clarification needed, skip this tool (other tools may still run)
         }
+      }
+      // If all plan steps failed with missing params, ask clarification
+      if (planToolCalls.length === 0 && planClarifications.length > 0) {
+        return {
+          type: "ask_clarification",
+          question: planClarifications.join(" "),
+          reason: `Plan requires missing parameters: ${planClarifications.join("; ")}`,
+        };
       }
       return {
         type: "use_tool",
@@ -163,8 +211,12 @@ export class ToolDecisionEngine implements ToolDecisionEngineInterface {
     let availableSkills: SkillSummary[] = [];
     try {
       availableSkills = await this.listEnabledSkills();
-    } catch {
+    } catch (err) {
       // Skill catalog unavailable — fall back to no_tool
+      console.warn(
+        "[ToolDecisionEngine] Skill catalog unavailable, falling back to no_tool:",
+        (err as Error).message,
+      );
       return {
         type: "no_tool",
         reason: "Skill catalog unavailable",
@@ -185,12 +237,60 @@ export class ToolDecisionEngine implements ToolDecisionEngineInterface {
       )
       .filter((s, idx, arr) => arr.findIndex((x) => x.id === s.id) === idx); // dedupe
 
-    // ── use_skill: three-layer funnel ──────────────────────────────
-    if (intent.type === "use_skill" && matchedSkills.length === 0) {
-      const scored = scoreSkills(
-        context.currentMessage.content,
-        availableSkills,
-      );
+    // ── Multi-layer tool retrieval (§2, §P1-4 of architecture next steps) ──
+    const shouldUseRetrieval =
+      (intent.type === "use_skill" || matchedSkills.length === 0) &&
+      intent.requiresTool;
+
+    if (shouldUseRetrieval) {
+      let scored: ScoredSkill[];
+      let retrievalMetaForAudit: DecisionMetadata["retrievalMetadata"] | undefined;
+
+      // Layer 1.5: ToolRetriever multi-layer retrieval (§2 of architecture next steps)
+      if (this.deps.toolRetriever) {
+        try {
+          const recentHistory = deriveRecentHistory(context.toolResults);
+
+          const retrievalResult = await this.deps.toolRetriever.retrieve({
+            query: context.currentMessage.content,
+            intent,
+            availableSkills,
+            embeddingService: this.deps.embeddingService,
+            recentHistory:
+              this.deps.recentHistory ?? recentHistory,
+            permissionMode: this.deps.permissionMode,
+          });
+          scored = retrievalResult.tools.map((st) => ({
+            skill: st.skill,
+            score: st.score,
+            matchReasons: st.matchReasons,
+          }));
+
+          // Build retrieval metadata for audit trail (§P1-4)
+          retrievalMetaForAudit = {
+            query: context.currentMessage.content,
+            topK: retrievalResult.topK,
+            candidates: retrievalResult.tools.map((st) => ({
+              skillId: st.skill.id,
+              score: st.score,
+              matchReasons: st.matchReasons,
+            })),
+            fallbackUsed: retrievalResult.fallbackUsed,
+          };
+
+          if (scored.length === 0 || (retrievalResult.fallbackUsed && scored[0]!.score < 0.1)) {
+            scored = scoreSkills(context.currentMessage.content, availableSkills);
+          }
+        } catch (err) {
+          console.warn(
+            "[ToolDecisionEngine] ToolRetriever.retrieve threw, falling back to inline scorer:",
+            (err as Error).message,
+          );
+          scored = scoreSkills(context.currentMessage.content, availableSkills);
+        }
+      } else {
+        scored = scoreSkills(context.currentMessage.content, availableSkills);
+      }
 
       const best = scored[0];
       if (!best || best.score <= 0) {
@@ -206,9 +306,15 @@ export class ToolDecisionEngine implements ToolDecisionEngineInterface {
             best.score - runnerUp.score > 0.3);
 
         if (isClearWinner) {
+          const decisionMeta: DecisionMetadata = {
+            decisionPath: "deterministic_scorer",
+            llmSelectionUsed: false,
+            retrievalMetadata: retrievalMetaForAudit,
+          };
           return this.buildUseToolDecision(
             [best.skill],
             `use_skill deterministic (score: ${best.score.toFixed(2)})`,
+            decisionMeta,
             context,
             previousObservation,
             signal,
@@ -246,24 +352,39 @@ export class ToolDecisionEngine implements ToolDecisionEngineInterface {
                 (s) => s.skill.id === selectedSkillId,
               );
               if (selected) {
+                const decisionMeta: DecisionMetadata = {
+                  decisionPath: "llm_semantic",
+                  llmSelectionUsed: true,
+                  retrievalMetadata: retrievalMetaForAudit,
+                };
                 return this.buildUseToolDecision(
                   [selected.skill],
                   `LLM selected: ${selectedSkillId}`,
+                  decisionMeta,
                   context,
                   previousObservation,
                   signal,
                 );
               }
             }
-          } catch {
-            // LLM unavailable — fall through to use best scorer match
+          } catch (err) {
+            console.warn(
+              "[ToolDecisionEngine] LLM semantic selection threw, falling back to scorer match:",
+              (err as Error).message,
+            );
           }
         }
 
         // LLM unavailable or couldn't decide — use best scorer match
+        const decisionMeta: DecisionMetadata = {
+          decisionPath: "scorer_fallback",
+          llmSelectionUsed: !!this.deps.llm,
+          retrievalMetadata: retrievalMetaForAudit,
+        };
         return this.buildUseToolDecision(
           [best.skill],
           `use_skill scorer fallback: ${best.skill.id} (score: ${best.score.toFixed(2)})`,
+          decisionMeta,
           context,
           previousObservation,
           signal,
@@ -303,6 +424,16 @@ export class ToolDecisionEngine implements ToolDecisionEngineInterface {
       const fallbackToolCalls = fallbackBuilt
         .filter((b) => b.call !== null)
         .map((b) => b.call!);
+      const fallbackClarifications = fallbackBuilt
+        .filter((b) => b.clarification)
+        .map((b) => b.clarification!);
+      if (fallbackToolCalls.length === 0 && fallbackClarifications.length > 0) {
+        return {
+          type: "ask_clarification",
+          question: fallbackClarifications.join(" "),
+          reason: `All fallback skills require missing parameters`,
+        };
+      }
       return {
         type: "use_tool",
         toolCalls: fallbackToolCalls,
@@ -310,7 +441,7 @@ export class ToolDecisionEngine implements ToolDecisionEngineInterface {
       };
     }
 
-    const matchedBuilt = await Promise.all(
+    const builtResults = await Promise.all(
       matchedSkills.map((skill) =>
         this.buildPlannedToolCall(
           context,
@@ -321,9 +452,19 @@ export class ToolDecisionEngine implements ToolDecisionEngineInterface {
         ),
       ),
     );
-    const matchedToolCalls = matchedBuilt
+    const matchedToolCalls = builtResults
       .filter((b) => b.call !== null)
       .map((b) => b.call!);
+    const matchedClarifications = builtResults
+      .filter((b) => b.clarification)
+      .map((b) => b.clarification!);
+    if (matchedToolCalls.length === 0 && matchedClarifications.length > 0) {
+      return {
+        type: "ask_clarification",
+        question: matchedClarifications.join(" "),
+        reason: `All matched skills require missing parameters`,
+      };
+    }
     return {
       type: "use_tool",
       toolCalls: matchedToolCalls,
@@ -342,18 +483,42 @@ export class ToolDecisionEngine implements ToolDecisionEngineInterface {
   private async buildUseToolDecision(
     skills: SkillSummary[],
     reason: string,
-    context: AgentContext,
+    decisionMeta?: DecisionMetadata,
+    context?: AgentContext,
     previousObservation?: AgentObservation,
     signal?: AbortSignal,
-  ): Promise<ToolDecision & { type: "use_tool" }> {
+  ): Promise<ToolDecision> {
     const built = await Promise.all(
       skills.map((skill) =>
-        this.buildPlannedToolCall(context, skill, `Matched: ${skill.id}`, previousObservation, signal),
+        this.buildPlannedToolCall(
+          context!,
+          skill,
+          `Matched: ${skill.id}`,
+          previousObservation,
+          signal,
+          decisionMeta,
+        ),
       ),
     );
+
+    // Collect clarification reasons from failed builds
+    const clarifications = built
+      .filter((b) => b.clarification)
+      .map((b) => b.clarification!);
+
     const toolCalls = built
       .filter((b) => b.call !== null)
       .map((b) => b.call!);
+
+    // If ALL tools failed with missing params, ask clarification (§P0-1 fix)
+    if (toolCalls.length === 0 && clarifications.length > 0) {
+      return {
+        type: "ask_clarification",
+        question: clarifications.join(" "),
+        reason: `All ${skills.length} skill(s) require missing parameters: ${clarifications.join("; ")}`,
+      };
+    }
+
     return {
       type: "use_tool",
       reason,
@@ -418,6 +583,7 @@ Respond with ONLY the tool ID (e.g. "jaderoad:product.source.search1688") or "no
     reason: string,
     previousObservation?: AgentObservation,
     signal?: AbortSignal,
+    decisionMeta?: DecisionMetadata,
   ): Promise<{
     call: PlannedToolCall | null;
     clarification?: string;
@@ -454,6 +620,14 @@ Respond with ONLY the tool ID (e.g. "jaderoad:product.source.search1688") or "no
         riskHints: skill.riskHints,
         inputSchema: skill.inputSchema,
         argumentSources: sources as PlannedToolCall["argumentSources"],
+        metadata: decisionMeta
+          ? {
+              decisionPath: decisionMeta.decisionPath,
+              llmSelectionUsed: decisionMeta.llmSelectionUsed,
+              retrievalMetadata: decisionMeta.retrievalMetadata,
+              clarificationReason: decisionMeta.clarificationReason,
+            }
+          : undefined,
       },
     };
   }
@@ -500,8 +674,12 @@ Respond with ONLY the tool ID (e.g. "jaderoad:product.source.search1688") or "no
           sources: result.sources,
           missing: result.missing,
         };
-      } catch {
+      } catch (err) {
         // Fall through to heuristic
+        console.warn(
+          "[ToolDecisionEngine] Argument builder threw, falling back to heuristics:",
+          (err as Error).message,
+        );
       }
     }
 
@@ -592,6 +770,8 @@ function extractUrls(text: string): string[] {
 interface ScoredSkill {
   skill: SkillSummary;
   score: number;
+  /** Match reasons from ToolRetriever for audit trail (§2). */
+  matchReasons?: string[];
 }
 
 /**
@@ -691,4 +871,64 @@ function extractBigrams(text: string): string[] {
     result.push(match[0].toLowerCase());
   }
   return result;
+}
+
+/**
+ * Derive ToolCallHistoryEntry[] from context tool results.
+ * Extracts skillId and status from tool result entries so the ToolRetriever
+ * can apply success/failure weighting at runtime without depending on
+ * pre-constructed history from the composition root.
+ *
+ * Entries without a resolvable skillId are filtered out — a UUID
+ * toolCallId is not meaningful for skill-to-skill weighting.
+ */
+function deriveRecentHistory(
+  toolResults: Array<{
+    toolCallId: string;
+    summary: string;
+    content?: string;
+    status: string;
+    name?: string;
+    skillId?: string;
+    structured?: Record<string, unknown>;
+  }>,
+): Array<{
+  skillId: string;
+  status: "completed" | "failed" | "timeout" | "rejected";
+  timestamp: string;
+}> {
+  return toolResults
+    .filter((tr) => tr.status !== "pending" && tr.status !== "running")
+    .map((tr) => {
+      // Resolve skillId: prefer explicit field, then structured metadata.
+      // Skip entries that fall back to a UUID toolCallId — that isn't
+      // useful for the retriever's skill-level weighting.
+      const resolvedSkillId =
+        tr.skillId ??
+        (tr.name?.includes(":")
+          ? tr.name.slice(0, tr.name.lastIndexOf(":"))
+          : undefined) ??
+        (tr.structured as Record<string, unknown> | undefined)?.skillId as
+          | string
+          | undefined;
+      if (!resolvedSkillId) return null;
+
+      // Map tool status to history status. Unknown statuses default to
+      // "failed" — it's safer to de-prioritize than to assume success.
+      const historyStatus =
+        tr.status === "completed"
+          ? ("completed" as const)
+          : tr.status === "failed" || tr.status === "timeout"
+            ? (tr.status as "failed" | "timeout")
+            : tr.status === "cancelled"
+              ? ("rejected" as const)
+              : ("failed" as const);
+
+      return {
+        skillId: resolvedSkillId,
+        status: historyStatus,
+        timestamp: new Date().toISOString(),
+      };
+    })
+    .filter((entry): entry is NonNullable<typeof entry> => entry !== null);
 }

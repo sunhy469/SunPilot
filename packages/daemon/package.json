@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "type": "module",
   "exports": {
-    ".": "./dist/server.js",
+    ".": "./dist/index.js",
     "./main": "./dist/main.js"
   },
   "bin": {

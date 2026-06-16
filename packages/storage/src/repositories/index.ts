@@ -13,3 +13,8 @@ export type * from "./skill.repository.js";
 export type * from "./step.repository.js";
 export type * from "./tool-call.repository.js";
 export type * from "./idempotency.repository.js";
+export type * from "./agent-trace.repository.js";
+export { AgentTraceRepository } from "./agent-trace.repository.js";
+export type * from "./agent-trace.repository.js";
+export { PlanSnapshotRepository } from "./plan-snapshot.repository.js";
+export type * from "./plan-snapshot.repository.js";

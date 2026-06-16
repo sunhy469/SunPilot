@@ -144,8 +144,11 @@ export class PostgresMemoryRepository implements MemoryRepository {
           CASE WHEN content ILIKE '%' || $${++paramIdx} || '%' THEN 0.10 ELSE 0 END
         )`
       : `0`;
+    // Quality score: importance + confidence + recency decay (§P2-8).
+    // Recency: ~30-day half-life, weight decays linearly.
+    // Contradicted/superseded memories are filtered by WHERE, so no penalty needed here.
     const qualitySql =
-      `(importance * 0.15 + confidence * 0.10 + GREATEST(0, 1 - EXTRACT(EPOCH FROM (NOW() - updated_at)) / 2592000) * 0.10)`;
+      `(COALESCE(importance, 0) * 0.15 + COALESCE(confidence, 0) * 0.10 + GREATEST(0, 1 - EXTRACT(EPOCH FROM (NOW() - COALESCE(updated_at, created_at))) / 2592000) * 0.10)`;
     const scoreSql = `(${keywordSql} + ${semanticSql} + ${qualitySql})`;
 
     // ── Query filtering ─────────────────────────────────────────────

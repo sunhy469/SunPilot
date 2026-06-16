@@ -563,6 +563,9 @@ describe("daemon Agent runtime REST routes", () => {
       database: db,
       port: 3737,
       chatAgent: {
+        startChatCommand: async () => {
+          throw new Error("not used");
+        },
         handleChatCommand: async () => {
           throw new Error("not used");
         },
@@ -613,6 +616,9 @@ describe("daemon Agent runtime REST routes", () => {
       database: db,
       port: 3737,
       chatAgent: {
+        startChatCommand: async () => {
+          throw new Error("not used");
+        },
         handleChatCommand: async () => {
           throw new Error("not used");
         },
@@ -670,6 +676,9 @@ describe("daemon Agent runtime REST routes", () => {
       database: db,
       port: 3737,
       chatAgent: {
+        startChatCommand: async () => {
+          throw new Error("not used");
+        },
         handleChatCommand: async () => {
           throw new Error("not used");
         },
@@ -727,6 +736,9 @@ describe("daemon Agent runtime REST routes", () => {
       database: db,
       port: 3737,
       chatAgent: {
+        startChatCommand: async () => {
+          throw new Error("not used");
+        },
         handleChatCommand: async () => {
           throw new Error("not used");
         },
@@ -782,6 +794,9 @@ describe("daemon Agent runtime REST routes", () => {
       database: db,
       port: 3737,
       chatAgent: {
+        startChatCommand: async () => {
+          throw new Error("not used");
+        },
         handleChatCommand: async () => {
           throw new Error("not used");
         },

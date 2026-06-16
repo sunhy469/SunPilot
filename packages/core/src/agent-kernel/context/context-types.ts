@@ -4,6 +4,15 @@ import type { AttachmentRef, ContextMessage } from '../loop-types.js';
  * ContextChunk — an auditable piece of context with source tracking.
  * Each chunk has provenance metadata for debugging and token budgeting.
  */
+/** Trust level for context content provenance (§P2-7). */
+export type TrustLevel =
+  | 'system'        // System rules, safety policy — authoritative
+  | 'user'          // User messages — trusted
+  | 'memory'        // Recalled memories — medium trust
+  | 'tool'          // Tool results — variable trust
+  | 'external'      // Web content, parsed attachments — untrusted
+  | 'untrusted';    // Flagged by injection detector — blocked
+
 export interface ContextChunk {
   id: string;
   source:
@@ -23,6 +32,20 @@ export interface ContextChunk {
   tokenEstimate: number;
   metadata: Record<string, unknown>;
   createdAt?: string;
+  /** Trust provenance (§P2-7). */
+  trust?: TrustLevel;
+  /** Original source URI (URL, file path, tool call ID). */
+  sourceUri?: string;
+  /** When this content was generated. */
+  generatedAt?: string;
+  /** When this content should be considered stale. */
+  expiresAt?: string;
+  /** Whether this content was blocked by safety. */
+  blocked?: boolean;
+  /** Warning message to show the model. */
+  warning?: string;
+  /** Authority level — higher = more authoritative. */
+  authority?: number;
 }
 
 /**

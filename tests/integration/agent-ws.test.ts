@@ -17,6 +17,34 @@ describe("daemon Agent WebSocket integration", () => {
       database: db,
       port: 0,
       chatAgent: {
+        startChatCommand: async (input: any, _ctx: any, hooks: any) => {
+          // Emit agent.* events through streamHooks so the JSON-RPC
+          // router can forward them as WebSocket notifications.
+          hooks?.onEvent?.({
+            id: "evt_run",
+            type: "agent.run.created",
+            runId: "run_integration",
+            conversationId: input.conversationId ?? "conv_integration",
+            payload: {
+              runId: "run_integration",
+              conversationId: input.conversationId ?? "conv_integration",
+              mode: input.mode ?? "agent",
+              goal: input.message,
+            },
+            createdAt: "2026-06-06T00:00:00.000Z",
+          });
+          hooks?.onDelta?.({
+            conversationId: input.conversationId ?? "conv_integration",
+            messageId: "msg_integration",
+            delta: "hello integration",
+          });
+          return {
+            accepted: true as const,
+            runId: "run_integration",
+            conversationId: input.conversationId ?? "conv_integration",
+            messageId: "msg_integration",
+          };
+        },
         handleChatCommand: async (input: any, _ctx: any, hooks: any) => {
           hooks?.onEvent?.({
             id: "evt_run",
@@ -31,18 +59,10 @@ describe("daemon Agent WebSocket integration", () => {
             },
             createdAt: "2026-06-06T00:00:00.000Z",
           });
-          hooks?.onEvent?.({
-            id: "evt_delta",
-            type: "agent.response.delta",
-            runId: "run_integration",
+          hooks?.onDelta?.({
             conversationId: input.conversationId ?? "conv_integration",
-            payload: {
-              runId: "run_integration",
-              conversationId: input.conversationId ?? "conv_integration",
-              messageId: "msg_integration",
-              delta: "hello integration",
-            },
-            createdAt: "2026-06-06T00:00:01.000Z",
+            messageId: "msg_integration",
+            delta: "hello integration",
           });
           return {
             runId: "run_integration",
@@ -128,7 +148,6 @@ describe("daemon Agent WebSocket integration", () => {
         expect.objectContaining({
           method: "agent.response.delta",
           params: expect.objectContaining({
-            eventId: "evt_delta",
             payload: expect.objectContaining({ delta: "hello integration" }),
           }),
         }),

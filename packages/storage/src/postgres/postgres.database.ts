@@ -16,6 +16,8 @@ import { PostgresSettingRepository } from "./postgres.setting.repository.js";
 import { PostgresSkillRepository } from "./postgres.skill.repository.js";
 import { PostgresStepRepository } from "./postgres.step.repository.js";
 import { PostgresToolCallRepository } from "./postgres.tool-call.repository.js";
+import { AgentTraceRepository } from "../repositories/agent-trace.repository.js";
+import { PlanSnapshotRepository } from "../repositories/plan-snapshot.repository.js";
 
 export class PostgresDatabaseContext implements DatabaseContext {
   readonly conversations: PostgresConversationRepository;
@@ -33,6 +35,8 @@ export class PostgresDatabaseContext implements DatabaseContext {
   readonly audit: PostgresAuditRepository;
   readonly idempotency: PostgresIdempotencyRepository;
   readonly skills: PostgresSkillRepository;
+  readonly agentTraces: AgentTraceRepository;
+  readonly planSnapshots: PlanSnapshotRepository;
 
   constructor(
     private readonly pool: PostgresPool,
@@ -53,6 +57,8 @@ export class PostgresDatabaseContext implements DatabaseContext {
     this.audit = new PostgresAuditRepository(pool);
     this.idempotency = new PostgresIdempotencyRepository(pool);
     this.skills = new PostgresSkillRepository(pool);
+    this.agentTraces = new AgentTraceRepository(pool);
+    this.planSnapshots = new PlanSnapshotRepository(pool);
   }
 
   async close(): Promise<void> {

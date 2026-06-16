@@ -338,6 +338,122 @@ export function registerSunPilotApiRoutes(
       }),
   );
 
+  // ── Trace debug endpoint (§P1-6) ────────────────────────────────────
+  app.get<{ Params: { id: string } }>(
+    "/v1/runs/:id/trace",
+    async (request, reply) => {
+      const runId = request.params.id;
+      const run = await database.runs.findById(runId);
+      if (!run) return reply.code(404).send({ error: "not_found" });
+
+      // Collect all observability data for this run
+      const [events, modelCalls, toolCalls, approvals, statusHistory] =
+        await Promise.all([
+          database.events.listByRunId(runId),
+          database.modelCalls.listByRunId(runId),
+          database.toolCalls.listByRunId(runId),
+          database.approvals.list({ runId }),
+          database.runStatusHistory.listByRunId(runId),
+        ]);
+
+      // Load trace/spans from DB if available (§P0-2)
+      let trace = null;
+      let spans: Array<Record<string, unknown>> = [];
+      if (database.agentTraces) {
+        const dbTrace = await database.agentTraces.findByRunId(runId);
+        if (dbTrace) {
+          trace = dbTrace;
+          const dbSpans = await database.agentTraces.listSpansByRunId(runId);
+          spans = dbSpans.map((s) => ({
+            id: s.id,
+            kind: s.kind,
+            summary: s.summary,
+            startMs: s.startMs,
+            endMs: s.endMs,
+            durationMs: s.durationMs,
+            tokenInput: s.tokenInput,
+            tokenOutput: s.tokenOutput,
+            toolCallsCount: s.toolCallsCount,
+            toolFailures: s.toolFailures,
+            modelCallsCount: s.modelCallsCount,
+            error: s.error,
+          }));
+        }
+      }
+
+      // Load plan snapshots if available (§P0-2)
+      let planSnapshots: Array<Record<string, unknown>> = [];
+      if (database.planSnapshots) {
+        const snapshots = await database.planSnapshots.listByRunId(runId);
+        planSnapshots = snapshots.map((s) => ({
+          id: s.id,
+          version: s.version,
+          eventType: s.eventType,
+          diffSummary: s.diffSummary,
+          trigger: s.trigger,
+          addedSteps: s.addedSteps,
+          removedSteps: s.removedSteps,
+          modifiedSteps: s.modifiedSteps,
+          createdAt: s.createdAt,
+        }));
+      }
+
+      // Build merged trace view
+      return {
+        runId,
+        conversationId: run.conversationId,
+        status: run.status,
+        mode: run.mode,
+        activePlan: run.activePlanJson ?? null,
+        planRevisionCount: run.planRevisionCount ?? 0,
+        trace,
+        spans,
+        planSnapshots,
+        timeline: {
+          statusHistory: statusHistory.map((h) => ({
+            from: h.previousStatus,
+            to: h.nextStatus,
+            reason: h.reason,
+            at: h.createdAt,
+          })),
+          events: events.map((e) => ({
+            type: e.type,
+            sequence: e.sequence,
+            at: e.createdAt,
+          })),
+        },
+        modelCalls: modelCalls.map((mc) => ({
+          id: mc.id,
+          provider: mc.provider,
+          model: mc.model,
+          purpose: mc.purpose,
+          status: mc.status,
+          inputTokens: mc.inputTokens,
+          outputTokens: mc.outputTokens,
+          latencyMs: mc.latencyMs,
+          error: mc.error,
+        })),
+        toolCalls: toolCalls.map((tc) => ({
+          id: tc.id,
+          skillId: tc.skillId,
+          name: tc.name,
+          status: tc.status,
+          riskLevel: tc.riskLevel,
+          metadata: tc.metadata,
+          startedAt: tc.startedAt,
+          completedAt: tc.completedAt,
+        })),
+        approvals: approvals.map((a) => ({
+          id: a.id,
+          title: a.title,
+          status: a.status,
+          risk: a.risk,
+          decidedBy: a.decidedBy,
+        })),
+      };
+    },
+  );
+
   // ── Run actions ────────────────────────────────────────────────────
   app.post<{ Params: { id: string } }>(
     "/v1/runs/:id/cancel",
