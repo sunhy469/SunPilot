@@ -25,7 +25,8 @@ export interface ContextChunk {
     | 'tool_result'
     | 'skill_catalog'
     | 'run_state'
-    | 'safety_policy';
+    | 'safety_policy'
+    | 'external';
   title: string;
   content: string;
   priority: number; // 0 = mandatory, higher = more trimmable

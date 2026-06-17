@@ -12,21 +12,46 @@
 
 .welcome-inner {
   width: 100%;
-  max-width: 920px;
+  max-width: var(--chat-content-width, 760px);
   text-align: center;
 }
 
-/* md (≥768px): reduce title size */
+.welcome-title {
+  margin-bottom: 8px !important;
+  font-size: 28px !important;
+  font-weight: 700 !important;
+  color: var(--sp-ink);
+}
+
+.welcome-desc {
+  display: block;
+  font-size: 15px;
+  color: var(--sp-muted);
+  line-height: 1.6;
+  max-width: 480px;
+  margin: 0 auto 32px;
+}
+
+/* ── Responsive ─────────────────────────────────────────── */
+
 @media (max-width: 991px) {
-  .ant-typography.welcome-view h2,
-  .welcome-view .ant-typography h2 {
-    font-size: 28px;
+  .welcome-title {
+    font-size: 24px !important;
+  }
+  .welcome-desc {
+    font-size: 14px;
   }
 }
 
-/* sm (≥576px): compact on small screens */
 @media (max-width: 575px), (max-height: 620px) {
   .welcome-view {
     padding: 18px 12px;
+  }
+  .welcome-title {
+    font-size: 20px !important;
+  }
+  .welcome-desc {
+    font-size: 13px;
+    margin-bottom: 24px;
   }
 }

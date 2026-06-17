@@ -137,12 +137,15 @@ export function useChat(
     "offline",
   );
   const [sendState, setSendState] = useState<LocalSendState>("editing");
+  const [toolName, setToolName] = useState<string | null>(null);
+  const toolCallCountRef = useRef(0);
   const [error, setError] = useState("");
   const socketRef = useRef<WebSocket | null>(null);
   const responseTimerRef = useRef<number | null>(null);
   const keepAliveTimerRef = useRef<number | null>(null);
   const pendingRef = useRef(false);
   const activeRunIdRef = useRef<string | null>(null);
+  const [activeRunId, setActiveRunId] = useState<string | null>(null);
   const requestRef = useRef(createRequest());
   const [approvals, setApprovals] = useState<AgentApproval[]>([]);
   const [artifacts, setArtifacts] = useState<AgentArtifactPreview[]>([]);
@@ -280,6 +283,7 @@ export function useChat(
       if (method === "agent.run.created") {
         const payload = params as { runId: string; conversationId?: string };
         activeRunIdRef.current = payload.runId;
+        setActiveRunId(payload.runId);
       }
       if (
         method === "agent.run.completed" ||
@@ -288,6 +292,7 @@ export function useChat(
         method === "agent.run.interrupted"
       ) {
         activeRunIdRef.current = null;
+        setActiveRunId(null);
       }
     },
     [],
@@ -398,6 +403,7 @@ export function useChat(
 
       if (payload.method === "agent.run.created") {
         activeRunIdRef.current = payload.params.runId;
+        setActiveRunId(payload.params.runId);
         setConversationId(payload.params.conversationId);
         setSendState("running");
         setStatus("thinking");
@@ -411,8 +417,58 @@ export function useChat(
         );
       }
 
+      // ── Tool call tracking ──────────────────────────────────
+      if (payload.method === "agent.tool.started") {
+        const toolParams = payload.params as { name?: string };
+        toolCallCountRef.current += 1;
+        if (toolParams.name) {
+          setToolName(toolParams.name);
+        }
+      }
+      if (payload.method === "agent.tool.delta") {
+        const deltaParams = payload.params as {
+          toolCallId?: string;
+          delta?: string;
+          type?: string;
+          payload?: Record<string, unknown>;
+        };
+        // Extract progress info from the delta payload.
+        // Skill progress events carry { phase, progress, message } or raw delta string.
+        const progressPayload =
+          deltaParams.payload && typeof deltaParams.payload === "object"
+            ? (deltaParams.payload as Record<string, unknown>)
+            : undefined;
+        const progressMsg =
+          typeof progressPayload?.message === "string"
+            ? progressPayload.message
+            : typeof deltaParams.delta === "string" && deltaParams.delta.length > 0
+              ? deltaParams.delta
+              : undefined;
+        const progressPct =
+          typeof progressPayload?.progress === "number"
+            ? progressPayload.progress
+            : undefined;
+        if (progressMsg) {
+          setToolName(
+            progressPct != null
+              ? `${progressMsg} (${progressPct}%)`
+              : progressMsg,
+          );
+        }
+      }
+      if (
+        payload.method === "agent.tool.completed" ||
+        payload.method === "agent.tool.failed"
+      ) {
+        toolCallCountRef.current = Math.max(0, toolCallCountRef.current - 1);
+        if (toolCallCountRef.current === 0) {
+          setToolName(null);
+        }
+      }
+
       if (payload.method === "agent.response.started") {
         activeRunIdRef.current = payload.params.runId;
+        setActiveRunId(payload.params.runId);
         setSendState("streaming");
         setStatus("thinking");
         setMessages((items) => {
@@ -520,11 +576,30 @@ export function useChat(
 
       // ── Agent response completed ──────────────────────────────
       if (payload.method === "agent.response.completed") {
+        const completedParams = payload.params as {
+          runId?: string;
+          conversationId?: string;
+          messageId?: string;
+          cards?: Array<{ type: string; title?: string; data: Record<string, unknown> }>;
+        };
         clearResponseTimer();
         setSendState("completed");
         setStatus("online");
         setPendingState(false);
+        setToolName(null);
+        toolCallCountRef.current = 0;
         activeRunIdRef.current = null;
+        setActiveRunId(null);
+        // Apply rich cards from the completed event to the message
+        if (completedParams.cards && completedParams.cards.length > 0) {
+          setMessages((items) =>
+            items.map((item) =>
+              item.id === completedParams.messageId
+                ? { ...item, cards: completedParams.cards as ChatMessage["cards"] }
+                : item,
+            ),
+          );
+        }
       }
 
       // ── Agent run completed ───────────────────────────────────
@@ -533,7 +608,10 @@ export function useChat(
         setSendState("completed");
         setStatus("online");
         setPendingState(false);
+        setToolName(null);
+        toolCallCountRef.current = 0;
         activeRunIdRef.current = null;
+        setActiveRunId(null);
       }
 
       // ── Agent run failed ──────────────────────────────────────
@@ -543,7 +621,10 @@ export function useChat(
         setStatus("online");
         setPendingState(false);
         setError(payload.params.error.message);
+        setToolName(null);
+        toolCallCountRef.current = 0;
         activeRunIdRef.current = null;
+        setActiveRunId(null);
       }
 
       // ── Agent run cancelled ───────────────────────────────────
@@ -552,7 +633,10 @@ export function useChat(
         setSendState("failed");
         setStatus("online");
         setPendingState(false);
+        setToolName(null);
+        toolCallCountRef.current = 0;
         activeRunIdRef.current = null;
+        setActiveRunId(null);
       }
 
       // ── Agent run interrupted ─────────────────────────────────
@@ -561,7 +645,10 @@ export function useChat(
         setSendState("failed");
         setStatus("online");
         setPendingState(false);
+        setToolName(null);
+        toolCallCountRef.current = 0;
         activeRunIdRef.current = null;
+        setActiveRunId(null);
       }
     });
     return socket;
@@ -605,7 +692,7 @@ export function useChat(
   }, [applyAgentEvent, conversationId]);
 
   const send = useCallback(
-    (message: string, attachments?: AttachmentRef[], permissionMode?: "ask" | "auto" | "full") => {
+    (message: string, attachments?: AttachmentRef[], permissionMode?: "ask" | "auto" | "full", modelId?: "dp" | "seed") => {
       const text = message.trim();
       if ((!text && (!attachments || attachments.length === 0)) || pending) return;
 
@@ -656,6 +743,7 @@ export function useChat(
           message: text,
           mode: "agent",
           permissionMode: permissionMode ?? "auto",
+          modelId: modelId ?? "dp",
           attachments,
         });
       };
@@ -762,6 +850,8 @@ export function useChat(
     error,
     setError,
     chatViewState,
+    activeRunId,
+    toolName,
     approvals,
     artifacts,
     selectedArtifact,

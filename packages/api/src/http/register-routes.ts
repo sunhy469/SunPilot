@@ -14,15 +14,14 @@ import {
 import type { SunPilotApiDeps } from "../composition/api-deps.js";
 import {
   listRunsQuerySchema,
-  memorySearchQuerySchema,
-  memoryCreateBodySchema,
-  memoryUpdateBodySchema,
   listConversationsQuerySchema,
   conversationEventsQuerySchema,
   listApprovalsQuerySchema,
   listAuditLogsQuerySchema,
   uploadPresignBodySchema,
 } from "./schemas.js";
+import { registerMemoryRoutes } from "./routes/memory.js";
+import { formatZodIssues, paginationCursor } from "./routes/shared.js";
 
 function chatHttpStatus(error: unknown): number {
   if (error instanceof RuntimeError) return error.statusCode;
@@ -48,14 +47,6 @@ function conversationTitleFromBody(body: unknown): string | undefined {
   return title.trim();
 }
 
-function paginationCursor(input: { updatedAt: string; id: string }): string {
-  return Buffer.from(JSON.stringify(input)).toString("base64url");
-}
-
-function formatZodIssues(error: ZodError): string {
-  return error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ");
-}
-
 /**
  * 注册 SunPilot 全部 HTTP API 路由。
  * daemon 的 server.ts 调用此函数挂载 API，传入 SunPilotApiDeps。
@@ -64,7 +55,7 @@ export function registerSunPilotApiRoutes(
   app: FastifyInstance,
   deps: SunPilotApiDeps,
 ): void {
-  const { database, getChatAgent, skills, config } = deps;
+  const { database, getChatAgent, skills, config, diagnostics } = deps;
 
   // ── Health ─────────────────────────────────────────────────────────
   app.get("/healthz", async () => ({
@@ -72,6 +63,40 @@ export function registerSunPilotApiRoutes(
     product: "SunPilot",
     daemon: "alive",
   }));
+
+  // ── Diagnostics (§API placement) ──────────────────────────────────
+  app.get("/v1/diagnostics", async () => {
+    const startedAt = Date.now();
+    await database.runs.list({ limit: 1 });
+    const databaseLatencyMs = Date.now() - startedAt;
+    const skillsList = skills.list() as Array<{ enabled: boolean }>;
+    const [waitingApproval, executing, planning, reflecting, responding] =
+      await Promise.all([
+        database.runs.list({ status: "waiting_approval", limit: 200 }),
+        database.runs.list({ status: "executing", limit: 200 }),
+        database.runs.list({ status: "planning", limit: 200 }),
+        database.runs.list({ status: "reflecting", limit: 200 }),
+        database.runs.list({ status: "responding", limit: 200 }),
+      ]);
+    const activeCount =
+      executing.length + planning.length + reflecting.length + responding.length;
+    const llmConfig = diagnostics?.getLlmConfig?.() ?? {
+      provider: "unknown",
+      model: "unknown",
+      configured: false,
+    };
+    return {
+      daemon: { status: "ok", uptimeSec: Math.floor(process.uptime()), pid: process.pid },
+      database: { status: "ok", latencyMs: databaseLatencyMs },
+      llm: llmConfig,
+      skills: {
+        count: skillsList.length,
+        enabled: skillsList.filter((s) => s.enabled).length,
+      },
+      runs: { active: activeCount, waitingApproval: waitingApproval.length },
+      websocket: { connections: diagnostics?.websocketConnections?.() ?? 0 },
+    };
+  });
 
   app.get("/readyz", async () => ({
     ok: true,
@@ -83,6 +108,15 @@ export function registerSunPilotApiRoutes(
 
   // ── Config ─────────────────────────────────────────────────────────
   app.get("/v1/config", async () => config.read());
+
+  // ── Models ─────────────────────────────────────────────────────────
+  app.get("/v1/models", async () => {
+    const models = deps.getModels?.() ?? [];
+    return {
+      defaultModelId: "dp",
+      items: models,
+    };
+  });
   app.patch("/v1/config", async (request) => {
     const updated = config.update(request.body ?? {});
     await database.audit.create({
@@ -187,6 +221,7 @@ export function registerSunPilotApiRoutes(
           content: r.content,
           createdAt: r.createdAt,
           attachments: (r.metadata as { attachments?: unknown })?.attachments,
+          cards: (r.metadata as { richCards?: unknown })?.richCards,
         })),
       };
     },
@@ -484,102 +519,8 @@ export function registerSunPilotApiRoutes(
     },
   );
 
-  // ── Memory ─────────────────────────────────────────────────────────
-  app.post("/v1/memory", async (request, reply) => {
-    try {
-      const body = memoryCreateBodySchema.parse(request.body ?? {});
-      const now = new Date().toISOString();
-      const memory = await database.memory.create({
-        id: body.id ?? `memory_${crypto.randomUUID()}`,
-        runId: body.runId,
-        stepId: body.stepId,
-        key: body.key,
-        value: body.value ?? body.content ?? "",
-        scope: body.scope,
-        scopeId: body.scopeId,
-        type: body.type,
-        title: body.title,
-        content: body.content,
-        summary: body.summary,
-        source: body.source ?? "api",
-        confidence: body.confidence,
-        importance: body.importance,
-        metadata: body.metadata ?? {},
-        createdAt: body.createdAt ?? now,
-        updatedAt: body.updatedAt ?? now,
-        expiresAt: body.expiresAt,
-      });
-      return { item: memory };
-    } catch (error) {
-      if (error instanceof ZodError) {
-        return reply.code(400).send({
-          error: "bad_request",
-          message: formatZodIssues(error),
-        });
-      }
-      throw error;
-    }
-  });
-  app.patch<{ Params: { id: string } }>(
-    "/v1/memory/:id",
-    async (request, reply) => {
-      try {
-        const body = memoryUpdateBodySchema.parse(request.body ?? {});
-        const updated = await database.memory.update(request.params.id, {
-          key: body.key,
-          value: body.value,
-          scope: body.scope,
-          scopeId: body.scopeId,
-          type: body.type,
-          title: body.title,
-          content: body.content,
-          summary: body.summary,
-          source: body.source,
-          confidence: body.confidence,
-          importance: body.importance,
-          metadata: body.metadata,
-          expiresAt: body.expiresAt,
-        });
-        if (!updated) return reply.code(404).send({ error: "not_found" });
-        return { item: updated };
-      } catch (error) {
-        if (error instanceof ZodError) {
-          return reply.code(400).send({
-            error: "bad_request",
-            message: formatZodIssues(error),
-          });
-        }
-        throw error;
-      }
-    },
-  );
-  app.delete<{ Params: { id: string }; Body: { reason?: string } }>(
-    "/v1/memory/:id",
-    async (request) => {
-      await database.memory.softDelete(
-        request.params.id,
-        request.body?.reason ?? "deleted via api",
-      );
-      return { ok: true, id: request.params.id };
-    },
-  );
-  app.get("/v1/memory", async (request) => {
-    const query = memorySearchQuerySchema.parse(request.query);
-    return {
-      items: await database.memory.search({
-        query: query.query,
-        runId: query.runId,
-        key: query.key,
-        userId: query.userId,
-        projectId: query.projectId,
-        conversationId: query.conversationId,
-        scopes: query.scope ? [query.scope] : undefined,
-        types: query.type ? [query.type] : undefined,
-        includeDeleted: query.includeDeleted,
-        limit: query.limit,
-      }),
-    };
-  });
+  // ── Memory (see routes/memory.ts) ──────────────────────────────────
+  registerMemoryRoutes(app, deps);
 
   // ── Skills ─────────────────────────────────────────────────────────
   app.get("/v1/skills", async () => database.skills.list());

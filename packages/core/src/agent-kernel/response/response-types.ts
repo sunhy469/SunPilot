@@ -1,5 +1,5 @@
 import type { AgentEventBus } from '../agent-event-bus.js';
-import type { ChatMessage } from '../../llm/llm.types.js';
+import type { ChatMessage, ChatCompletionRequest } from '../../llm/llm.types.js';
 import type { ModelCallRepository } from '@sunpilot/storage';
 
 export interface ResponseComposerDeps {
@@ -7,9 +7,7 @@ export interface ResponseComposerDeps {
   llm: {
     id?: string;
     model?: string;
-    streamChat(request: {
-      messages: ChatMessage[];
-    }): AsyncIterable<{ delta: string }>;
+    streamChat(request: ChatCompletionRequest): AsyncIterable<{ delta: string }>;
   };
   /** Event bus for streaming delta events. */
   eventBus: AgentEventBus;

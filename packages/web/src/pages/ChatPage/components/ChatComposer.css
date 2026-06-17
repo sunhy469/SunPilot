@@ -2,27 +2,29 @@
   max-width: var(--chat-content-width, 920px);
   margin: 0 auto;
   border: 1px solid var(--sp-border);
-  border-radius: 24px;
+  border-radius: 22px;
   background: var(--sp-paper);
-  padding: 10px 12px;
-  box-shadow: 0 18px 46px rgba(15, 23, 42, 0.09);
+  padding: 10px 14px;
+  box-shadow: 0 16px 40px rgba(15, 23, 42, 0.07);
   transition:
-    border-color 160ms ease,
-    box-shadow 160ms ease;
+    border-color 180ms ease,
+    box-shadow 180ms ease;
 }
 
 .chat-composer:focus-within {
-  border-color: var(--sp-border);
-  box-shadow: 0 18px 46px rgba(15, 23, 42, 0.09);
+  border-color: rgba(37, 99, 235, 0.45);
+  box-shadow: 0 18px 48px rgba(37, 99, 235, 0.10);
 }
 
 .chat-composer--welcome {
   padding: 14px 16px;
+  border-radius: 20px;
 }
 
 .chat-composer--drag-over {
   border-color: #93c5fd;
-  background: rgba(37, 99, 235, 0.04);
+  background: rgba(37, 99, 235, 0.03);
+  box-shadow: 0 18px 48px rgba(37, 99, 235, 0.12);
 }
 
 /* ── Top layer: attachments ─────────────────────────────────────── */
@@ -128,7 +130,7 @@
 /* ── Bottom layer: controls ─────────────────────────────────────── */
 
 .chat-composer__controls {
-  padding-top: 6px;
+  padding-top: 8px;
 }
 
 .chat-composer__select {
@@ -166,24 +168,38 @@
   box-shadow: none;
 }
 
-/* ── Upload progress bar ────────────────────────────────────────── */
+/* ── Send button ────────────────────────────────────────────────── */
 
-.chat-composer__upload-progress {
-  height: 3px;
-  margin: 4px 0 2px;
-  background: var(--sp-border);
-  border-radius: 2px;
-  overflow: hidden;
+.chat-composer__controls .ant-btn-primary {
+  box-shadow: 0 2px 8px rgba(37, 99, 235, 0.25);
+  transition: all 0.18s ease;
+}
+.chat-composer__controls .ant-btn-primary:hover:not(:disabled) {
+  box-shadow: 0 4px 14px rgba(37, 99, 235, 0.32);
+  transform: scale(1.05);
+}
+.chat-composer__controls .ant-btn-primary:active:not(:disabled) {
+  transform: scale(0.97);
 }
 
-.chat-composer__upload-progress-bar {
-  height: 100%;
-  background: var(--sp-blue);
-  border-radius: 2px;
-  transition: width 200ms ease;
+/* Stop button (danger) */
+.chat-composer__controls .ant-btn-dangerous {
+  box-shadow: 0 2px 8px rgba(239, 68, 68, 0.25);
+}
+.chat-composer__controls .ant-btn-dangerous:hover {
+  box-shadow: 0 4px 14px rgba(239, 68, 68, 0.32);
 }
 
-/* ── Status bar ──────────────────────────────────────────────────── */
+/* ── Upload status line ────────────────────────────────────── */
+
+.chat-composer__upload-status {
+  display: flex;
+  align-items: center;
+  padding: 4px 4px 0;
+  color: var(--sp-muted);
+}
+
+/* ── Status bar ────────────────────────────────────────────── */
 
 .chat-composer__status-bar {
   display: flex;

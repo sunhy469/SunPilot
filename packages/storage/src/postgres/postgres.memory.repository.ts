@@ -14,7 +14,7 @@ import type { PostgresPool } from "./postgres.client.js";
 const MEMORY_COLUMNS = `
   id, run_id, step_id, key, value, scope, scope_id, type, title, content,
   summary, source, confidence, importance, metadata, created_at, updated_at,
-  last_accessed_at, expires_at, superseded_by, deleted_at
+  last_accessed_at, expires_at, superseded_by, deleted_at, stale_reason, stale_since
 `;
 
 export class PostgresMemoryRepository implements MemoryRepository {
@@ -83,6 +83,8 @@ export class PostgresMemoryRepository implements MemoryRepository {
            importance = COALESCE($12, importance),
            metadata = COALESCE($13::jsonb, metadata),
            expires_at = COALESCE($14, expires_at),
+           stale_reason = COALESCE($15, stale_reason),
+           stale_since = COALESCE($16, stale_since),
            updated_at = NOW()
        WHERE id = $1
        RETURNING ${MEMORY_COLUMNS}`,
@@ -101,6 +103,8 @@ export class PostgresMemoryRepository implements MemoryRepository {
         input.importance ?? null,
         input.metadata === undefined ? null : JSON.stringify(input.metadata),
         input.expiresAt ?? null,
+        input.staleReason ?? null,
+        input.staleSince ?? null,
       ],
     );
     return result.rows[0] ? mapMemory(result.rows[0]) : null;
@@ -114,7 +118,7 @@ export class PostgresMemoryRepository implements MemoryRepository {
        ${where}
        ORDER BY created_at DESC
        LIMIT $${values.length + 1}`,
-      [...values, input.limit ?? 100],
+      [...values, Number(input.limit ?? 100)],
     );
     return result.rows.map(mapMemory);
   }
@@ -131,17 +135,23 @@ export class PostgresMemoryRepository implements MemoryRepository {
     // Hybrid score: keyword (up to 0.45) + semantic (up to 0.45) + quality (0.10)
     // When embedding is available, semantic term dominates pure-vector recall.
 
-    // Embedding index within params
-    let paramIdx = values.length;
+    // Param indices are computed ONCE and never mutated — critical for
+    // correctness when WHERE clauses from buildMemoryWhere shift $1..$N.
+    // embedding comes first (if present), then query (if present),
+    // then limit (always, pushed last).
+    const embeddingParamIndex = hasEmbedding ? values.length + 1 : -1;
+    const queryParamIndex = hasQuery
+      ? values.length + (hasEmbedding ? 1 : 0) + 1
+      : -1;
 
     const semanticSql = hasEmbedding
-      ? `(1 - (embedding <=> $${++paramIdx}::vector)) * 0.45`
+      ? `(1 - (embedding <=> $${embeddingParamIndex}::vector)) * 0.45`
       : `0`;
     const keywordSql = hasQuery
       ? `(
-          CASE WHEN title ILIKE '%' || $${++paramIdx} || '%' THEN 0.20 ELSE 0 END +
-          CASE WHEN summary ILIKE '%' || $${++paramIdx} || '%' THEN 0.15 ELSE 0 END +
-          CASE WHEN content ILIKE '%' || $${++paramIdx} || '%' THEN 0.10 ELSE 0 END
+          CASE WHEN title ILIKE '%' || $${queryParamIndex} || '%' THEN 0.20 ELSE 0 END +
+          CASE WHEN summary ILIKE '%' || $${queryParamIndex} || '%' THEN 0.15 ELSE 0 END +
+          CASE WHEN content ILIKE '%' || $${queryParamIndex} || '%' THEN 0.10 ELSE 0 END
         )`
       : `0`;
     // Quality score: importance + confidence + recency decay (§P2-8).
@@ -165,7 +175,7 @@ export class PostgresMemoryRepository implements MemoryRepository {
     }
     if (hasQuery) {
       params.push(query);
-      queryClause = `${where ? `${where} AND` : "WHERE"} (title ILIKE '%' || $${params.length} || '%' OR summary ILIKE '%' || $${params.length} || '%' OR content ILIKE '%' || $${params.length} || '%' OR key ILIKE '%' || $${params.length} || '%' OR value::text ILIKE '%' || $${params.length} || '%')`;
+      queryClause = `${where ? `${where} AND` : "WHERE"} (title ILIKE '%' || $${queryParamIndex} || '%' OR summary ILIKE '%' || $${queryParamIndex} || '%' OR content ILIKE '%' || $${queryParamIndex} || '%' OR key ILIKE '%' || $${queryParamIndex} || '%' OR value::text ILIKE '%' || $${queryParamIndex} || '%')`;
     }
     // When only embedding (no text query), no ILIKE pre-filter —
     // pure vector recall based on cosine similarity.
@@ -173,16 +183,16 @@ export class PostgresMemoryRepository implements MemoryRepository {
     // ── Relevance (for display/debug) ───────────────────────────────
     const relevanceSql = hasQuery
       ? `(
-          CASE WHEN title ILIKE '%' || $${params.length} || '%' THEN 1 ELSE 0 END +
-          CASE WHEN summary ILIKE '%' || $${params.length} || '%' THEN 0.7 ELSE 0 END +
-          CASE WHEN content ILIKE '%' || $${params.length} || '%' THEN 0.5 ELSE 0 END +
-          CASE WHEN key ILIKE '%' || $${params.length} || '%' THEN 0.4 ELSE 0 END
+          CASE WHEN title ILIKE '%' || $${queryParamIndex} || '%' THEN 1 ELSE 0 END +
+          CASE WHEN summary ILIKE '%' || $${queryParamIndex} || '%' THEN 0.7 ELSE 0 END +
+          CASE WHEN content ILIKE '%' || $${queryParamIndex} || '%' THEN 0.5 ELSE 0 END +
+          CASE WHEN key ILIKE '%' || $${queryParamIndex} || '%' THEN 0.4 ELSE 0 END
         )`
       : hasEmbedding
-        ? `(1 - (embedding <=> $1::vector))`
+        ? `(1 - (embedding <=> $${embeddingParamIndex}::vector))`
         : `0`;
 
-    const limit = input.limit ?? 10;
+    const limit = Number(input.limit ?? 10);
     params.push(limit);
 
     const result = await this.pool.query(
@@ -357,6 +367,8 @@ function mapMemory(row: any): MemoryRecord {
     expiresAt: toIso(row.expires_at),
     supersededBy: row.superseded_by ?? undefined,
     deletedAt: toIso(row.deleted_at),
+    staleReason: row.stale_reason ?? undefined,
+    staleSince: toIso(row.stale_since),
   };
 }
 

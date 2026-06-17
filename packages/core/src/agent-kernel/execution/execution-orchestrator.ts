@@ -126,6 +126,12 @@ export class ExecutionOrchestrator implements ExecutionOrchestratorInterface {
       riskLevel: string;
       timeoutMs: number;
       inputSchema?: Record<string, unknown>;
+      projectionHints?: {
+        summaryFields?: string[];
+        identityFields?: string[];
+        sourceUrlFields?: string[];
+        confidenceFields?: string[];
+      };
       argumentSources?: Array<{
         arg: string;
         source: string;
@@ -340,6 +346,10 @@ export class ExecutionOrchestrator implements ExecutionOrchestratorInterface {
           status: result.status,
           summary: result.summary,
           structured: result.structured,
+          metadata: {
+            ...(call.metadata ?? {}),
+            projectionHints: call.projectionHints,
+          },
         };
 
         // Emit appropriate event

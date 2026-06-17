@@ -187,8 +187,12 @@ describe("ToolDecisionEngine", () => {
           requiresTool: true,
           requiresApproval: false,
           riskLevel: "medium",
-          candidateSkills: [],
-          reason: "test",
+          // In the new architecture, IntentRouter provides candidate skills
+          // via embedding semantic matching or LLM classification.
+          // An empty candidateSkills would fall through to the scorer, which
+          // with the reduced bigram weights would not clear the threshold.
+          candidateSkills: ["jaderoad:product.source.search1688"],
+          reason: "embedding matched with high confidence",
         },
       },
       new AbortController().signal,

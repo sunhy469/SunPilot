@@ -3,17 +3,34 @@
   justify-content: flex-end;
   align-items: flex-start;
   gap: 14px;
-  margin-bottom: 30px;
+  margin-bottom: 32px;
   flex-wrap: wrap;
 }
 
 .user-bubble {
-  max-width: min(680px, calc(100% - 58px));
-  font-size: 16px;
-  line-height: 1.7;
+  max-width: min(620px, calc(100% - 48px));
 }
 
-/* ── Attachments inside user message ──────────────────────────────── */
+/* ── Blue bubble card ─────────────────────────────────────── */
+
+.user-card.ant-card {
+  background: var(--sp-blue-soft);
+  border: 1px solid rgba(37, 99, 235, 0.12);
+  border-radius: 18px 18px 6px 18px;
+  box-shadow: 0 1px 6px rgba(37, 99, 235, 0.08);
+}
+
+.user-card.ant-card .ant-card-body {
+  padding: 12px 16px;
+}
+
+.user-card .ant-typography {
+  color: var(--sp-ink);
+  font-size: 15px;
+  line-height: 1.65;
+}
+
+/* ── Attachments inside user message ──────────────────────── */
 
 .user-attachments {
   margin-bottom: 0;
@@ -32,16 +49,29 @@
 .user-attachment-file {
   padding: 6px 10px;
   border-radius: 8px;
-  background: rgba(0, 0, 0, 0.04);
+  background: rgba(37, 99, 235, 0.08);
+}
+
+.user-attachment-file .ant-typography {
+  color: var(--sp-ink) !important;
 }
 
 @media (max-width: 767px) {
   .message-row.user {
     gap: 10px;
+    margin-bottom: 24px;
   }
 
   .user-bubble {
-    max-width: calc(100% - 48px);
+    max-width: calc(100% - 40px);
+  }
+
+  .user-card.ant-card .ant-card-body {
+    padding: 10px 14px;
+  }
+
+  .user-card .ant-typography {
+    font-size: 14px;
   }
 
   .user-attachment-image {

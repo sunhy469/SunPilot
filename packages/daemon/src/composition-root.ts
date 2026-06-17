@@ -23,6 +23,7 @@
  * - skill catalog 使用全限定格式：<skill-id>:<capability-name>。
  */
 import {
+  type MemorySearchInput,
   type StepRecord,
 } from "@sunpilot/protocol";
 import {
@@ -55,13 +56,14 @@ import {
   PlanValidator,
   Replanner,
   ModelRouter,
-  createSingleModelRouter,
+  OpenAICompatibleChatProvider,
   ToolRetriever,
   PromptInjectionDetector,
   ToolSandbox,
   TaskScopedPermissionManager,
   TraceManager,
   RepositoryTraceManager,
+  SummaryStaleDetector,
   type ModelPurpose,
 } from "@sunpilot/core";
 import type { DatabaseContext } from "@sunpilot/storage";
@@ -143,15 +145,85 @@ export function createAgentLoopService(deps: {
     );
   }
 
-  // ── Model Router (§5 of architecture next steps) ────────────────
-  // Creates a single-model router for now — all purposes share the same
-  // LLM provider. When multi-model setup is needed, replace with
-  // createTieredModelRouter({ lowCost, reasoning, primary, fallback }).
-  const modelRouter = createSingleModelRouter(
-    deps.llmProvider,
-    undefined,
-    deps.database.modelCalls, // DB recorder for model call persistence (§P1-5)
-  );
+  // ── Dual-Model Router (§dual-model) ──────────────────────────────
+  // Two primary models (DP/DeepSeek + Seed/Volcengine Ark) as peer routes.
+  // All purposes are served by both models. The user selects which one via
+  // the model dropdown; the selection flows through request.modelId into
+  // ModelRouter.streamChat() which picks the matching route.
+
+  const allPurposes: ModelPurpose[] = [
+    "intent_classification",
+    "tool_argument_generation",
+    "reflection",
+    "response_composition",
+    "summary_compression",
+    "planning",
+    "replanning",
+    "clarification",
+  ];
+
+  // Resolve DP config: deps.llmProvider takes precedence when explicitly
+  // provided (tests, single-provider deployments). Otherwise use env vars.
+  const dpBaseUrl = process.env["SUNPILOT_DP_LLM_BASE_URL"] ?? process.env["SUNPILOT_LLM_BASE_URL"] ?? "https://api.deepseek.com";
+  const dpModel = process.env["SUNPILOT_DP_LLM_MODEL"] ?? process.env["SUNPILOT_LLM_MODEL"] ?? "deepseek-v4-flash";
+  const dpApiKey = process.env["SUNPILOT_DP_LLM_API_KEY"] ?? process.env["SUNPILOT_LLM_API_KEY"] ?? "";
+
+  const dpProvider: LlmProvider = deps.llmProvider ?? new OpenAICompatibleChatProvider({
+    id: "llm.deepseek",
+    apiKey: dpApiKey,
+    baseUrl: dpBaseUrl,
+    model: dpModel,
+  });
+  const dpRouteModel = deps.llmProvider?.model ?? dpModel;
+  console.log(`[llm] DP provider — model=${dpRouteModel} base=${dpBaseUrl} source=${deps.llmProvider ? "deps.llmProvider" : "env"}`);
+
+  // Resolve Seed config — only provisioned when API key is set
+  const seedBaseUrl = process.env["SUNPILOT_SEED_LLM_BASE_URL"] ?? "https://ark.cn-beijing.volces.com/api/v3";
+  const seedModel = process.env["SUNPILOT_SEED_LLM_MODEL"] ?? "doubao-seed-2-0-lite-260428";
+  const seedApiKey = process.env["SUNPILOT_SEED_LLM_API_KEY"] ?? "";
+
+  const seedProvider = seedApiKey
+    ? new OpenAICompatibleChatProvider({
+        id: "llm.volcengine-ark",
+        apiKey: seedApiKey,
+        baseUrl: seedBaseUrl,
+        model: seedModel,
+      })
+    : undefined;
+  console.log(`[llm] Seed provider — model=${seedModel} base=${seedBaseUrl} available=${!!seedApiKey}`);
+
+  const modelRouter = new ModelRouter({
+    routes: [
+      {
+        purposes: allPurposes,
+        priority: 0,
+        modelId: "dp",
+        config: {
+          id: "dp",
+          label: "DP",
+          provider: dpProvider,
+          model: dpRouteModel,
+        },
+      },
+      ...(seedProvider
+        ? [
+            {
+              purposes: allPurposes,
+              priority: 1,
+              modelId: "seed" as const,
+              config: {
+                id: "seed" as const,
+                label: "Seed",
+                provider: seedProvider,
+                model: seedModel,
+              },
+            },
+          ]
+        : []),
+    ],
+    trackCalls: true,
+    modelCallRecorder: deps.database.modelCalls,
+  });
 
   // Purpose-specific LlmProvider adapters — each delegates to ModelRouter
   // with a fixed purpose so that model calls are tracked per-purpose.
@@ -173,7 +245,14 @@ export function createAgentLoopService(deps: {
   const replanningLlm = createPurposeProvider("replanning");
 
   // ── Context ────────────────────────────────────────────────────
+
+  // SummaryStaleDetector — detects when conversation summaries need
+  // regeneration due to goal-change, correction, fact-change, or
+  // preference-conflict (§P0 of context optimization).
+  const staleDetector = new SummaryStaleDetector();
+
   const contextBuilder = new ContextBuilder({
+    staleDetector,
     listMessages: async (conversationId, limit) => {
       const messages =
         await deps.database.messages.listByConversationId(conversationId);
@@ -209,6 +288,8 @@ export function createAgentLoopService(deps: {
           userId: input.userId,
           limit: input.limit ?? 10,
           embedding: queryEmbedding,
+          types: input.types as MemorySearchInput["types"],
+          scopes: input.scopes as MemorySearchInput["scopes"],
         });
         return memories.map((memory) => ({
           id: memory.id,
@@ -281,8 +362,17 @@ export function createAgentLoopService(deps: {
   });
 
   // ── Intent ─────────────────────────────────────────────────────
+  // IntentRouter now uses a 4-layer cascade:
+  //   Layer 0: form-match rules (slash commands, formulaic greetings)
+  //   Layer 1: embedding semantic matching (primary tool selection)
+  //   Layer 2: LLM classification (fallback for ambiguous queries)
+  //   Layer 3: default 'unknown'
+  // The embeddingService (Layer 1) handles ~80% of natural-language
+  // tool selection, eliminating the old regex semantic-matching path
+  // that caused false positives on queries like "搜索一下日照旅游攻略".
   const intentRouter = new IntentRouter({
     llm: intentLlm,
+    embeddingService,
   });
 
   // ── Tools ──────────────────────────────────────────────────────
@@ -296,17 +386,19 @@ export function createAgentLoopService(deps: {
   // Uses embedding service for semantic similarity scoring when available.
   const toolRetriever = new ToolRetriever();
 
-  const toolDecisionEngine = new ToolDecisionEngine({
-    listSkills: async () => {
-      const skills = deps.skillRegistry.list();
-      return skills.flatMap((s) =>
-        s.manifest.capabilities.map((capability) => ({
+  // Shared helper — builds SkillSummary[] from skill registry (§refactor)
+  const listSkillSummaries = async () => {
+    const skills = deps.skillRegistry.list();
+    return skills.flatMap((s) =>
+      s.manifest.capabilities.map((capability) => {
+        const permissions = normalizeCapabilityPermissions(capability.permissions);
+        return {
           id: capabilityToolId(s.id, capability.name),
           name: capability.title,
           description: capability.description,
           category: categoryFromCapability(capability.name),
           enabled: s.enabled,
-          permissions: normalizeCapabilityPermissions(capability.permissions),
+          permissions,
           defaultTimeoutMs: 60_000,
           maxTimeoutMs: 300_000,
           supportsAbort: true,
@@ -316,6 +408,17 @@ export function createAgentLoopService(deps: {
             capability.inputSchema !== null
               ? (capability.inputSchema as Record<string, unknown>)
               : undefined,
+          // Populate outputSchema from manifest when available (§P2)
+          outputSchema:
+            typeof capability.outputSchema === "object" &&
+            capability.outputSchema !== null
+              ? (capability.outputSchema as Record<string, unknown>)
+              : undefined,
+          // Derive sideEffects from permissions heuristic (§P2).
+          // Used by routing to reduce false-positive rate for destructive
+          // tools. Exact classifications should eventually come from the
+          // manifest itself when the schema is extended.
+          sideEffects: classifySideEffects(permissions),
           riskHints: {
             defaultRisk: capability.risk as
               | "low"
@@ -323,17 +426,33 @@ export function createAgentLoopService(deps: {
               | "high"
               | "critical",
           },
-        })),
+        };
+      }),
+    );
+  };
+
+  // ── Pre-warm embedding cache at startup ────────────────────────
+  // Batch-embed all skill texts using rich embedding text (name +
+  // description + category) so the first user request doesn't pay
+  // the cold-start latency. Fire-and-forget — cache is an optimization.
+  listSkillSummaries()
+    .then((skills) => {
+      const texts = skills.map((s) => buildSkillEmbeddingText(s));
+      if (texts.length > 0) {
+        embeddingService.preWarm(texts).catch((err) => {
+          console.warn(
+            "[embedding] pre-warm batch failed:",
+            (err as Error).message,
+          );
+        });
+      }
+      console.log(
+        `[embedding] pre-warm queued for ${texts.length} skill texts (cache size: ${embeddingService.cacheSize})`,
       );
-    },
-    llm: planningLlm,
-    argumentBuilder: toolArgBuilder,
-    // ── ToolRetriever integration (§2) ──────────────────────────
-    // Enables 5-layer retrieval (keyword → category → permission →
-    // embedding → history) for tool selection at scale.
-    toolRetriever,
-    embeddingService,
-  });
+    })
+    .catch(() => {
+      // Skill registry unavailable at startup — cache will populate on demand
+    });
 
   // ── Safety ─────────────────────────────────────────────────────
   const permissionPolicy = new PermissionPolicy();
@@ -352,30 +471,7 @@ export function createAgentLoopService(deps: {
   // Validates plans before execution for structural issues:
   // missing skills, circular deps, risk mismatches, destructive args.
   const planValidator = new PlanValidator({
-    listSkills: async () => {
-      const skills = deps.skillRegistry.list();
-      return skills.flatMap((s) =>
-        s.manifest.capabilities.map((capability) => ({
-          id: capabilityToolId(s.id, capability.name),
-          name: capability.title,
-          description: capability.description,
-          category: categoryFromCapability(capability.name),
-          enabled: s.enabled,
-          permissions: normalizeCapabilityPermissions(capability.permissions),
-          defaultTimeoutMs: 60_000,
-          maxTimeoutMs: 300_000,
-          supportsAbort: true,
-          idempotent: false,
-          riskHints: {
-            defaultRisk: capability.risk as
-              | "low"
-              | "medium"
-              | "high"
-              | "critical",
-          },
-        })),
-      );
-    },
+    listSkills: listSkillSummaries,
   });
 
   // ── Replanner (§1 of architecture next steps) ──────────────────
@@ -383,30 +479,7 @@ export function createAgentLoopService(deps: {
   // approval_rejected, tool_result_insufficient, missing_parameters,
   // max_iterations_approaching.
   const replanner = new Replanner({
-    listSkills: async () => {
-      const skills = deps.skillRegistry.list();
-      return skills.flatMap((s) =>
-        s.manifest.capabilities.map((capability) => ({
-          id: capabilityToolId(s.id, capability.name),
-          name: capability.title,
-          description: capability.description,
-          category: categoryFromCapability(capability.name),
-          enabled: s.enabled,
-          permissions: normalizeCapabilityPermissions(capability.permissions),
-          defaultTimeoutMs: 60_000,
-          maxTimeoutMs: 300_000,
-          supportsAbort: true,
-          idempotent: false,
-          riskHints: {
-            defaultRisk: capability.risk as
-              | "low"
-              | "medium"
-              | "high"
-              | "critical",
-          },
-        })),
-      );
-    },
+    listSkills: listSkillSummaries,
     llm: replanningLlm,
   });
 
@@ -443,6 +516,46 @@ export function createAgentLoopService(deps: {
     eventBus: rawEventBus,
     toolCalls: deps.database.toolCalls,
     argumentBuilder: toolArgBuilder,
+  });
+
+  // ── Tool Decision Engine ────────────────────────────────────────
+  // Unified tool decision + streaming execution engine.
+  // LLM native function calling interleaves text + tool calls —
+  // Claude Code-style streaming UX. Falls back to traditional
+  // safety + execution path on error.
+  const toolDecisionEngine = new ToolDecisionEngine({
+    listSkills: listSkillSummaries,
+    llm: planningLlm,
+    argumentBuilder: toolArgBuilder,
+    toolRetriever,
+    embeddingService,
+    // Streaming execution deps
+    eventBus: rawEventBus,
+    modelRouter,
+    permissionPolicy,
+    executionOrchestrator,
+    saveMessage: async (input) => {
+      try {
+        let embedding: number[] | undefined;
+        if (input.content.trim()) {
+          try {
+            embedding = await embeddingService.embed(input.content);
+          } catch {
+            // Best effort
+          }
+        }
+        await deps.database.messages.create({
+          id: input.id,
+          conversationId: input.conversationId,
+          role: input.role as "system" | "user" | "assistant",
+          content: input.content,
+          metadata: input.metadata,
+          embedding,
+        });
+      } catch {
+        // Best effort
+      }
+    },
   });
 
   // ── Reflection ─────────────────────────────────────────────────
@@ -547,6 +660,8 @@ export function createAgentLoopService(deps: {
     scopedPermissionManager,
     // ── Plan snapshot persistence (§P0-2) ──────────────────────────
     planSnapshotRepo: deps.database.planSnapshots,
+    // ── Tool call persistence for safety audits (§P0-3) ────────────
+    toolCalls: deps.database.toolCalls,
   });
 
   // ── Agent Service ──────────────────────────────────────────────
@@ -715,6 +830,39 @@ function normalizeCapabilityPermissions(permissions: string[]): Permission[] {
     }
   });
   return [...new Set(normalized)];
+}
+
+/**
+ * Classify side-effects from permissions heuristic (§P2).
+ * Exact classification should come from the manifest when the
+ * schema is extended. This heuristic provides useful signal for
+ * routing (e.g., reducing destructive-tool false positives).
+ */
+function classifySideEffects(
+  permissions: string[],
+): "none" | "readonly" | "mutation" | "network" | "destructive" {
+  if (permissions.includes("shell.execute")) return "destructive";
+  if (permissions.includes("filesystem.write") || permissions.includes("filesystem.delete")) return "mutation";
+  if (permissions.includes("network.request") || permissions.includes("external.send")) return "network";
+  if (permissions.includes("database.write")) return "mutation";
+  if (permissions.includes("filesystem.read") || permissions.includes("database.read") || permissions.includes("secret.read")) return "readonly";
+  if (permissions.includes("artifact.write")) return "mutation";
+  if (permissions.includes("memory.write")) return "mutation";
+  return "none";
+}
+
+/**
+ * Build rich embedding text from a SkillSummary (§P2).
+ * Uses name + description + category for semantic vector generation.
+ * If examples were available in the manifest, they'd be included here
+ * (Tool2Vec approach: embed example user queries alongside descriptions).
+ */
+export function buildSkillEmbeddingText(skill: {
+  name: string;
+  description: string;
+  category: string;
+}): string {
+  return `${skill.name} — ${skill.description} — category: ${skill.category}`;
 }
 
 function toolResultSummary(result: unknown): string | undefined {

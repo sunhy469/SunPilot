@@ -4,14 +4,15 @@ import "./UserFooter.css";
 
 const { Text } = Typography;
 
-export function UserFooter() {
+export function UserFooter({ onOpenSettings }: { onOpenSettings: () => void }) {
   return (
     <Flex className="user-footer" align="center">
       <Button
         type="text"
-        size="small"
+        size="large"
         icon={<SettingOutlined />}
         className="user-footer-btn"
+        onClick={onOpenSettings}
       >
         <Text>设置</Text>
       </Button>

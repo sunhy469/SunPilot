@@ -6,7 +6,7 @@ import {
   LLM_BASE_URL_ENV,
   LLM_MODEL_ENV
 } from "./llm.config.js";
-import type { ChatCompletionDelta, ChatCompletionRequest, FetchLike, LlmProvider, OpenAICompatibleChatProviderConfig } from "./llm.types.js";
+import type { ChatCompletionDelta, ChatCompletionRequest, FetchLike, LlmProvider, OpenAICompatibleChatProviderConfig, ToolCallDelta } from "./llm.types.js";
 
 interface OpenAIChatStreamChunk {
   id?: string;
@@ -16,6 +16,15 @@ interface OpenAIChatStreamChunk {
       role?: string;
       content?: string | null;
       name?: string;
+      tool_calls?: Array<{
+        index: number;
+        id?: string;
+        type?: "function";
+        function?: {
+          name?: string;
+          arguments?: string;
+        };
+      }>;
     };
     finish_reason?: string | null;
   }>;
@@ -34,7 +43,7 @@ interface OpenAIChatStreamChunk {
  * 支持 OpenAI API 和 DeepSeek API 两种后端（通过 DEEPSEEK_API_KEY_ENV 环境变量切换）。
  */
 export class OpenAICompatibleChatProvider implements LlmProvider {
-  id = "llm.openai-compatible";
+  id: string;
   model: string;
   private readonly apiKey: string;
   private readonly baseUrl: string;
@@ -44,6 +53,7 @@ export class OpenAICompatibleChatProvider implements LlmProvider {
     if (!config.apiKey.trim()) {
       throw new Error(`${LLM_API_KEY_ENV} is required.`);
     }
+    this.id = config.id ?? "llm.openai-compatible";
     this.apiKey = config.apiKey;
     this.baseUrl = normalizeBaseUrl(config.baseUrl ?? DEFAULT_LLM_BASE_URL);
     this.model = config.model?.trim() || DEFAULT_LLM_MODEL;
@@ -55,19 +65,29 @@ export class OpenAICompatibleChatProvider implements LlmProvider {
       throw new Error("At least one chat message is required.");
     }
 
+    const body: Record<string, unknown> = {
+      model: this.model,
+      messages: request.messages,
+      temperature: request.temperature,
+      max_tokens: request.maxTokens,
+      stream: true,
+    };
+
+    // Native function calling: include tools and tool_choice when provided
+    if (request.tools && request.tools.length > 0) {
+      body.tools = request.tools;
+      if (request.tool_choice) {
+        body.tool_choice = request.tool_choice;
+      }
+    }
+
     const response = await this.fetchImpl(new URL("/chat/completions", this.baseUrl).toString(), {
       method: "POST",
       headers: {
         Authorization: `Bearer ${this.apiKey}`,
         "Content-Type": "application/json"
       },
-      body: JSON.stringify({
-        model: this.model,
-        messages: request.messages,
-        temperature: request.temperature,
-        max_tokens: request.maxTokens,
-        stream: true
-      }),
+      body: JSON.stringify(body),
       signal: request.signal
     });
 
@@ -85,9 +105,27 @@ export class OpenAICompatibleChatProvider implements LlmProvider {
       const raw: unknown = JSON.parse(data);
       const chunk = raw as OpenAIChatStreamChunk;
       for (const choice of chunk.choices ?? []) {
-        const delta = choice.delta?.content;
-        if (typeof delta === "string" && delta.length > 0) {
-          yield { delta, raw };
+        const textDelta = choice.delta?.content;
+        const toolCallsDelta = choice.delta?.tool_calls;
+
+        // Build delta: include text if present, tool_calls if present
+        const delta: ChatCompletionDelta = {
+          delta: typeof textDelta === "string" ? textDelta : "",
+          raw,
+        };
+
+        if (toolCallsDelta && toolCallsDelta.length > 0) {
+          delta.toolCalls = toolCallsDelta.map((tc) => ({
+            index: tc.index,
+            id: tc.id,
+            type: tc.type,
+            function: tc.function,
+          })) as ToolCallDelta[];
+        }
+
+        // Yield if there's text content or tool calls
+        if (delta.delta.length > 0 || delta.toolCalls) {
+          yield delta;
         }
       }
     }

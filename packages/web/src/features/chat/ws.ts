@@ -28,6 +28,8 @@ export function sendChatMessage(socket: WebSocket, params: ChatSendParams) {
         conversationId: params.conversationId,
         message: params.message,
         mode: params.mode ?? "agent",
+        permissionMode: params.permissionMode ?? "auto",
+        modelId: params.modelId,
         clientRequestId: params.clientRequestId,
         attachments: params.attachments,
       },

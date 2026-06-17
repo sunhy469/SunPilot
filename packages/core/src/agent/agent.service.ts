@@ -101,6 +101,7 @@ export class AgentService {
       message: string;
       mode?: "chat" | "agent";
       permissionMode?: "ask" | "auto" | "full";
+      modelId?: "dp" | "seed";
       clientRequestId?: string;
       attachments?: Array<{
         id: string;
@@ -155,6 +156,7 @@ export class AgentService {
       message: input.message,
       mode: input.mode ?? "agent",
       permissionMode: input.permissionMode,
+      modelId: input.modelId,
       attachments: input.attachments,
       client: {
         source: ctx.source,
@@ -331,6 +333,7 @@ export class AgentService {
       message: string;
       mode?: "chat" | "agent";
       permissionMode?: "ask" | "auto" | "full";
+      modelId?: "dp" | "seed";
       clientRequestId?: string;
       attachments?: Array<{
         id: string;
@@ -380,6 +383,7 @@ export class AgentService {
       message: input.message,
       mode: input.mode ?? "agent",
       permissionMode: input.permissionMode,
+      modelId: input.modelId,
       attachments: input.attachments,
       client: {
         source: ctx.source,
