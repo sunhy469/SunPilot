@@ -32,4 +32,19 @@ export interface SunPilotApiDeps {
   };
   /** Optional OSS client — created once at startup, shared across requests. */
   oss?: OssClient;
+  /** Optional diagnostics callbacks provided by daemon. */
+  diagnostics?: {
+    /** Active WebSocket connection count. */
+    websocketConnections(): number;
+    /** Get current LLM config for diagnostics. */
+    getLlmConfig(): { provider: string; model: string; configured: boolean };
+  };
+  /** Model catalog for the /v1/models API. */
+  getModels?(): Array<{
+    id: string;
+    label: string;
+    provider: string;
+    model: string;
+    available: boolean;
+  }>;
 }

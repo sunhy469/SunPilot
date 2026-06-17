@@ -13,11 +13,13 @@ import { ApprovalStrip } from "./components/ApprovalStrip";
 import { OfflineBanner } from "./components/OfflineBanner";
 import { ErrorMessageCard } from "./components/ErrorMessageCard";
 import { PluginsEmptyView } from "./components/PluginsEmptyView";
+import { RunDebugPanel } from "../../features/agent-runtime/RunDebugPanel";
+import { SettingsPage } from "../SettingsPage";
 import { conversationTitle } from "../../features/conversations/model";
 import "./ChatPage.scss";
 
 export function ChatPage() {
-  const [activePanel, setActivePanel] = useState<"chat" | "plugins">("chat");
+  const [activePanel, setActivePanel] = useState<"chat" | "automation" | "plugins" | "debug" | "settings">("chat");
   const request = useMemo(() => createRequest(), []);
   const conversations = useConversations(request, true);
   const chat = useChat(
@@ -50,23 +52,43 @@ export function ChatPage() {
             setActivePanel("chat");
             void conversations.selectConversation(id);
           }}
+          onOpenAutomation={() => setActivePanel("automation")}
           onOpenPlugins={() => setActivePanel("plugins")}
+          onOpenDebug={() => setActivePanel("debug")}
+          onOpenSettings={() => setActivePanel("settings")}
         />
       }
     >
       <div className="chat-page">
         <ChatHeader
           title={
-            activePanel === "plugins"
-              ? "插件"
-              : active
-                ? conversationTitle(active.title)
-                : ""
+            activePanel === "automation"
+              ? "自动化"
+              : activePanel === "plugins"
+                ? "插件"
+                : activePanel === "debug"
+                  ? "Run Debug"
+                  : activePanel === "settings"
+                    ? "Settings"
+                  : active
+                    ? conversationTitle(active.title)
+                    : ""
           }
         />
 
-        {activePanel === "plugins" ? (
+        {activePanel === "automation" ? (
+          <div className="chat-page" />
+        ) : activePanel === "plugins" ? (
           <PluginsEmptyView />
+        ) : activePanel === "settings" ? (
+          <SettingsPage />
+        ) : activePanel === "debug" ? (
+          <div className="chat-page" style={{ overflow: "hidden" }}>
+            <RunDebugPanel
+              runId={chat.activeRunId}
+              conversationId={conversations.activeConversationId}
+            />
+          </div>
         ) : (
           <>
             {isOffline && !hasMessages && <OfflineBanner />}
@@ -84,11 +106,13 @@ export function ChatPage() {
 
             {isWelcome ? (
               <WelcomeView onSend={chat.send} disabled={chat.pending} />
-            ) : (
+            ) : ( 
               <>
                 <MessageList
                   messages={conversations.messages}
                   status={chat.chatViewState}
+                  sendState={chat.sendState}
+                  toolName={chat.toolName}
                 />
                 <div className="chat-composer-wrap">
                   <ArtifactPanel

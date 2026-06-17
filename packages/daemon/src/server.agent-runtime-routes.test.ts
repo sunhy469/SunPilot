@@ -88,7 +88,7 @@ describe("daemon Agent runtime REST routes", () => {
       runId: run.id,
       provider: "test",
       model: "test",
-      purpose: "response.compose",
+      purpose: "response_composition",
       inputTokens: 10,
       outputTokens: 20,
       latencyMs: 150,
@@ -183,7 +183,7 @@ describe("daemon Agent runtime REST routes", () => {
       items: [
         expect.objectContaining({
           id: "model_agent",
-          purpose: "response.compose",
+          purpose: "response_composition",
         }),
       ],
     });
@@ -232,7 +232,7 @@ describe("daemon Agent runtime REST routes", () => {
       'sunpilot_runs_total{status="waiting_approval",mode="agent"} 1',
     );
     expect(metrics.body).toContain(
-      'sunpilot_model_calls_total{provider="test",model="test",purpose="response.compose",status="completed"} 1',
+      'sunpilot_model_calls_total{provider="test",model="test",purpose="response_composition",status="completed"} 1',
     );
     expect(metrics.body).toContain(
       'sunpilot_model_tokens_total{provider="test",model="test",type="input"} 10',

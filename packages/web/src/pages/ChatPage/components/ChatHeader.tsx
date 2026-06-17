@@ -6,7 +6,7 @@ const { Text } = Typography;
 export function ChatHeader({ title }: { title: string }) {
   return (
     <div className="chat-header">
-      <Text strong>{title}</Text>
+      <Text strong className="chat-header__title">{title || "SunPilot"}</Text>
     </div>
   );
 }

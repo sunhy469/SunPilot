@@ -196,6 +196,27 @@ export async function createDaemon(options: DaemonOptions = {}) {
         ),
     },
     oss: createOssClient() ?? undefined,
+    diagnostics: {
+      websocketConnections: () => 0, // updated below after ws setup
+      getLlmConfig: () => ({
+        configured: Boolean(
+          process.env["SUNPILOT_LLM_API_KEY"] || process.env["SUNPILOT_DP_LLM_API_KEY"],
+        ),
+        provider: "openai-compatible",
+        model: process.env["SUNPILOT_LLM_MODEL"] ?? process.env["SUNPILOT_DP_LLM_MODEL"] ?? "deepseek-v4-flash",
+      }),
+    },
+    getModels: () => {
+      const hasSeed = !!(
+        process.env["SUNPILOT_SEED_LLM_API_KEY"]
+      );
+      const dpModel = process.env["SUNPILOT_DP_LLM_MODEL"] ?? process.env["SUNPILOT_LLM_MODEL"] ?? "deepseek-v4-flash";
+      const seedModel = process.env["SUNPILOT_SEED_LLM_MODEL"] ?? "doubao-seed-2-0-lite-260428";
+      return [
+        { id: "dp", label: "DP", provider: "deepseek", model: dpModel, available: true },
+        { id: "seed", label: "Seed", provider: "volcengine-ark", model: seedModel, available: hasSeed },
+      ];
+    },
   };
   registerSunPilotApiRoutes(app, apiDeps);
 
@@ -210,6 +231,11 @@ export async function createDaemon(options: DaemonOptions = {}) {
     port,
     isAllowedOrigin: isAllowedLocalOrigin,
   });
+
+  // Update diagnostics with real websocket count after ws is set up
+  if (apiDeps.diagnostics) {
+    apiDeps.diagnostics.websocketConnections = () => ws.connectionRegistry.count();
+  }
 
   registerDaemonMetricsRoutes(app, {
     database,

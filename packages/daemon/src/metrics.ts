@@ -97,48 +97,6 @@ export function registerDaemonMetricsRoutes(
     connectionRegistry,
   } = deps;
 
-  app.get("/v1/diagnostics", async () => {
-    const startedAt = Date.now();
-    await database.runs.list({ limit: 1 });
-    const databaseLatencyMs = Date.now() - startedAt;
-    const skills = skillRegistry.list();
-    const [waitingApproval, ...activeRuns] = await Promise.all([
-      database.runs.list({ status: "waiting_approval", limit: 200 }),
-      ...AGENT_ACTIVE_STATUSES.map((status) =>
-        database.runs.list({ status, limit: 200 }),
-      ),
-    ]);
-    return {
-      daemon: {
-        status: "ok",
-        uptimeSec: Math.floor(process.uptime()),
-        pid: process.pid,
-      },
-      database: {
-        status: "ok",
-        latencyMs: databaseLatencyMs,
-      },
-      llm: {
-        configured: Boolean(
-          process.env[LLM_API_KEY_ENV] || process.env[DEEPSEEK_API_KEY_ENV],
-        ),
-        provider: "openai-compatible",
-        model: process.env[LLM_MODEL_ENV] ?? DEFAULT_LLM_MODEL,
-      },
-      skills: {
-        count: skills.length,
-        enabled: skills.filter((skill) => skill.enabled).length,
-      },
-      runs: {
-        active: activeRuns.reduce((sum, runs) => sum + runs.length, 0),
-        waitingApproval: waitingApproval.length,
-      },
-      websocket: {
-        connections: connectionRegistry.count(),
-      },
-    };
-  });
-
   app.get("/metrics", async (_request, reply) => {
     const lines: string[] = [];
     const skills = skillRegistry.list();

@@ -13,6 +13,7 @@ export const chatSendSchema = z.object({
   message: z.string().min(1, 'message is required'),
   mode: z.enum(['chat', 'agent']).default('agent'),
   permissionMode: z.enum(['ask', 'auto', 'full']).default('auto'),
+  modelId: z.enum(['dp', 'seed']).optional(),
   attachments: z
     .array(
       z.object({
@@ -75,6 +76,8 @@ export const approvalDecideSchema = z.object({
 
 export type PermissionMode = 'ask' | 'auto' | 'full';
 
+export type ChatModelId = 'dp' | 'seed';
+
 export interface ChatSendParams {
   clientRequestId?: string;
   conversationId?: string;
@@ -82,6 +85,8 @@ export interface ChatSendParams {
   mode: 'chat' | 'agent';
   /** User-selected permission mode: ask=always approve, auto=risk-based, full=never approve. */
   permissionMode?: PermissionMode;
+  /** User-selected chat model. When unset, the default model is used. */
+  modelId?: ChatModelId;
   attachments: Array<{
     id: string;
     name: string;

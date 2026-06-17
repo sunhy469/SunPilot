@@ -18,7 +18,8 @@ export type ReplanTrigger =
   | "approval_rejected"
   | "tool_result_insufficient"
   | "missing_parameters"
-  | "max_iterations_approaching";
+  | "max_iterations_approaching"
+  | "safety_denied";
 
 export interface ReplanInput {
   trigger: ReplanTrigger;
@@ -97,6 +98,8 @@ export class Replanner {
         return this.handleMissingParameters(input);
       case "max_iterations_approaching":
         return this.handleMaxIterationsApproaching(input);
+      case "safety_denied":
+        return this.handleSafetyDenied(input);
       default:
         return this.unchanged(originalPlan, "Unknown replan trigger");
     }
@@ -586,6 +589,91 @@ export class Replanner {
       addedSteps: [summaryStep],
       modifiedSteps: [],
       summary: `Approaching max iterations (${input.iteration}/${input.maxIterations}). Summarizing ${pendingSteps.length} unfinished step(s) for user.`,
+      changed: true,
+    };
+  }
+
+  /**
+   * Safety denied — tools were blocked by sandbox or injection detector.
+   * Generate a plan that explains the safety block and offers alternatives
+   * without attempting to bypass security.
+   */
+  private async handleSafetyDenied(
+    input: ReplanInput,
+  ): Promise<ReplanResult> {
+    const { originalPlan, observation } = input;
+
+    // Identify which steps were blocked by safety
+    const blockedToolCalls = (observation?.toolCalls ?? []).filter(
+      (tc) => {
+        const meta = (tc as unknown as Record<string, unknown>);
+        return meta.blocked === true || tc.status === "cancelled";
+      },
+    );
+
+    if (blockedToolCalls.length === 0) {
+      return this.unchanged(originalPlan, "No safety-denied tools to replan");
+    }
+
+    const blockedNames = blockedToolCalls.map((tc) => tc.name).join(", ");
+
+    // Replace blocked tool steps with a reasoning step that explains the block
+    const firstBlockedIdx = originalPlan.steps.findIndex(
+      (s) =>
+        s.type === "tool" &&
+        s.skillId &&
+        blockedToolCalls.some((btc) => btc.skillId === s.skillId),
+    );
+
+    const explainStepId = `plan_step_safety_explain_${crypto.randomUUID().slice(0, 8)}`;
+    const responseStepId = `plan_step_safety_response_${crypto.randomUUID().slice(0, 8)}`;
+
+    const explainStep: AgentPlanStep = {
+      id: explainStepId,
+      title: "Explain safety block",
+      description: `The following tool(s) were blocked by safety policy: ${blockedNames}. Explain why these operations are not permitted and suggest safer alternatives.`,
+      type: "reasoning",
+      dependsOn: firstBlockedIdx > 0
+        ? [originalPlan.steps[firstBlockedIdx - 1]!.id]
+        : [],
+      riskLevel: "low",
+      status: "pending",
+    };
+
+    const responseStep: AgentPlanStep = {
+      id: responseStepId,
+      title: "Compose safety-aware response",
+      description: "Inform the user that the requested operation was blocked for safety reasons and suggest alternative approaches.",
+      type: "response",
+      dependsOn: [explainStepId],
+      riskLevel: "low",
+      status: "pending",
+    };
+
+    // Keep steps before the first blocked step, replace the rest
+    const insertIdx = firstBlockedIdx >= 0 ? firstBlockedIdx : originalPlan.steps.length;
+    const removedStepIds = originalPlan.steps
+      .slice(insertIdx)
+      .filter((s) =>
+        s.type === "tool" &&
+        s.skillId &&
+        blockedToolCalls.some((btc) => btc.skillId === s.skillId),
+      )
+      .map((s) => s.id);
+
+    const steps = [
+      ...originalPlan.steps.slice(0, insertIdx),
+      explainStep,
+      responseStep,
+    ];
+
+    const newPlan = this.buildRevisedPlan(originalPlan, steps);
+    return {
+      plan: newPlan,
+      removedSteps: removedStepIds,
+      addedSteps: [explainStep, responseStep],
+      modifiedSteps: [],
+      summary: `Safety denied tool(s): ${blockedNames}. Replaced blocked steps with explanation and safe alternatives.`,
       changed: true,
     };
   }

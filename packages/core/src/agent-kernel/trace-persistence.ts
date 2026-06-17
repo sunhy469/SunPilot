@@ -85,6 +85,14 @@ export class RepositoryTraceManager {
     const endSpan = (summary: string, metrics: SpanMetrics = {}, error?: string): Span => {
       const span = originalEnd(summary, metrics, error);
 
+      // Merge modelCallIds into span metadata for trace-to-model-call linking (§P1-5)
+      if (metrics.modelCallIds && metrics.modelCallIds.length > 0) {
+        span.metadata = {
+          ...(span.metadata ?? {}),
+          modelCallIds: metrics.modelCallIds,
+        };
+      }
+
       // Update span in DB with completed data
       this.traceRepo
         .createSpan({

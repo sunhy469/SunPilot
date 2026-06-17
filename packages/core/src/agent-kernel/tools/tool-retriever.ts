@@ -225,22 +225,39 @@ export class ToolRetriever {
     }
 
     // ── Layer 4: Embedding similarity (optional) ──────────────────
-    if (embeddingService) {
+    // Only used when a REAL embedding provider is active AND has not
+    // degraded to fallback. The door check (hasRealProvider) covers
+    // pre-existing degradation; the post-query check catches provider
+    // failure DURING the query embed call (mid-call degradation).
+    if (embeddingService && embeddingService.hasRealProvider) {
       try {
         const queryEmbedding = await embeddingService.embed(query);
-        for (const entry of scored) {
-          // Semantic score is fused from description embedding
-          const descEmbedding = await embeddingService
-            .embed(entry.skill.description)
-            .catch(() => undefined);
-          if (descEmbedding) {
-            const similarity = cosineSimilarity(
-              queryEmbedding,
-              descEmbedding,
-            );
-            entry.score += similarity * 0.2;
-            if (similarity > 0.7) {
-              entry.matchReasons.push(`semantic:${similarity.toFixed(2)}`);
+
+        // Re-check after query embed: the provider may have failed
+        // during this call and fallen back to lexical hash. If it did,
+        // the query vector is NOT semantic — skip scoring entirely
+        // rather than mixing real skill vectors with a fallback query.
+        if (!embeddingService.hasRealProvider) {
+          // Degraded mid-call — skip embedding scoring
+        } else {
+          for (const entry of scored) {
+            // Embed rich text: name + description + category. Consistent
+            // with IntentRouter and pre-warm to maximize cache hits.
+            const skillText = `${entry.skill.name} — ${entry.skill.description} — category: ${entry.skill.category}`;
+            const descEmbedding = await embeddingService
+              .embed(skillText)
+              .catch(() => undefined);
+            if (descEmbedding && embeddingService.hasRealProvider) {
+              const similarity = cosineSimilarity(
+                queryEmbedding,
+                descEmbedding,
+              );
+              // 0.5 weight — embedding is the PRIMARY scoring signal;
+              // keyword/bigram are tiebreakers only.
+              entry.score += similarity * 0.5;
+              if (similarity > 0.7) {
+                entry.matchReasons.push(`semantic:${similarity.toFixed(2)}`);
+              }
             }
           }
         }

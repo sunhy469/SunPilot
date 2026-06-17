@@ -1,33 +1,86 @@
 .message-row.assistant {
   display: flex;
   align-items: flex-start;
-  margin-bottom: 26px;
+  margin-bottom: 32px;
 }
 
 .assistant-content {
   flex: 1;
   min-width: 0;
+  background: var(--sp-surface);
+  border: 1px solid var(--sp-border-soft);
+  border-radius: var(--sp-radius-md);
+  padding: 18px 22px;
+  box-shadow: var(--sp-shadow-card);
+}
+
+/* ── AI status indicator ─────────────────────────────────── */
+
+.assistant-status {
+  padding: 4px 0 8px;
+}
+
+.assistant-status__icon {
+  font-size: 14px;
+  color: var(--sp-blue);
+  animation: pulse 1.5s ease-in-out infinite;
+}
+
+.assistant-status__text {
+  font-size: 13px;
+  color: var(--sp-muted);
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
 }
 
 .assistant-text {
-  font-size: 16px;
+  font-size: 15px;
   line-height: 1.75;
-  color: var(--sp-text);
+  color: var(--sp-ink);
 }
 
-/* ── Action row (copy / like / dislike / time) ───────────────────── */
+/* ── Markdown content ──────────────────────────────────────── */
+
+.assistant-markdown-wrap {
+  /* Allow blocks like code/pre inside the card to breathe */
+}
+
+/* ── Action row (copy / like / dislike / time) ────────────── */
 
 .assistant-actions {
-  margin-top: 10px;
-  padding-top: 6px;
+  margin-top: 12px;
+  padding-top: 8px;
+  border-top: 1px solid var(--sp-border-soft);
+}
+
+.assistant-actions .ant-btn-text {
+  color: var(--sp-muted);
+  transition: color 0.15s ease;
+}
+.assistant-actions .ant-btn-text:hover {
+  color: var(--sp-blue);
+  background: var(--sp-blue-soft);
 }
 
 .assistant-actions .message-time {
   white-space: nowrap;
+  font-size: 11px;
+  margin-left: auto;
 }
 
 @media (max-width: 767px) {
+  .message-row.assistant {
+    margin-bottom: 24px;
+  }
+  .assistant-content {
+    padding: 14px 16px;
+    border-radius: var(--sp-radius-sm);
+  }
   .assistant-text {
-    max-width: 100%;
+    font-size: 14px;
+    line-height: 1.65;
   }
 }
