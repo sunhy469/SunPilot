@@ -14,6 +14,22 @@ export interface EmbeddingService {
 
   /** Generate embeddings for a batch of texts (more efficient). */
   embedBatch(texts: string[]): Promise<number[][]>;
+
+  /**
+   * Whether a real semantic embedding provider is active AND has not
+   * degraded to fallback. When false, similarity scores are lexical
+   * (keyword/hash) and MUST NOT be used to short-circuit LLM-based
+   * intent classification.
+   */
+  readonly hasRealProvider: boolean;
+
+  /**
+   * Whether the service is currently in degraded mode (provider
+   * failed at runtime and fell back to lexical vectors). Distinct
+   * from hasRealProvider: a service can start real but become
+   * degraded mid-session.
+   */
+  readonly isDegraded: boolean;
 }
 
 /**

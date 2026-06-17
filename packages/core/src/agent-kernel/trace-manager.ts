@@ -32,8 +32,27 @@ export interface SpanMetrics {
   toolFailures?: number;
   approvalRequired?: boolean;
   modelCalls?: number;
+  /** IDs of model calls made during this span, for trace-to-model-call linking (§P1-5). */
+  modelCallIds?: string[];
   retryCount?: number;
   errorCode?: string;
+  // ── Tool selection trace metadata (§P2) ─────────────────────────
+  /** Embedding mode: "real" | "lexical_fallback" | "none". */
+  embeddingMode?: string;
+  /** Top embedding similarity score from intent routing. */
+  embeddingTopScore?: number;
+  /** Number of skills considered in embedding pass. */
+  embeddingCandidateCount?: number;
+  /** Whether intent was determined by form-match rules. */
+  formMatch?: boolean;
+  /** Tool decision path (plan/intent_match/deterministic_scorer/llm_semantic/scorer_fallback). */
+  decisionPath?: string;
+  /** Top-K value from tool retrieval. */
+  retrievalTopK?: number;
+  /** Number of candidates in retrieval result. */
+  retrievalCandidateCount?: number;
+  /** Whether retrieval fell back to broader search. */
+  retrievalFallback?: boolean;
 }
 
 export interface Span {

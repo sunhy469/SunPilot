@@ -23,6 +23,13 @@ export interface EmbeddingProvider {
  *      signal for pgvector scoring but is NOT semantic. This is explicitly
  *      documented so callers understand the degradation.
  *
+ * Caching:
+ *   Embeddings are cached by text content hash. Cache keys are the full
+ *   text string, so "skill.name — skill.description" and standalone
+ *   "skill.description" are separate entries. This avoids re-embedding
+ *   the same skill on every request. The cache is cleared when
+ *   invalidateCache() is called (e.g. on skill registry reload).
+ *
  * Architecture doc §9.2.
  */
 export class LlmEmbeddingService implements EmbeddingService {
@@ -31,6 +38,20 @@ export class LlmEmbeddingService implements EmbeddingService {
 
   /** Vocabulary size for keyword fallback. */
   private static readonly VOCAB_SIZE = 1536;
+
+  /** Cache: text → embedding vector. Shared across all callers. */
+  private readonly cache = new Map<string, number[]>();
+
+  /** Cache statistics for trace/debug observability. */
+  private _cacheStats = { hits: 0, misses: 0 };
+
+  /**
+   * Whether the service has fallen back to keyword/hash embeddings
+   * due to a provider failure during this session. Once degraded,
+   * similarity scores are NOT semantic and MUST NOT be used to
+   * short-circuit LLM-based intent classification.
+   */
+  private _degraded = false;
 
   constructor(
     private readonly deps: {
@@ -41,34 +62,152 @@ export class LlmEmbeddingService implements EmbeddingService {
   ) {}
 
   async embed(text: string): Promise<number[]> {
+    // Check cache first
+    const cached = this.cache.get(text);
+    if (cached) {
+      this._cacheStats.hits++;
+      return cached;
+    }
+    this._cacheStats.misses++;
+
     // Tier 1: Real embedding provider
-    if (this.deps.embeddingProvider) {
+    if (this.deps.embeddingProvider && !this._degraded) {
       try {
-        return await this.deps.embeddingProvider.embed(text);
+        const vector = await this.deps.embeddingProvider.embed(text);
+        this.cache.set(text, vector);
+        return vector;
       } catch {
-        // Provider failed — fall through to keyword fallback
+        // Provider failed — mark degraded so callers know similarity
+        // scores from this point forward are lexical, not semantic.
+        this._degraded = true;
+        console.warn(
+          "[embedding] Provider API call failed, switching to lexical fallback for remaining session. " +
+          "Semantic short-circuit (IntentRouter Layer 1) is now disabled.",
+        );
       }
     }
     // Tier 2: Lexical keyword fallback (NOT semantic — lexical overlap only)
-    return this.keywordEmbed(text);
+    const fallbackVector = this.keywordEmbed(text);
+    this.cache.set(text, fallbackVector);
+    return fallbackVector;
   }
 
   async embedBatch(texts: string[]): Promise<number[][]> {
-    // Tier 1: Real embedding provider (batch)
-    if (this.deps.embeddingProvider) {
-      try {
-        return await this.deps.embeddingProvider.embedBatch(texts);
-      } catch {
-        // Provider failed — fall through to individual fallback
+    // Check cache for all texts first
+    const results: (number[] | null)[] = texts.map((t) => this.cache.get(t) ?? null);
+
+    // Collect uncached texts
+    const uncachedIndices: number[] = [];
+    const uncachedTexts: string[] = [];
+    for (let i = 0; i < results.length; i++) {
+      if (results[i] === null) {
+        uncachedIndices.push(i);
+        uncachedTexts.push(texts[i]!);
+      } else {
+        this._cacheStats.hits++;
       }
     }
-    // Tier 2: Fall back per-text
-    return Promise.all(texts.map((t) => this.embed(t)));
+
+    if (uncachedTexts.length > 0) {
+      this._cacheStats.misses += uncachedTexts.length;
+
+      // Tier 1: Real embedding provider (batch)
+      if (this.deps.embeddingProvider) {
+        try {
+          const vectors = await this.deps.embeddingProvider.embedBatch(uncachedTexts);
+          for (let j = 0; j < uncachedIndices.length; j++) {
+            const idx = uncachedIndices[j]!;
+            const vector = vectors[j];
+            if (vector && vector.length > 0) {
+              this.cache.set(uncachedTexts[j]!, vector);
+              results[idx] = vector;
+            }
+          }
+        } catch {
+          // Provider failed — fall through to per-text fallback
+        }
+      }
+
+      // Fill any remaining nulls via individual embed (which also caches)
+      for (let j = 0; j < results.length; j++) {
+        if (results[j] === null) {
+          results[j] = await this.embed(texts[j]!);
+        }
+      }
+    }
+
+    return results as number[][];
   }
 
-  /** Whether a real embedding provider is configured (vs. fallback only). */
+  /**
+   * Whether a real embedding provider is configured AND has not
+   * degraded to fallback. Callers that short-circuit on semantic
+   * similarity (e.g. IntentRouter Layer 1) MUST check this before
+   * trusting cosine-similarity scores.
+   */
   get hasRealProvider(): boolean {
-    return Boolean(this.deps.embeddingProvider);
+    return Boolean(this.deps.embeddingProvider) && !this._degraded;
+  }
+
+  /**
+   * Whether the service is currently using lexical fallback
+   * (either because no provider was configured, or because the
+   * provider failed at runtime).
+   */
+  get isDegraded(): boolean {
+    return this._degraded || !this.deps.embeddingProvider;
+  }
+
+  /** Reset degraded state (e.g. after provider recovers or on config reload). */
+  clearDegraded(): void {
+    this._degraded = false;
+  }
+
+  /** Read-only snapshot of cache statistics for trace/debug. */
+  get cacheStats(): Readonly<{ hits: number; misses: number }> {
+    return { ...this._cacheStats };
+  }
+
+  /** Total cached entries (for monitoring). */
+  get cacheSize(): number {
+    return this.cache.size;
+  }
+
+  /**
+   * Pre-warm the embedding cache for a batch of texts.
+   * Useful for pre-computing skill embeddings at startup or after
+   * skill registry reload. Uses batch embed when a real provider
+   * is available, otherwise falls back per-text.
+   */
+  async preWarm(texts: string[]): Promise<void> {
+    // Filter out already-cached texts
+    const uncached = texts.filter((t) => !this.cache.has(t));
+    if (uncached.length === 0) return;
+
+    if (this.deps.embeddingProvider) {
+      try {
+        const vectors = await this.deps.embeddingProvider.embedBatch(uncached);
+        for (let i = 0; i < uncached.length; i++) {
+          const text = uncached[i];
+          const vector = vectors[i];
+          if (text !== undefined && vector && vector.length > 0) {
+            this.cache.set(text, vector);
+          }
+        }
+      } catch {
+        // Batch failed — fall back to individual (they'll cache on demand)
+      }
+    }
+    // Fallback vectors are computed on demand and cached individually
+  }
+
+  /**
+   * Clear the embedding cache. Call this when the skill registry
+   * is reloaded so stale embeddings are not reused.
+   */
+  invalidateCache(): void {
+    this.cache.clear();
+    this._cacheStats = { hits: 0, misses: 0 };
   }
 
   /**

@@ -18,6 +18,7 @@ export { LlmEmbeddingService } from "./agent-kernel/context/llm-embedding-servic
 export { IntentRouter } from "./agent-kernel/intent/intent-router.js";
 export * from "./agent-kernel/intent/intent-types.js";
 export { ToolDecisionEngine } from "./agent-kernel/tools/tool-decision-engine.js";
+export type { DecisionMetadata, LlmToolDecision, ToolDecisionEngineDeps } from "./agent-kernel/tools/tool-decision-engine.js";
 export { DefaultToolArgumentBuilder } from "./agent-kernel/tools/tool-argument-builder.js";
 export type {
   ToolArgumentBuilder,

@@ -113,8 +113,32 @@ describe("createAgentLoopService", () => {
       llmProvider: {
         id: "test",
         model: "test",
-        async *streamChat() {
-          yield { delta: "Tool result summarized.", raw: {} };
+        async *streamChat(request: any) {
+          // When the streaming path sends tool definitions for the first time,
+          // return a tool_call so the LLM native function calling path works.
+          // After tool execution, the next iteration includes tool result
+          // messages — detect this and return just text to stop the loop.
+          const hasToolResults = request.messages?.some(
+            (m: any) => m.role === "tool",
+          );
+          if (request.tools && request.tools.length > 0 && !hasToolResults) {
+            yield {
+              delta: "Let me read that file.",
+              toolCalls: [{
+                index: 0,
+                id: "tc_stream_1",
+                type: "function" as const,
+                function: { name: "test.files:filesystem.read", arguments: "{}" },
+              }],
+              raw: {},
+            };
+          } else if (hasToolResults) {
+            // After tool execution, return text content and exit the loop
+            yield { delta: "The file contains: file contents.", raw: {} };
+          } else {
+            // Intent routing / planning calls
+            yield { delta: "file_operation", raw: {} };
+          }
         },
       },
     });
@@ -154,14 +178,17 @@ describe("createAgentLoopService", () => {
         }),
       }),
     ]);
-    await expect(db.modelCalls.listByRunId(result.runId)).resolves.toEqual([
-      expect.objectContaining({
-        provider: "router:response_composition",
-        model: "test",
-        purpose: "response.compose",
-        status: "completed",
-      }),
-    ]);
+    const modelCalls = await db.modelCalls.listByRunId(result.runId);
+    expect(modelCalls).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          model: "test",
+          purpose: "response_composition",
+          status: "completed",
+          runId: result.runId,
+        }),
+      ]),
+    );
     const events = await db.events.listByRunId(result.runId);
     expect(
       events.filter((event) => event.type === "agent.run.created"),
@@ -193,7 +220,15 @@ describe("createAgentLoopService", () => {
       llmProvider: {
         id: "test",
         model: "test",
-        async *streamChat() {
+        async *streamChat(request: any) {
+          // When the streaming path sends tool definitions, throw so the
+          // old path with full safety pipeline (sandbox → permission →
+          // ApprovalGate) takes over. The streaming path doesn't yet support
+          // approval pausing.
+          if (request.tools && request.tools.length > 0) {
+            throw new Error("Streaming fallback: approval flow requires old path");
+          }
+          // Intent routing calls — return shell_operation to match high-risk skill
           yield { delta: "shell_operation", raw: {} };
         },
       },
@@ -252,14 +287,17 @@ describe("createAgentLoopService", () => {
         }),
       }),
     ]);
-    await expect(db.modelCalls.listByRunId(result.runId)).resolves.toEqual([
-      expect.objectContaining({
-        provider: "router:response_composition",
-        model: "test",
-        purpose: "response.compose",
-        status: "completed",
-      }),
-    ]);
+    const modelCalls = await db.modelCalls.listByRunId(result.runId);
+    expect(modelCalls).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          model: "test",
+          purpose: "response_composition",
+          status: "completed",
+          runId: result.runId,
+        }),
+      ]),
+    );
     await expect(db.runs.findById(result.runId)).resolves.toEqual(
       expect.objectContaining({
         status: "completed",

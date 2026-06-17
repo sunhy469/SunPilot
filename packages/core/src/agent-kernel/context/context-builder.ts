@@ -6,6 +6,10 @@ import type {
 } from "../loop-types.js";
 import { ContextChunk, estimateTokens } from "./context-types.js";
 import { TokenBudgeter } from "./context-budgeter.js";
+import {
+  SummaryStaleDetector,
+  type StaleDetectionInput,
+} from "./summary-stale-detector.js";
 
 export interface ContextBuilderDeps {
   /** Fetch conversation messages for the given conversation. */
@@ -30,6 +34,10 @@ export interface ContextBuilderDeps {
     limit?: number;
     /** Optional embedding vector for pure semantic (no-ILIKE) recall. */
     embedding?: number[];
+    /** Filter by memory types (e.g. ["conversation_summary"]). */
+    types?: string[];
+    /** Filter by scopes (e.g. ["conversation"]). */
+    scopes?: string[];
   }) => Promise<
     Array<{
       id: string;
@@ -87,6 +95,8 @@ export interface ContextBuilderDeps {
   reservedOutputTokens?: number;
   /** Generate an embedding vector for the given text (best-effort). */
   embedText?: (text: string) => Promise<number[]>;
+  /** Summary stale detector — checks if conversation summaries need regeneration. */
+  staleDetector?: SummaryStaleDetector;
 }
 
 /**
@@ -178,6 +188,8 @@ export class ContextBuilder implements ContextBuilderInterface {
       priority: 0,
       tokenEstimate: estimateTokens(safetyContent),
       metadata: {},
+      trust: "system",
+      authority: 10,
     });
 
     // ── Current message ───────────────────────────────────────────
@@ -189,9 +201,14 @@ export class ContextBuilder implements ContextBuilderInterface {
       priority: 0,
       tokenEstimate: estimateTokens(input.message),
       metadata: { messageId: input.userMessageId },
+      trust: "user",
     });
 
-    // ── Conversation history ──────────────────────────────────────
+    // External attachment warning is handled by ResponseComposer
+    // (appendAttachmentLines adds [EXTERNAL — unverified source] prefix).
+    // No separate chunk needed here — it would consume budget without
+    // being mapped into the model input (pack section has no "external"
+    // source mapping).
     // Tokens reserved before history insertion: track how much budget
     // is consumed so far so we can decide whether to compress early history.
     const preHistoryTokens = chunks.reduce(
@@ -214,16 +231,21 @@ export class ContextBuilder implements ContextBuilderInterface {
 
       if (this.deps.searchMemories) {
         try {
+          // Use type+scope filter to skip ILIKE pre-filter and directly
+          // fetch conversation_summary records scoped to this conversation.
+          // Previously relied on ILIKE matching "conversation_summary" in
+          // title/content, which fails for summaries with generic titles
+          // like "Task: deploy config".
           const summaryMemories = await this.deps.searchMemories({
-            query: "conversation_summary",
+            query: "",
             runId: input.runId,
             conversationId: input.conversationId,
             userId: input.userId,
             limit: 10,
+            types: ["conversation_summary"],
+            scopes: ["conversation"],
           });
-          const convSummaries = summaryMemories.filter(
-            (m) => m.type === "conversation_summary",
-          );
+          const convSummaries = summaryMemories;
 
           // Collect all message IDs covered by any summary range.
           // Build a map: messageId → true for fast lookup.
@@ -246,35 +268,155 @@ export class ContextBuilder implements ContextBuilderInterface {
               }
             }
 
-            // ── Stale detection ────────────────────────────────────
-            // A summary is stale when unconvered messages appear after
-            // its range boundary. Stale summaries are still included but
-            // at a lower priority since they may not reflect recent turns.
+            // ── Stale detection (§P0 — full detector integration) ──
+            // Phase 1: Range-based heuristic (fast path — always computed).
+            // Phase 2: Semantic stale detection via SummaryStaleDetector
+            //   (goal-change / correction / fact-change / preference-conflict).
+            // Semantic detection wins when it reports higher severity.
             let isStale = false;
+            let staleSeverity: "info" | "warning" | "critical" = "info";
+            let staleReasons: string[] = [];
+
+            // Phase 1 — range-based: new messages after summary boundary
             if (range?.toMessageId) {
               const boundaryIdx = messages.findIndex(
                 (m) => m.id === range.toMessageId,
               );
-              isStale =
-                boundaryIdx >= 0 && boundaryIdx < messages.length - 1;
+              if (boundaryIdx >= 0 && boundaryIdx < messages.length - 1) {
+                isStale = true;
+                staleSeverity = "warning";
+                staleReasons.push("New messages after summary boundary");
+              }
             }
+
+            // Phase 2 — semantic: full SummaryStaleDetector check
+            if (this.deps.staleDetector) {
+              try {
+                // Collect messages after this summary's boundary.
+                // CRITICAL: the current user message MUST be included —
+                // it is the single most important signal for goal-change
+                // and correction detection (e.g. "actually, use Vue instead").
+                const boundaryIdx = range?.toMessageId
+                  ? messages.findIndex((m) => m.id === range.toMessageId)
+                  : -1;
+                const messagesAfter = boundaryIdx >= 0
+                  ? messages.slice(boundaryIdx + 1)
+                  : [];
+                // Always ensure the current user message is present for
+                // stale detection, even when it's the only message after
+                // the summary boundary.
+                const hasCurrentInMessages = messagesAfter.some(
+                  (m) => m.id === input.userMessageId,
+                );
+                const detectorMessages = hasCurrentInMessages
+                  ? messagesAfter
+                  : [
+                      ...messagesAfter,
+                      {
+                        id: input.userMessageId,
+                        role: "user",
+                        content: input.message,
+                        createdAt: new Date().toISOString(),
+                      },
+                    ];
+
+                // Collect recent tool results for fact-change detection
+                let newToolResults: StaleDetectionInput["newToolResults"];
+                if (this.deps.listToolResults && detectorMessages.length > 0) {
+                  try {
+                    const toolResults = await this.deps.listToolResults(
+                      input.runId,
+                    );
+                    newToolResults = toolResults
+                      .filter((tr) => tr.status === "completed")
+                      .map((tr) => ({
+                        skillId: tr.skillId ?? tr.name ?? tr.toolCallId,
+                        summary: tr.summary ?? "",
+                        status: tr.status,
+                      }));
+                  } catch {
+                    // Tool results unavailable — skip fact-change check
+                  }
+                }
+
+                const semanticResult = this.deps.staleDetector.checkStale({
+                  summary: {
+                    id: summary.id,
+                    content: summary.content,
+                    metadata: summary.metadata as Record<string, unknown> | undefined,
+                    createdAt:
+                      typeof summary.metadata?.createdAt === "string"
+                        ? summary.metadata.createdAt
+                        : new Date().toISOString(),
+                  },
+                  newMessages: detectorMessages.map((m) => ({
+                    role: m.role,
+                    content: m.content,
+                  })),
+                  newToolResults,
+                });
+
+                // Semantic detection wins when it reports higher severity
+                if (semanticResult.stale) {
+                  isStale = true;
+                  // Upgrade severity if semantic detects a worse condition
+                  const severityRank = {
+                    info: 0,
+                    warning: 1,
+                    critical: 2,
+                  } as const;
+                  if (
+                    severityRank[semanticResult.severity] >
+                    severityRank[staleSeverity]
+                  ) {
+                    staleSeverity = semanticResult.severity;
+                  }
+                  staleReasons = [
+                    ...staleReasons,
+                    ...semanticResult.reasons,
+                  ];
+                }
+              } catch {
+                // Stale detector failed — keep range-based result
+              }
+            }
+
+            // severity → priority mapping:
+            //   critical (goal-change / correction) → 14 (near trim line)
+            //   warning  (fact-change / preference)  → 12
+            //   info     (not stale)                  → 8  (keep above raw history)
+            const stalePriorityMap: Record<string, number> = {
+              critical: 14,
+              warning: 12,
+              info: 8,
+            };
+            const summaryPriority = isStale
+              ? (stalePriorityMap[staleSeverity] ?? 8)
+              : 8;
+            const staleLabel = isStale
+              ? ` [STALE ${staleSeverity.toUpperCase()}: ${staleReasons.join("; ")}]`
+              : "";
+            const staleContentPrefix = isStale
+              ? `[Previous conversation summary — ${staleSeverity === "critical" ? "CRITICALLY OUTDATED" : "may be outdated"}${staleReasons.length > 0 ? ` (${staleReasons.join("; ")})` : ""}]\n`
+              : "[Previous conversation summary]\n";
 
             summaryChunks.push({
               id: `summary_${summary.id}`,
               source: "conversation_summary",
-              title: summary.title
-                + (isStale ? " [stale — new messages since]" : ""),
-              content: `[Previous conversation summary${isStale ? " (may be outdated)" : ""}]\n${summary.content}`,
-              // Stale summaries get lower priority (12) so they may be
-              // trimmed if budget is tight, but still above raw history.
-              priority: isStale ? 12 : 8,
+              title: summary.title + staleLabel,
+              content: staleContentPrefix + summary.content,
+              priority: summaryPriority,
               tokenEstimate: estimateTokens(summary.content),
               metadata: {
                 memoryId: summary.id,
                 type: "conversation_summary",
                 confidence: summary.confidence,
-                score: summary.score,
+                score: summary.score ?? undefined,
               },
+              trust: "user",
+              warning: isStale
+                ? `This summary is stale (${staleSeverity}). Reasons: ${staleReasons.join("; ")}`
+                : undefined,
             });
           }
         } catch {
@@ -305,6 +447,7 @@ export class ContextBuilder implements ContextBuilderInterface {
             attachments: msg.attachments,
           },
           createdAt: msg.createdAt,
+          trust: msg.role === "assistant" ? "tool" : "user",
         });
       }
 
@@ -362,8 +505,10 @@ export class ContextBuilder implements ContextBuilderInterface {
           }
         }
 
-        // Merge: deduplicate by id, preferring hybrid (higher relevance) score
-        const seenIds = new Set<string>();
+        // Merge: deduplicate by id, preferring hybrid (higher relevance) score.
+        // Pre-populate seenIds with hybrid results so vector recall can't
+        // inject duplicates of the same memory.
+        const seenIds = new Set(hybridMemories.map((m) => m.id));
         const allMemories = [...hybridMemories];
         for (const mem of vectorMemories) {
           if (!seenIds.has(mem.id)) {
@@ -395,6 +540,12 @@ export class ContextBuilder implements ContextBuilderInterface {
             },
             trust: "memory",
             sourceUri: `memory:${mem.id}`,
+            generatedAt: new Date().toISOString(),
+            // Memory chunks expire after 24h — they carry lower trust weight
+            // once past their freshness window (see Gap-4: lifecycle fields).
+            expiresAt: new Date(
+              Date.now() + 24 * 60 * 60 * 1000,
+            ).toISOString(),
           });
         }
       } catch {
@@ -420,6 +571,8 @@ export class ContextBuilder implements ContextBuilderInterface {
               type: artifact.type,
               summary: artifact.summary,
             },
+            trust: "tool",
+            generatedAt: new Date().toISOString(),
           });
         }
       } catch {
@@ -482,6 +635,7 @@ export class ContextBuilder implements ContextBuilderInterface {
           priority: 20,
           tokenEstimate: estimateTokens(skillSummaries),
           metadata: { skillCount: skills.length },
+          trust: "system",
         });
       } catch {
         availableSkills = [];
@@ -493,6 +647,7 @@ export class ContextBuilder implements ContextBuilderInterface {
           priority: 20,
           tokenEstimate: estimateTokens("Skill catalog unavailable."),
           metadata: {},
+          trust: "system",
         });
       }
     }
@@ -508,12 +663,80 @@ export class ContextBuilder implements ContextBuilderInterface {
         `Run ID: ${input.runId}\nConversation: ${input.conversationId}\nMode: ${input.mode}`,
       ),
       metadata: { runId: input.runId },
+      trust: "system",
     });
+
+    // ── Apply token budget ────────────────────────────────────────
+
+    // ── Per-source content compression (§P1) ──────────────────────
+    // Before budget trimming, apply source-specific truncation so that
+    // long chunks don't get dropped entirely. This preserves key info
+    // while freeing tokens for other sources.
+    const MAX_TOOL_RESULT_CHARS = 2000;
+    const MAX_ARTIFACT_CHARS = 1000;
+    const MAX_MEMORY_CHARS = 800;
+    const MAX_HISTORY_MSG_CHARS = 4000;
+    for (const chunk of chunks) {
+      if (chunk.content.length <= 500) continue; // skip already-short chunks
+
+      switch (chunk.source) {
+        case "tool_result": {
+          if (chunk.content.length > MAX_TOOL_RESULT_CHARS) {
+            // Keep summary/status line + first N chars of output
+            const truncated = chunk.content.slice(0, MAX_TOOL_RESULT_CHARS);
+            chunk.content =
+              truncated +
+              `…[truncated ${chunk.content.length - MAX_TOOL_RESULT_CHARS} chars]`;
+            chunk.tokenEstimate = estimateTokens(chunk.content);
+            chunk.metadata.truncated = true;
+            chunk.metadata.originalLength = chunk.content.length;
+          }
+          break;
+        }
+        case "artifact": {
+          if (chunk.content.length > MAX_ARTIFACT_CHARS) {
+            const truncated = chunk.content.slice(0, MAX_ARTIFACT_CHARS);
+            chunk.content =
+              truncated +
+              `…[truncated ${chunk.content.length - MAX_ARTIFACT_CHARS} chars]`;
+            chunk.tokenEstimate = estimateTokens(chunk.content);
+            chunk.metadata.truncated = true;
+          }
+          break;
+        }
+        case "memory": {
+          if (chunk.content.length > MAX_MEMORY_CHARS) {
+            // Preserve type prefix + title + first N chars of body
+            const truncated = chunk.content.slice(0, MAX_MEMORY_CHARS);
+            chunk.content =
+              truncated +
+              `…[truncated ${chunk.content.length - MAX_MEMORY_CHARS} chars]`;
+            chunk.tokenEstimate = estimateTokens(chunk.content);
+            chunk.metadata.truncated = true;
+          }
+          break;
+        }
+        case "conversation_history": {
+          if (chunk.content.length > MAX_HISTORY_MSG_CHARS) {
+            const truncated = chunk.content.slice(0, MAX_HISTORY_MSG_CHARS);
+            chunk.content =
+              truncated +
+              `…[truncated ${chunk.content.length - MAX_HISTORY_MSG_CHARS} chars]`;
+            chunk.tokenEstimate = estimateTokens(chunk.content);
+            chunk.metadata.truncated = true;
+          }
+          break;
+        }
+        default:
+          // system / safety / current_message / skill_catalog — never truncate
+          break;
+      }
+    }
 
     // ── Apply token budget ────────────────────────────────────────
     const budget = this.budgeter.apply(chunks);
 
-    // ── Build context snapshot for observability ──────────────────
+    // ── Build context snapshot for observability (§P0 — enriched) ─
     const contextSnapshot = {
       chunks: [
         ...budget.included.map((c) => ({
@@ -522,6 +745,10 @@ export class ContextBuilder implements ContextBuilderInterface {
           priority: c.priority,
           tokenEstimate: c.tokenEstimate,
           included: true as const,
+          trust: c.trust,
+          sourceUri: c.sourceUri,
+          score: c.metadata.score as number | undefined,
+          warning: c.warning,
         })),
         ...budget.excluded.map((c) => ({
           id: c.id,
@@ -530,6 +757,9 @@ export class ContextBuilder implements ContextBuilderInterface {
           tokenEstimate: c.tokenEstimate,
           included: false as const,
           reason: "token_budget" as const,
+          trust: c.trust,
+          sourceUri: c.sourceUri,
+          score: c.metadata.score as number | undefined,
         })),
       ],
       totalTokens: budget.totalTokens,

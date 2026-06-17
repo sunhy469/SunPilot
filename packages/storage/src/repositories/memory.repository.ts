@@ -21,6 +21,8 @@ export type UpdateMemoryInput = Partial<
     | "importance"
     | "metadata"
     | "expiresAt"
+    | "staleReason"
+    | "staleSince"
   >
 >;
 

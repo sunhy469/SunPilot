@@ -1,4 +1,5 @@
 import type { LlmProvider } from "../../llm/llm.provider.js";
+import type { EmbeddingService } from "../context/embedding-service.js";
 import type {
   AgentContext,
   IntentRouter as IntentRouterInterface,
@@ -9,28 +10,43 @@ import { DEFAULT_INTENT_RULES, type IntentRule } from "./intent-types.js";
 export interface IntentRouterDeps {
   /**
    * Optional light model for intent classification.
-   * If not provided, falls back to rule-based matching only.
+   * Used as Layer 2 fallback when embedding confidence is insufficient.
    */
   llm?: LlmProvider;
+  /**
+   * Optional embedding service for semantic skill matching (Layer 1).
+   * When provided, user queries are matched against skill descriptions
+   * via cosine similarity BEFORE the LLM is called.
+   */
+  embeddingService?: EmbeddingService;
   /** Custom intent rules to prepend before defaults. */
   rules?: IntentRule[];
 }
 
 /**
- * IntentRouter — 用户意图分类器，采用三级优先级级联策略：
+ * IntentRouter — user intent classifier with 4-layer confidence-gated cascade:
  *
- * 1. 规则匹配（最快，无 LLM 调用）
- *    - 预定义正则模式匹配常见意图（问候、文件操作、Shell 命令等）
- *    - 命中后直接返回 RoutedIntent，附带候选技能列表和风险等级
+ * Layer 0: Form-match rules (fastest, <1ms)
+ *   - Exact slash commands (^\/[a-z]) and short formulaic greetings
+ *   - Only matches STRUCTURE/FORM, never semantic meaning
+ *   - Short-circuits immediately on match
  *
- * 2. LLM 轻量分类（规则未命中时降级使用）
- *    - 调用轻量模型做意图分类，避免对简单问候调用大模型
- *    - 仅在规则全部未命中时触发
+ * Layer 1: Embedding semantic matching (~50-200ms)
+ *   - Embeds user query and computes cosine similarity against skill
+ *     name+description embeddings
+ *   - Short-circuits ONLY at ≥0.95 confidence (extremely clear matches)
+ *   - Below threshold, generates Top-5 hints for Layer 2 LLM classification
+ *   - Short-circuit rate: ~5% (was higher before responsibility convergence)
  *
- * 3. 默认 unknown（兜底）
- *    - 置信度 0.3，不推荐使用工具，走纯 LLM 回答路径
+ * Layer 2: LLM classification (~200-500ms)
+ *   - Lightweight model classifies intent AND selects specific skill
+ *   - Only invoked when embedding confidence is insufficient
+ *   - Handles ~15% of ambiguous or complex requests
  *
- * 架构文档 §10.3
+ * Layer 3: Default 'unknown' (instant)
+ *   - Confidence 0.3, no tools — falls through to pure LLM response
+ *
+ * Architecture doc §10.3 (revised): form-match → embedding → LLM → default
  */
 export class IntentRouter implements IntentRouterInterface {
   private readonly rules: IntentRule[];
@@ -43,37 +59,72 @@ export class IntentRouter implements IntentRouterInterface {
     context: AgentContext,
     _signal: AbortSignal,
   ): Promise<RoutedIntent> {
-    const message = context.currentMessage.content;
+    const message = context.currentMessage.content.trim();
 
-    // ── Step 1: Rule-based matching ───────────────────────────────
+    // ── Layer 0: Form-match rules (slash commands + formulaic) ──────
     for (const rule of this.rules) {
       for (const pattern of rule.patterns) {
         if (pattern.test(message)) {
           return {
             type: rule.type,
-            confidence: 0.85,
+            confidence: rule.type === "casual_chat" ? 0.9 : 0.85,
             requiresPlanning: rule.requiresPlanning,
             requiresTool: rule.requiresTool,
             requiresApproval: rule.requiresApproval,
             riskLevel: rule.riskLevel,
             candidateSkills: rule.candidateSkills,
-            reason: `Matched rule pattern: ${pattern.source}`,
+            reason: `Form-match: ${pattern.source}`,
+            trace: { formMatch: true },
           };
         }
       }
     }
 
-    // ── Step 2: LLM classification (if available) ─────────────────
+    // ── Layer 1: Embedding semantic skill matching ──────────────────
+    // Only allowed to short-circuit when a REAL embedding provider is
+    // active. Fallback (keyword/hash) embeddings are NOT semantic and
+    // should only provide hints to the LLM layer, never skip it.
+    let embeddingHints: RoutedIntent | null = null;
+    if (
+      this.deps.embeddingService &&
+      context.availableSkills &&
+      context.availableSkills.length > 0
+    ) {
+      try {
+        const embeddingResult = await this.matchSkillWithEmbedding(context);
+        if (embeddingResult) {
+          // P0 fix: only short-circuit when real embeddings are available.
+          // Fallback (keyword/hash) vectors express lexical overlap, not
+          // semantic similarity — they cannot be trusted to skip the LLM.
+          // hasRealProvider now accounts for runtime degradation: if the
+          // provider API failed and the service fell back to keyword/hash,
+          // hasRealProvider returns false — we won't short-circuit on
+          // lexical scores.
+          const isRealEmbedding = this.deps.embeddingService.hasRealProvider;
+          // Only short-circuit at ≥0.95 confidence (tightened from 0.85).
+          // The LLM layer always runs for intermediate-confidence cases.
+          if (isRealEmbedding && embeddingResult.confidence >= 0.95) {
+            return embeddingResult;
+          }
+          // Save hints for Layer 2 even when below threshold or in fallback mode
+          embeddingHints = embeddingResult;
+        }
+      } catch {
+        // Embedding failed — fall through to LLM
+      }
+    }
+
+    // ── Layer 2: LLM classification + skill selection ───────────────
     if (this.deps.llm) {
       try {
-        const intent = await this.classifyWithLlm(context);
+        const intent = await this.classifyWithLlm(context, embeddingHints);
         if (intent) return intent;
       } catch {
         // LLM unavailable — fall through to default
       }
     }
 
-    // ── Step 3: Default 'unknown' intent ──────────────────────────
+    // ── Layer 3: Default 'unknown' intent ───────────────────────────
     return {
       type: "unknown",
       confidence: 0.3,
@@ -82,20 +133,134 @@ export class IntentRouter implements IntentRouterInterface {
       requiresApproval: false,
       riskLevel: "low",
       candidateSkills: [],
-      reason: "No rule or model match — defaulting to unknown",
+      reason: "No form-match, embedding, or LLM match — defaulting to unknown",
     };
   }
 
   /**
-   * Use a lightweight LLM call to classify intent AND select the
-   * specific skill when the user wants to use one.
+   * Layer 1 — Embedding-based semantic skill matching.
    *
-   * The LLM sees the full skill catalog and can semantically match
-   * user requests to the right skill (e.g. "搜一下货源" → product.source.search1688),
-   * which keyword/bigram matchers can't handle reliably.
+   * Embeds the user query as a single vector, then embeds each skill's
+   * "name — description" text and computes cosine similarity. Returns
+   * the best match with confidence = similarity score.
+   *
+   * Short-circuits ONLY when ALL of these hold (extremely confident):
+   *   - Real embedding provider is active (not fallback)
+   *   - similarity ≥ 0.95 (very high semantic match)
+   *   - gap between best and runner-up > 0.3 (clear winner)
+   *
+   * Below these thresholds, returns hints for the LLM layer instead.
+   *
+   * Responsibility boundary (§P1): IntentRouter provides intent + hints;
+   * ToolRetriever/ToolDecisionEngine makes the final tool selection.
+   */
+  private async matchSkillWithEmbedding(
+    context: AgentContext,
+  ): Promise<RoutedIntent | null> {
+    const embeddingService = this.deps.embeddingService!;
+    const skills = context.availableSkills;
+
+    if (skills.length === 0) return null;
+
+    const message = context.currentMessage.content;
+
+    // Embed user query once
+    const queryEmbedding = await embeddingService.embed(message);
+
+    // Embed each skill using rich text: name + description + category.
+    // Category adds semantic context (e.g. "web" vs "filesystem") that
+    // helps distinguish tools with similar names in different domains.
+    const scored: Array<{ skillId: string; similarity: number }> = [];
+    for (const skill of skills) {
+      const skillText = `${skill.name} — ${skill.description} — category: ${skill.category}`;
+      try {
+        const skillEmbedding = await embeddingService.embed(skillText);
+        const similarity = cosineSimilarity(queryEmbedding, skillEmbedding);
+        scored.push({ skillId: skill.id, similarity });
+      } catch {
+        // Single skill embedding failed — skip it
+      }
+    }
+
+    if (scored.length === 0) return null;
+
+    // Sort by similarity descending
+    scored.sort((a, b) => b.similarity - a.similarity);
+
+    const best = scored[0]!;
+    const runnerUp = scored.length > 1 ? scored[1]! : { similarity: 0 };
+
+    // High-confidence gate: similarity ≥ 0.95 AND gap > 0.3.
+    // Tightened from 0.85/0.2 per architecture review — IntentRouter
+    // should only short-circuit in extremely clear cases. The primary
+    // tool selection authority is ToolRetriever/ToolDecisionEngine.
+    if (best.similarity >= 0.95 && (best.similarity - runnerUp.similarity) > 0.3) {
+      return {
+        type: "use_skill",
+        confidence: best.similarity,
+        requiresPlanning: false,
+        requiresTool: true,
+        requiresApproval: false,
+        riskLevel: "medium",
+        candidateSkills: [best.skillId],
+        reason: `Embedding short-circuit: "${best.skillId}" (sim=${best.similarity.toFixed(3)}, gap=${(best.similarity - runnerUp.similarity).toFixed(3)})`,
+        trace: {
+          embeddingMode: this.deps.embeddingService?.hasRealProvider
+            ? "real"
+            : this.deps.embeddingService?.isDegraded
+              ? "degraded"
+              : "lexical_fallback",
+          embeddingTopScore: best.similarity,
+          embeddingCandidateCount: skills.length,
+        },
+      };
+    }
+
+    // Below threshold — return null so Layer 2 (LLM) takes over.
+    // We still return the embedding result but with low confidence
+    // so callers can use candidate skills as hints for the LLM.
+    if (best.similarity >= 0.5) {
+      return {
+        type: "use_skill",
+        confidence: best.similarity,
+        requiresPlanning: false,
+        requiresTool: true,
+        requiresApproval: false,
+        riskLevel: "medium",
+        candidateSkills: scored
+          .slice(0, 5)
+          .map((s) => s.skillId),
+        reason: `Embedding hints (top sim=${best.similarity.toFixed(3)} < 0.95) — escalate to LLM`,
+        trace: {
+          embeddingMode: this.deps.embeddingService?.hasRealProvider
+            ? "real"
+            : this.deps.embeddingService?.isDegraded
+              ? "degraded"
+              : "lexical_fallback",
+          embeddingTopScore: best.similarity,
+          embeddingCandidateCount: skills.length,
+        },
+      };
+    }
+
+    return null;
+  }
+
+  /**
+   * Layer 2 — LLM intent classification with optional embedding hints.
+   *
+   * When embedding hints are available (from Layer 1), they are presented
+   * as "Suggested candidates" alongside the full skill catalog. The LLM
+   * can select from the hints OR pick any other skill from the catalog,
+   * OR return a non-tool intent (e.g. question_answering).
+   *
+   * @param context  Agent context with available skills
+   * @param embeddingHints  Optional Top-5 hints from Layer 1 embedding,
+   *   included even when confidence was too low to short-circuit
    */
   private async classifyWithLlm(
     context: AgentContext,
+    embeddingHints?: RoutedIntent | null,
   ): Promise<RoutedIntent | null> {
     if (!this.deps.llm) return null;
 
@@ -104,10 +269,34 @@ export class IntentRouter implements IntentRouterInterface {
       .map((s) => `- ${s.id}: ${s.name} — ${s.description}`)
       .join("\n");
 
-    const prompt = `Available skills:
+    // Build embedding hints section when available
+    let hintsSection = "";
+    const hintIds = embeddingHints?.candidateSkills?.length
+      ? embeddingHints.candidateSkills
+      : [];
+    if (hintIds.length > 0) {
+      const hintDetails = hintIds
+        .map((id) => {
+          const skill = context.availableSkills.find((s) => s.id === id);
+          return skill
+            ? `- ${skill.id}: ${skill.name} — ${skill.description}`
+            : `- ${id}`;
+        })
+        .join("\n");
+      const hintSource =
+        this.deps.embeddingService?.hasRealProvider
+          ? "semantic embedding (real)"
+          : "lexical embedding (fallback — treat as weak signal)";
+      hintsSection = `Suggested candidates (from ${hintSource}, similarity ${(embeddingHints?.confidence ?? 0).toFixed(3)}):
+${hintDetails}
+
+`;
+    }
+
+    const prompt = `Full skill catalog:
 ${skillList || "(none)"}
 
-Classify the user's intent into EXACTLY ONE of these categories:
+${hintsSection}Classify the user's intent into EXACTLY ONE of these categories:
 - casual_chat: greetings, small talk, thanks
 - question_answering: asking for information or explanation
 - project_analysis: reviewing or analyzing code/project structure
@@ -121,6 +310,7 @@ Classify the user's intent into EXACTLY ONE of these categories:
 - diagnostics: debugging or troubleshooting
 - use_skill: user wants to use a specific available skill listed above
 
+If the suggested candidates are present and relevant, prefer them. But if they are wrong (e.g. a product-search tool suggested for a travel query), IGNORE them and pick the correct category.
 If you choose use_skill, also specify WHICH skill ID from the list above.
 Respond in this exact format:
   For use_skill: "use_skill:<skill-id>"  (e.g. "use_skill:jaderoad:product.source.search1688")
@@ -263,4 +453,22 @@ User message: "${message}"
         };
     }
   }
+}
+
+/**
+ * Cosine similarity between two vectors.
+ * Returns a value in [0, 1] where 1 means identical direction.
+ */
+function cosineSimilarity(a: number[], b: number[]): number {
+  const len = Math.min(a.length, b.length);
+  let dot = 0;
+  let normA = 0;
+  let normB = 0;
+  for (let i = 0; i < len; i++) {
+    dot += a[i]! * b[i]!;
+    normA += a[i]! * a[i]!;
+    normB += b[i]! * b[i]!;
+  }
+  const denom = Math.sqrt(normA) * Math.sqrt(normB);
+  return denom === 0 ? 0 : dot / denom;
 }

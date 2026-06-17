@@ -3,15 +3,26 @@ import type {
   AgentContext,
   AgentPlan,
   AgentObservation,
+  ArtifactRef,
+  ExecutionOrchestrator,
+  PermissionPolicy,
   PlannedToolCall,
   RoutedIntent,
+  ToolCallSummary,
   ToolDecision,
   ToolDecisionEngine as ToolDecisionEngineInterface,
 } from "../loop-types.js";
 import { INTENT_SKILL_MAP, type SkillSummary } from "./tool-types.js";
 import type { ToolArgumentBuilder } from "./tool-argument-builder.js";
-import type { ToolRetriever, ToolCallHistoryEntry } from "./tool-retriever.js";
+import type { ToolRetriever, ToolRetrievalResult, ToolCallHistoryEntry } from "./tool-retriever.js";
 import type { EmbeddingService } from "../context/embedding-service.js";
+import type { AgentEventBus } from "../agent-event-bus.js";
+import type { ModelRouter } from "../model-router.js";
+import type {
+  ChatMessage,
+  ToolCall,
+  ToolDefinition,
+} from "../../llm/llm.types.js";
 
 // ── Decision metadata (§P1-4) ─────────────────────────────────────────────
 
@@ -36,6 +47,23 @@ export interface DecisionMetadata {
   clarificationReason?: string;
 }
 
+/**
+ * Structured output from the LLM tool reranker (§P1).
+ * Replaces the simple string-based "tool ID or none" with a
+ * three-way decision that enables proper no-tool rejection.
+ */
+export interface LlmToolDecision {
+  decision: "select" | "none" | "clarify";
+  /** Tool ID (only for "select"). */
+  skillId?: string;
+  /** Confidence score 0.0–1.0. */
+  confidence: number;
+  /** Human-readable explanation for audit/debug. */
+  reason: string;
+  /** Clarification question (only for "clarify"). */
+  missingInfo?: string;
+}
+
 export interface ToolDecisionEngineDeps {
   /** List all available skills with their summaries. */
   listSkills: () => Promise<SkillSummary[]>;
@@ -51,6 +79,25 @@ export interface ToolDecisionEngineDeps {
   recentHistory?: ToolCallHistoryEntry[];
   /** Current permission mode for safety-aware scoring. */
   permissionMode?: "ask" | "auto" | "full";
+
+  // ── Streaming execution deps (LLM native function calling) ──
+  /** Event bus for streaming deltas and lifecycle events. */
+  eventBus: AgentEventBus;
+  /** Model router for LLM streaming with tool definitions. */
+  modelRouter: ModelRouter;
+  /** Permission policy for runtime tool-call safety checks. */
+  permissionPolicy: PermissionPolicy;
+  /** Orchestrator that executes validated tool calls. */
+  executionOrchestrator: ExecutionOrchestrator;
+  /** Persist the final assistant message with metadata. */
+  saveMessage: (msg: {
+    id: string;
+    conversationId: string;
+    role: "assistant";
+    content: string;
+    runId: string;
+    metadata?: Record<string, unknown>;
+  }) => Promise<void>;
 }
 
 /**
@@ -293,14 +340,23 @@ export class ToolDecisionEngine implements ToolDecisionEngineInterface {
       }
 
       const best = scored[0];
+      // MIN_SCORE threshold: below this, scorer signals are too weak to
+      // justify any tool call. Prevents false positives from single-bigram
+      // or single-keyword matches (max = 0.1 with current weights).
+      const MIN_TOOL_SCORE = 0.3;
       if (!best || best.score <= 0) {
         // No match at all → fall through to INTENT_SKILL_MAP below
+      } else if (best.score < MIN_TOOL_SCORE) {
+        // All candidates have weak scores — fall through to INTENT_SKILL_MAP
+        // rather than eagerly calling a low-confidence tool
       } else {
         const runnerUp = scored[1];
 
-        // Layer 2: High-confidence deterministic — skip LLM entirely
+        // Clear-winner threshold adjusted for reduced bigram weights.
+        // 0.6 is reachable with: verbatim name match (0.5) + one other
+        // signal (category 0.4, desc 0.2, or bigram 0.15).
         const isClearWinner =
-          best.score >= 0.8 &&
+          best.score >= 0.6 &&
           (!runnerUp ||
             runnerUp.score === 0 ||
             best.score - runnerUp.score > 0.3);
@@ -332,39 +388,60 @@ export class ToolDecisionEngine implements ToolDecisionEngineInterface {
             .slice(0, 3)
             .map((s) => s.skill.name)
             .join(", ");
-          return {
+          return attachTrace({
             type: "ask_clarification",
             question: `找到多个匹配技能（${candidates}），请问要使用哪个？`,
             reason: `Multiple skills match with close scores (top: ${best.score.toFixed(2)}, runner-up: ${runnerUp.score.toFixed(2)})`,
-          };
+          }, { decisionPath: "deterministic_scorer", llmSelectionUsed: false, retrievalMetadata: retrievalMetaForAudit });
         }
 
-        // Layer 3: LLM semantic selection — pass top-5 candidates to LLM
+        // Layer 3: LLM semantic selection with structured output (§P1)
+        // Uses three-way decision: select / none / clarify.
+        // Eliminates the risky "scorer fallback" path for low-confidence cases.
         if (this.deps.llm) {
-          const topCandidates = scored.filter((s) => s.score > 0).slice(0, 5);
+          const topCandidates = scored.filter((s) => s.score > 0).slice(0, 10);
           try {
-            const selectedSkillId = await this.selectSkillWithLlm(
+            const llmDecision = await this.selectSkillWithLlm(
               context.currentMessage.content,
               topCandidates.map((s) => s.skill),
+              best.score, // Pass scorer confidence for single-candidate gate
             );
-            if (selectedSkillId) {
-              const selected = topCandidates.find(
-                (s) => s.skill.id === selectedSkillId,
-              );
-              if (selected) {
-                const decisionMeta: DecisionMetadata = {
-                  decisionPath: "llm_semantic",
-                  llmSelectionUsed: true,
-                  retrievalMetadata: retrievalMetaForAudit,
-                };
-                return this.buildUseToolDecision(
-                  [selected.skill],
-                  `LLM selected: ${selectedSkillId}`,
-                  decisionMeta,
-                  context,
-                  previousObservation,
-                  signal,
+            if (llmDecision) {
+              if (llmDecision.decision === "select" && llmDecision.skillId) {
+                const selected = topCandidates.find(
+                  (s) => s.skill.id === llmDecision.skillId,
                 );
+                if (selected) {
+                  const decisionMeta: DecisionMetadata = {
+                    decisionPath: "llm_semantic",
+                    llmSelectionUsed: true,
+                    retrievalMetadata: retrievalMetaForAudit,
+                  };
+                  return this.buildUseToolDecision(
+                    [selected.skill],
+                    `LLM selected: ${llmDecision.skillId} (confidence: ${llmDecision.confidence.toFixed(2)})`,
+                    decisionMeta,
+                    context,
+                    previousObservation,
+                    signal,
+                  );
+                }
+              }
+
+              if (llmDecision.decision === "clarify") {
+                return {
+                  type: "ask_clarification",
+                  question: llmDecision.missingInfo ?? "请问您想使用哪个工具？",
+                  reason: `LLM requested clarification: ${llmDecision.reason}`,
+                };
+              }
+
+              // llmDecision.decision === "none" — no tool matches
+              if (llmDecision.decision === "none") {
+                return {
+                  type: "no_tool",
+                  reason: `LLM determined no tool matches: ${llmDecision.reason}`,
+                };
               }
             }
           } catch (err) {
@@ -376,19 +453,25 @@ export class ToolDecisionEngine implements ToolDecisionEngineInterface {
         }
 
         // LLM unavailable or couldn't decide — use best scorer match
-        const decisionMeta: DecisionMetadata = {
-          decisionPath: "scorer_fallback",
-          llmSelectionUsed: !!this.deps.llm,
-          retrievalMetadata: retrievalMetaForAudit,
-        };
-        return this.buildUseToolDecision(
-          [best.skill],
-          `use_skill scorer fallback: ${best.skill.id} (score: ${best.score.toFixed(2)})`,
-          decisionMeta,
-          context,
-          previousObservation,
-          signal,
-        );
+        // but only if score meets the minimum threshold. Below that,
+        // fall through to INTENT_SKILL_MAP rather than risking a
+        // low-confidence false positive.
+        if (best.score >= MIN_TOOL_SCORE) {
+          const decisionMeta: DecisionMetadata = {
+            decisionPath: "scorer_fallback",
+            llmSelectionUsed: !!this.deps.llm,
+            retrievalMetadata: retrievalMetaForAudit,
+          };
+          return this.buildUseToolDecision(
+            [best.skill],
+            `use_skill scorer fallback: ${best.skill.id} (score: ${best.score.toFixed(2)})`,
+            decisionMeta,
+            context,
+            previousObservation,
+            signal,
+          );
+        }
+        // Below MIN_TOOL_SCORE — fall through to INTENT_SKILL_MAP
       }
     }
 
@@ -516,6 +599,10 @@ export class ToolDecisionEngine implements ToolDecisionEngineInterface {
         type: "ask_clarification",
         question: clarifications.join(" "),
         reason: `All ${skills.length} skill(s) require missing parameters: ${clarifications.join("; ")}`,
+        decisionPath: decisionMeta?.decisionPath,
+        retrievalTopK: decisionMeta?.retrievalMetadata?.topK,
+        retrievalCandidateCount: decisionMeta?.retrievalMetadata?.candidates?.length,
+        retrievalFallback: decisionMeta?.retrievalMetadata?.fallbackUsed,
       };
     }
 
@@ -523,25 +610,65 @@ export class ToolDecisionEngine implements ToolDecisionEngineInterface {
       type: "use_tool",
       reason,
       toolCalls,
+      decisionPath: decisionMeta?.decisionPath,
+      retrievalTopK: decisionMeta?.retrievalMetadata?.topK,
+      retrievalCandidateCount: decisionMeta?.retrievalMetadata?.candidates?.length,
+      retrievalFallback: decisionMeta?.retrievalMetadata?.fallbackUsed,
     };
   }
 
   /**
-   * Use an LLM to select the best-matching skill from a shortlist
-   * of top-N candidates. Only called when the deterministic scorer
-   * can't confidently pick a single winner.
+   * LLM-based tool reranker with structured output (§P1).
    *
-   * Token optimisation: only the top-5 candidates are sent to the LLM,
-   * avoiding the cost of sending the full skill catalog.
+   * Presents top-10 candidates to the LLM and requests a structured
+   * JSON decision. Supports three outcomes:
+   *   - "select": a specific tool is the best match
+   *   - "none": no tool matches the user's intent
+   *   - "clarify": ambiguous — need more info from the user
+   *
+   * The structured output enables proper no-tool rejection and
+   * clarification, eliminating the risky scorer fallback path.
    */
   private async selectSkillWithLlm(
     userMessage: string,
     candidates: SkillSummary[],
-  ): Promise<string | null> {
+    /** Best scorer score among candidates (for single-candidate gate). */
+    bestScore?: number,
+  ): Promise<LlmToolDecision | null> {
     if (!this.deps.llm || candidates.length === 0) return null;
-    if (candidates.length === 1) return candidates[0]!.id;
 
-    const skillOptions = candidates
+    // Single-candidate fast path: only auto-select when the scorer found
+    // a strong match. A single candidate just above MIN_TOOL_SCORE (0.3)
+    // is NOT strong enough — let the LLM evaluate it or fall through to
+    // no_tool/clarify. This prevents a weak single candidate from
+    // bypassing the structured none/select check.
+    //
+    // Threshold: 0.6 = verbatim name match (0.5) + at least one other
+    // signal (category/description/bigram). This is the same as the
+    // deterministic clear-winner threshold.
+    const SINGLE_CANDIDATE_AUTO_THRESHOLD = 0.6;
+    if (candidates.length === 1 && bestScore !== undefined && bestScore >= SINGLE_CANDIDATE_AUTO_THRESHOLD) {
+      return {
+        decision: "select",
+        skillId: candidates[0]!.id,
+        confidence: Math.min(0.95, bestScore),
+        reason: `Single candidate with strong scorer match (score: ${bestScore.toFixed(2)})`,
+      };
+    }
+
+    // Single candidate but weak score — still ask the LLM.
+    // If no LLM available, return null so the caller falls through
+    // to the scorer fallback (which checks MIN_TOOL_SCORE).
+    if (candidates.length === 1 && (!this.deps.llm || bestScore === undefined || bestScore < SINGLE_CANDIDATE_AUTO_THRESHOLD)) {
+      // Let the LLM evaluate this single candidate — it may return "none"
+      // if it's a poor match.
+    }
+
+    // Send top-10 to LLM (up from top-5) so embedding-displaced
+    // skills still get a chance at LLM review.
+    const topForLlm = candidates.slice(0, 10);
+
+    const skillOptions = topForLlm
       .map(
         (s, i) =>
           `${i + 1}. ${s.id}\n   Name: ${s.name}\n   Description: ${s.description}`,
@@ -555,7 +682,21 @@ User: "${userMessage}"
 Candidate tools:
 ${skillOptions}
 
-Respond with ONLY the tool ID (e.g. "jaderoad:product.source.search1688") or "none" if none match.`;
+Respond with a JSON object ONLY (no markdown, no extra text):
+{
+  "decision": "select" | "none" | "clarify",
+  "skillId": "<tool-id>" (required if decision=select, null otherwise),
+  "confidence": 0.0 to 1.0,
+  "reason": "<one-sentence explanation>",
+  "missingInfo": "<question to ask user>" (required if decision=clarify, null otherwise)
+}
+
+Rules:
+- "select": pick the SINGLE best tool. Return its exact ID and a confidence score.
+- "none": NO tool matches. Use this when the user is asking a general question, making small talk, or requesting something none of the tools can do.
+- "clarify": there are multiple plausible tools AND you need more info to decide. Provide a specific question in "missingInfo".
+
+IMPORTANT: return ONLY the JSON object. No markdown code fences, no surrounding text.`;
 
     const messages = [{ role: "user" as const, content: prompt }];
     let response = "";
@@ -564,12 +705,72 @@ Respond with ONLY the tool ID (e.g. "jaderoad:product.source.search1688") or "no
       response += chunk.delta;
     }
 
-    const selected = response.trim();
-    if (selected === "none") return null;
+    // Parse the JSON response — strip markdown fences if present
+    const cleaned = response
+      .trim()
+      .replace(/^```(?:json)?\s*/i, "")
+      .replace(/\s*```\s*$/, "");
+    try {
+      const parsed = JSON.parse(cleaned) as {
+        decision?: string;
+        skillId?: string | null;
+        confidence?: number;
+        reason?: string;
+        missingInfo?: string | null;
+      };
 
-    // Validate the response is one of the candidate IDs
-    const valid = candidates.find((s) => s.id === selected);
-    return valid ? valid.id : null;
+      // Validate decision field
+      const decision = parsed.decision;
+      if (decision !== "select" && decision !== "none" && decision !== "clarify") {
+        return null; // Invalid — fall through to scorer
+      }
+
+      // Validate skillId for "select" decisions
+      if (decision === "select") {
+        const skillId = parsed.skillId?.trim();
+        if (!skillId) return null; // Missing required field
+        const valid = candidates.find((s) => s.id === skillId);
+        if (!valid) return null; // Hallucinated ID
+        return {
+          decision: "select",
+          skillId: valid.id,
+          confidence: clampConfidence(parsed.confidence),
+          reason: parsed.reason ?? "LLM selected best match",
+        };
+      }
+
+      if (decision === "clarify") {
+        return {
+          decision: "clarify",
+          confidence: clampConfidence(parsed.confidence),
+          reason: parsed.reason ?? "LLM requested clarification",
+          missingInfo: parsed.missingInfo?.trim() ?? "请问您想使用哪个工具？",
+        };
+      }
+
+      // decision === "none"
+      return {
+        decision: "none",
+        confidence: clampConfidence(parsed.confidence),
+        reason: parsed.reason ?? "LLM determined no tool matches",
+      };
+    } catch {
+      // JSON parse failed — try legacy plain-text format as fallback
+      const trimmed = response.trim();
+      if (trimmed === "none" || trimmed === '"none"') {
+        return { decision: "none", confidence: 0.8, reason: "LLM returned none" };
+      }
+      const valid = candidates.find((s) => s.id === trimmed);
+      if (valid) {
+        return {
+          decision: "select",
+          skillId: valid.id,
+          confidence: 0.7,
+          reason: "LLM selected (legacy plain-text format)",
+        };
+      }
+      return null;
+    }
   }
 
   /**
@@ -619,6 +820,7 @@ Respond with ONLY the tool ID (e.g. "jaderoad:product.source.search1688") or "no
         timeoutMs: Math.min(skill.defaultTimeoutMs, skill.maxTimeoutMs),
         riskHints: skill.riskHints,
         inputSchema: skill.inputSchema,
+        projectionHints: skill.projectionHints,
         argumentSources: sources as PlannedToolCall["argumentSources"],
         metadata: decisionMeta
           ? {
@@ -686,6 +888,781 @@ Respond with ONLY the tool ID (e.g. "jaderoad:product.source.search1688") or "no
     // Heuristic fallback (original implementation)
     const args = buildToolArgumentsHeuristic(context, skill);
     return { arguments: args, sources: [], missing: [] };
+  }
+
+  // ── Streaming execution (LLM native function calling) ────────────────
+
+  /**
+   * Execute the tool-use path via LLM native function calling.
+   *
+   * Replaces the separate execute→reflect→respond cycle with a single
+   * LLM-driven streaming loop where text output and tool calls are
+   * interleaved — Claude Code-style experience.
+   *
+   * Retains ToolRetriever (candidate filtering), ToolArgumentBuilder
+   * (parameter validation), PermissionPolicy (safety checks), and
+   * ExecutionOrchestrator (tool execution) as engineering safeguards.
+   */
+  async executeStreaming(
+    input: {
+      runId: string;
+      conversationId: string;
+      context: AgentContext;
+      intent: RoutedIntent;
+      plan?: AgentPlan;
+      /** Pre-generated messageId from caller. Caller has already emitted agent.response.started. */
+      messageId?: string;
+      /** User-selected model for request-level routing. */
+      modelId?: "dp" | "seed";
+      prioritySkills?: Array<{
+        skillId: string;
+        reason: string;
+        argumentsHint?: Record<string, unknown>;
+      }>;
+    },
+    signal: AbortSignal,
+  ): Promise<{
+    messageId: string;
+    content: string;
+    artifacts: ArtifactRef[];
+    toolCalls: ToolCallSummary[];
+  }> {
+    const MAX_TOOL_ITERATIONS = 5;
+    const { runId, conversationId, context, intent, plan } = input;
+    const messageId = input.messageId ?? `msg_${crypto.randomUUID()}`;
+    let fullContent = "";
+    const allArtifacts: ArtifactRef[] = [];
+    const allToolCallSummaries: ToolCallSummary[] = [];
+
+    // Only emit agent.response.started if the caller didn't already.
+    // When messageId is provided, the caller (handleUseTool) has already emitted it.
+    if (!input.messageId) {
+      this.deps.eventBus.emit(
+        "agent.response.started",
+        { runId, conversationId, messageId },
+        { runId, conversationId },
+      );
+    }
+
+    try {
+      // 1. Build initial messages from AgentContext
+      const messages = this.buildStreamingMessages(
+        context,
+        plan,
+        input.prioritySkills,
+      );
+
+      // 2. Load full skill catalog
+      const allSkills = await this.deps.listSkills();
+
+      // 3. Get candidate tools from ToolRetriever
+      const retrieval = await this.retrieveStreamingTools(
+        context, intent, allSkills,
+      );
+      const tools = this.buildStreamingToolDefinitions(retrieval);
+
+      // 4. Streaming loop: interleave text + tool calls
+      let iteration = 0;
+      let currentMessages = messages;
+
+      while (iteration < MAX_TOOL_ITERATIONS) {
+        if (signal.aborted) break;
+        iteration++;
+
+        const result = await this.streamLlmTurn(
+          runId,
+          conversationId,
+          messageId,
+          currentMessages,
+          tools,
+          signal,
+          input.modelId,
+        );
+
+        fullContent += result.textContent;
+
+        // If no tool calls, LLM is done — exit loop
+        if (result.toolCalls.length === 0) {
+          break;
+        }
+
+        // Execute tool calls
+        const toolResults = await this.executeToolCalls(
+          runId,
+          conversationId,
+          result.toolCalls,
+          context,
+          intent,
+          allSkills,
+          signal,
+        );
+
+        allArtifacts.push(...toolResults.artifacts);
+        allToolCallSummaries.push(...toolResults.summaries);
+
+        // Inject tool results into messages for next iteration
+        currentMessages = this.injectStreamingToolResults(
+          currentMessages,
+          result.toolCalls,
+          toolResults,
+        );
+
+        // If all tools failed or were denied, give the LLM one more
+        // chance to explain the situation, then stop
+        const allFailed = toolResults.summaries.every(
+          (s) => s.status !== "completed",
+        );
+        if (allFailed && iteration >= 2) {
+          const finalResult = await this.streamLlmTurn(
+            runId,
+            conversationId,
+            messageId,
+            currentMessages,
+            undefined, // no tools — let LLM explain the failure
+            signal,
+            input.modelId,
+          );
+          fullContent += finalResult.textContent;
+          break;
+        }
+      }
+
+      // 5. Check for abort after loop — signal may have fired between
+      //    streaming turns. The caller (handleUseTool) handles cancellation.
+      if (signal.aborted) {
+        throw Object.assign(
+          new Error("Streaming aborted by user"),
+          { name: "AbortError" },
+        );
+      }
+
+      // 6. Build rich cards from artifacts
+      const richCards = this.buildStreamingRichCards(allArtifacts);
+
+      // 7. Save final message with richCards in metadata
+      await this.deps.saveMessage({
+        id: messageId,
+        conversationId,
+        role: "assistant",
+        content: fullContent,
+        runId,
+        metadata: {
+          toolCallIds: allToolCallSummaries.map((tc) => tc.id),
+          artifactIds: allArtifacts.map((a) => a.id),
+          richCards,
+        },
+      });
+
+      // 8. Emit completion event with richCards so frontend can render them
+      this.deps.eventBus.emit(
+        "agent.response.completed",
+        { runId, conversationId, messageId, cards: richCards },
+        { runId, conversationId },
+      );
+
+      return {
+        messageId,
+        content: fullContent,
+        artifacts: allArtifacts,
+        toolCalls: allToolCallSummaries,
+      };
+    } catch (error) {
+      // Re-throw AbortError so caller can handle cancellation
+      if (
+        error instanceof Error &&
+        (error.name === "AbortError" || signal.aborted)
+      ) {
+        throw error;
+      }
+
+      // Save partial content on non-abort errors
+      if (fullContent.length > 0) {
+        try {
+          await this.deps.saveMessage({
+            id: messageId,
+            conversationId,
+            role: "assistant",
+            content: fullContent + "\n\n[Response interrupted]",
+            runId,
+          });
+        } catch {
+          // Best effort
+        }
+      }
+      throw error;
+    }
+  }
+
+  // ── Streaming helpers ──────────────────────────────────────────────
+
+  /**
+   * Build the messages array from AgentContext for the LLM call.
+   * Includes system prompt with tool hints from plan and priority skills.
+   */
+  private buildStreamingMessages(
+    context: AgentContext,
+    plan?: AgentPlan,
+    prioritySkills?: Array<{
+      skillId: string;
+      reason: string;
+      argumentsHint?: Record<string, unknown>;
+    }>,
+  ): ChatMessage[] {
+    const messages: ChatMessage[] = [];
+
+    // System prompt
+    const systemParts: string[] = [
+      context.system.persona,
+      "You are an AI assistant with access to tools. You can call tools to help answer the user's request.",
+      "When you need to use a tool, call it directly. When you have results, summarize them for the user.",
+      "If you don't need any tools, just respond naturally.",
+    ];
+
+    if (context.system.rules.length > 0) {
+      systemParts.push(
+        "\nRules:\n" + context.system.rules.map((r) => `- ${r}`).join("\n"),
+      );
+    }
+
+    if (context.system.safety.length > 0) {
+      systemParts.push(
+        "\nSafety:\n" + context.system.safety.map((s) => `- ${s}`).join("\n"),
+      );
+    }
+
+    // Plan guidance
+    if (plan) {
+      const planSteps = plan.steps
+        .filter((s) => s.type === "tool" && s.skillId)
+        .map((s) => `- ${s.skillId}: ${s.description ?? s.title}`)
+        .join("\n");
+      if (planSteps) {
+        systemParts.push(
+          `\nPlan for this task (${plan.goal}):\n${planSteps}\nFollow the plan order when possible, but adapt based on results.`,
+        );
+      }
+    }
+
+    // Priority skill hints from reflection
+    if (prioritySkills && prioritySkills.length > 0) {
+      const hints = prioritySkills
+        .map((ps) => `- ${ps.skillId}: ${ps.reason}`)
+        .join("\n");
+      systemParts.push(
+        `\nSuggested next tools based on previous results:\n${hints}`,
+      );
+    }
+
+    messages.push({ role: "system", content: systemParts.join("\n") });
+
+    // Memories
+    if (context.memories.length > 0) {
+      const memoryLines = context.memories.map(
+        (m) =>
+          `[${m.type}] ${m.title}: ${m.content} (confidence: ${m.confidence})`,
+      );
+      messages.push({
+        role: "system",
+        content: "Relevant memories:\n" + memoryLines.join("\n"),
+      });
+    }
+
+    // Conversation history
+    for (const msg of context.messages) {
+      messages.push({
+        role: msg.role as ChatMessage["role"],
+        content: msg.content,
+      });
+    }
+
+    // Current user message
+    messages.push({
+      role: "user",
+      content: context.currentMessage.content,
+    });
+
+    return messages;
+  }
+
+  /**
+   * Retrieve candidate tools from ToolRetriever.
+   * Falls back to all enabled skills when retriever returns empty.
+   */
+  private async retrieveStreamingTools(
+    context: AgentContext,
+    intent: RoutedIntent,
+    allSkills: SkillSummary[],
+  ): Promise<ToolRetrievalResult> {
+    try {
+      const result = await this.deps.toolRetriever!.retrieve({
+        query: context.currentMessage.content,
+        intent,
+        availableSkills: allSkills,
+        permissionMode: "auto",
+      });
+
+      if (result.tools.length > 0) {
+        return result;
+      }
+    } catch {
+      // Retriever failed — fall through to full skill list
+    }
+
+    // Fallback: all enabled skills
+    const enabledSkills = allSkills.filter((s) => s.enabled);
+    return {
+      tools: enabledSkills.map((skill) => ({
+        skill,
+        score: 0.3,
+        matchReasons: ["fallback: all enabled tools"],
+      })),
+      topK: enabledSkills.length,
+      fallbackUsed: true,
+      topKReason: "retriever returned empty or failed — presenting all tools",
+    };
+  }
+
+  /**
+   * Convert scored tools into LLM ToolDefinitions.
+   * Uses inputSchema from SkillSummary for the function parameters.
+   */
+  private buildStreamingToolDefinitions(
+    retrieval: ToolRetrievalResult,
+  ): ToolDefinition[] {
+    // Limit to top 20 tools to avoid overwhelming the LLM
+    const topTools = retrieval.tools.slice(0, 20);
+
+    return topTools.map((scored) => {
+      const skill = scored.skill;
+      const parameters = skill.inputSchema &&
+        typeof skill.inputSchema === "object"
+        ? (skill.inputSchema as Record<string, unknown>)
+        : {
+            type: "object",
+            properties: {},
+            additionalProperties: true,
+          };
+
+      return {
+        type: "function" as const,
+        function: {
+          name: skill.id,
+          description: `${skill.name}: ${skill.description}${
+            scored.matchReasons && scored.matchReasons.length > 0
+              ? ` (matched: ${scored.matchReasons.join(", ")})`
+              : ""
+          }`,
+          parameters,
+        },
+      };
+    });
+  }
+
+  /**
+   * One turn of LLM streaming. Returns accumulated text content and any
+   * complete tool calls the LLM decided to make.
+   */
+  private async streamLlmTurn(
+    runId: string,
+    conversationId: string,
+    messageId: string,
+    messages: ChatMessage[],
+    tools: ToolDefinition[] | undefined,
+    signal: AbortSignal,
+    modelId?: "dp" | "seed",
+  ): Promise<{
+    textContent: string;
+    toolCalls: ToolCall[];
+  }> {
+    let textContent = "";
+    const toolCallAccumulator = new Map<number, ToolCallAccumulator>();
+
+    const modelCallId = `model_${crypto.randomUUID()}`;
+
+    this.deps.eventBus.emit(
+      "agent.model.started",
+      {
+        runId,
+        modelCallId,
+        provider: "llm.openai-compatible",
+        model: "default",
+      },
+      { runId, conversationId },
+    );
+
+    try {
+      for await (const chunk of this.deps.modelRouter.streamChat(
+        "response_composition",
+        {
+          messages,
+          tools: tools && tools.length > 0 ? tools : undefined,
+          tool_choice: tools && tools.length > 0 ? "auto" : undefined,
+          runId,
+          modelCallId,
+          modelId,
+        },
+        signal,
+      )) {
+        // Emit text delta to frontend
+        if (chunk.delta.length > 0) {
+          textContent += chunk.delta;
+          this.deps.eventBus.emit(
+            "agent.response.delta",
+            {
+              runId,
+              conversationId,
+              messageId,
+              delta: chunk.delta,
+            },
+            { runId, conversationId },
+          );
+          this.deps.eventBus.emit(
+            "agent.model.delta",
+            { runId, modelCallId, delta: chunk.delta },
+            { runId, conversationId },
+          );
+        }
+
+        // Accumulate tool call deltas
+        if (chunk.toolCalls) {
+          for (const tcDelta of chunk.toolCalls) {
+            let acc = toolCallAccumulator.get(tcDelta.index);
+            if (!acc) {
+              acc = {
+                index: tcDelta.index,
+                id: "",
+                type: "function",
+                functionName: "",
+                functionArguments: "",
+              };
+              toolCallAccumulator.set(tcDelta.index, acc);
+            }
+
+            if (tcDelta.id) acc.id = tcDelta.id;
+            if (tcDelta.type) acc.type = tcDelta.type;
+            if (tcDelta.function?.name) {
+              acc.functionName = tcDelta.function.name;
+            }
+            if (tcDelta.function?.arguments) {
+              acc.functionArguments += tcDelta.function.arguments;
+            }
+          }
+        }
+      }
+
+      this.deps.eventBus.emit(
+        "agent.model.completed",
+        { runId, modelCallId, outputTokens: textContent.length },
+        { runId, conversationId },
+      );
+    } catch (error) {
+      this.deps.eventBus.emit(
+        "agent.model.failed",
+        {
+          runId,
+          modelCallId,
+          error: {
+            code: "AGENT_MODEL_CALL_FAILED",
+            message:
+              error instanceof Error ? error.message : String(error),
+          },
+        },
+        { runId, conversationId },
+      );
+      throw error;
+    }
+
+    // Convert accumulators to ToolCall array
+    const toolCalls: ToolCall[] = [];
+    for (const acc of toolCallAccumulator.values()) {
+      if (acc.id && acc.functionName) {
+        toolCalls.push({
+          id: acc.id,
+          type: "function",
+          function: {
+            name: acc.functionName,
+            arguments: acc.functionArguments || "{}",
+          },
+        });
+      }
+    }
+
+    return { textContent, toolCalls };
+  }
+
+  /**
+   * Execute tool calls from the LLM.
+   * Validates arguments, checks permissions, and runs execution.
+   */
+  private async executeToolCalls(
+    runId: string,
+    conversationId: string,
+    toolCalls: ToolCall[],
+    context: AgentContext,
+    intent: RoutedIntent,
+    allSkills: SkillSummary[],
+    signal: AbortSignal,
+  ): Promise<{
+    artifacts: ArtifactRef[];
+    summaries: ToolCallSummary[];
+  }> {
+    const artifacts: ArtifactRef[] = [];
+    const summaries: ToolCallSummary[] = [];
+
+    for (const tc of toolCalls) {
+      // Parse arguments
+      let parsedArgs: Record<string, unknown>;
+      try {
+        parsedArgs = JSON.parse(tc.function.arguments);
+      } catch {
+        summaries.push({
+          id: tc.id,
+          skillId: tc.function.name,
+          name: tc.function.name,
+          status: "failed",
+          summary: `Failed to parse tool arguments: ${tc.function.arguments.slice(0, 200)}`,
+        });
+        continue;
+      }
+
+      // Find the skill in full skill catalog
+      const skill = allSkills.find((s) => s.id === tc.function.name);
+      if (!skill) {
+        summaries.push({
+          id: tc.id,
+          skillId: tc.function.name,
+          name: tc.function.name,
+          status: "failed",
+          summary: `Unknown tool: ${tc.function.name}. Available tools: ${allSkills.map((s) => s.id).join(", ")}`,
+        });
+        continue;
+      }
+
+      // Emit tool.selected
+      this.deps.eventBus.emit(
+        "agent.tool.selected",
+        {
+          runId,
+          toolCallId: tc.id,
+          skillId: skill.id,
+          name: skill.name,
+          riskLevel: "medium",
+        },
+        { runId, conversationId },
+      );
+
+      // Validate/fix arguments via ToolArgumentBuilder
+      let finalArgs = parsedArgs;
+      if (this.deps.argumentBuilder && skill.inputSchema) {
+        try {
+          const built = await this.deps.argumentBuilder.build(
+            {
+              context,
+              intent,
+              skill,
+              schema: skill.inputSchema,
+            },
+            signal,
+          );
+          finalArgs = built.arguments;
+        } catch {
+          // Continue with original args if builder fails
+        }
+      }
+
+      // Build a PlannedToolCall for execution
+      const skillRisk = skill.riskHints?.defaultRisk ?? "medium";
+      const plannedCall: PlannedToolCall = {
+        id: tc.id,
+        skillId: skill.id,
+        name: skill.name,
+        arguments: finalArgs,
+        permissions: skill.permissions,
+        reason: `LLM function calling selected ${skill.name}`,
+        riskLevel: skillRisk,
+        requiresApproval: skillRisk === "high" || skillRisk === "critical",
+        timeoutMs: skill.defaultTimeoutMs || 60_000,
+        riskHints: {
+          defaultRisk: skillRisk,
+        },
+      };
+
+      // Check permissions
+      if (plannedCall.permissions && plannedCall.permissions.length > 0) {
+        const permDecision = await this.deps.permissionPolicy.evaluate({
+          userId: context.userId,
+          runId,
+          skillId: skill.id,
+          permissions: plannedCall.permissions,
+          arguments: finalArgs,
+          context,
+          permissionMode: "auto",
+          riskHints: plannedCall.riskHints,
+        });
+
+        if (!permDecision.allowed) {
+          summaries.push({
+            id: tc.id,
+            skillId: skill.id,
+            name: skill.name,
+            status: "failed",
+            summary: `Permission denied: ${permDecision.reasons.join(", ")}`,
+          });
+          continue;
+        }
+
+        if (permDecision.requiresApproval) {
+          summaries.push({
+            id: tc.id,
+            skillId: skill.id,
+            name: skill.name,
+            status: "failed",
+            summary: `Approval required for ${skill.name}`,
+          });
+          continue;
+        }
+      }
+
+      // Execute via ExecutionOrchestrator
+      this.deps.eventBus.emit(
+        "agent.tool.started",
+        { runId, toolCallId: tc.id, skillId: skill.id, name: skill.name },
+        { runId, conversationId },
+      );
+
+      try {
+        const observation = await this.deps.executionOrchestrator.execute(
+          {
+            runId,
+            context,
+            intent: {
+              type: "use_skill",
+              confidence: 1,
+              requiresPlanning: false,
+              requiresTool: true,
+              requiresApproval: false,
+              riskLevel: "medium",
+              candidateSkills: [skill.id],
+              reason: "LLM function calling",
+            },
+            decision: {
+              type: "use_tool",
+              reason: `LLM called ${skill.name}`,
+              toolCalls: [plannedCall],
+            },
+          },
+          signal,
+        );
+
+        for (const summary of observation.toolCalls) {
+          summaries.push(summary);
+          this.deps.eventBus.emit(
+            summary.status === "completed"
+              ? "agent.tool.completed"
+              : "agent.tool.failed",
+            {
+              runId,
+              toolCallId: summary.id,
+              skillId: summary.skillId,
+              summary: summary.summary,
+              artifacts: observation.artifacts.map((a) => a.id),
+            },
+            { runId, conversationId },
+          );
+        }
+
+        artifacts.push(...observation.artifacts);
+
+        // Emit artifact.created for each artifact
+        for (const artifact of observation.artifacts) {
+          this.deps.eventBus.emit(
+            "agent.artifact.created",
+            {
+              runId,
+              artifactId: artifact.id,
+              name: artifact.name,
+              type: artifact.type,
+              version: artifact.version,
+            },
+            { runId, conversationId },
+          );
+        }
+      } catch (error) {
+        const errMsg =
+          error instanceof Error ? error.message : String(error);
+        summaries.push({
+          id: tc.id,
+          skillId: skill.id,
+          name: skill.name,
+          status: "failed",
+          summary: `Execution error: ${errMsg}`,
+        });
+        this.deps.eventBus.emit(
+          "agent.tool.failed",
+          {
+            runId,
+            toolCallId: tc.id,
+            skillId: skill.id,
+            error: { code: "AGENT_TOOL_EXECUTION_FAILED", message: errMsg },
+          },
+          { runId },
+        );
+      }
+    }
+
+    return { artifacts, summaries };
+  }
+
+  /**
+   * Append tool call and tool result messages to the conversation.
+   * This allows the LLM to see tool results in the next iteration.
+   */
+  private injectStreamingToolResults(
+    messages: ChatMessage[],
+    toolCalls: ToolCall[],
+    results: { summaries: ToolCallSummary[]; artifacts: ArtifactRef[] },
+  ): ChatMessage[] {
+    const updated = [...messages];
+
+    // Add assistant message with tool_calls
+    updated.push({
+      role: "assistant",
+      content: "",
+      tool_calls: toolCalls,
+    });
+
+    // Add tool result messages
+    for (const summary of results.summaries) {
+      updated.push({
+        role: "tool",
+        content:
+          summary.status === "completed"
+            ? summary.summary
+            : `[${summary.status.toUpperCase()}] ${summary.summary}`,
+        tool_call_id: summary.id,
+      } satisfies ChatMessage);
+    }
+
+    return updated;
+  }
+
+  /**
+   * Build rich cards from artifacts for inline rendering in the chat UI.
+   * Detects video/image artifacts and creates RichCardView-compatible data.
+   */
+  private buildStreamingRichCards(
+    artifacts: ArtifactRef[],
+  ): Array<{ type: string; title?: string; data: Record<string, unknown> }> {
+    return artifacts
+      .filter((a) => a.type === "video" || a.type === "image")
+      .map((a) => ({
+        type: a.type,
+        title: a.name,
+        data: {
+          src: (a as unknown as Record<string, unknown>).url ?? "",
+          caption: a.name,
+        },
+      }));
   }
 }
 
@@ -779,11 +1756,19 @@ interface ScoredSkill {
  * Handles both English (substring/word-based) and Chinese (character bigram
  * overlap) matching so skills with Chinese names are correctly discovered.
  *
- * Scoring tiers:
- *   - 1.0: skill id or capability name present verbatim
- *   - 0.8: skill display name present verbatim OR strong Chinese bigram overlap
- *   - 0.5: description keywords (English words or Chinese bigrams) overlap
- *   - 0.2: any single keyword / bigram match (weak signal)
+ * IMPORTANT: Semantic matching is now the PRIMARY layer (IntentRouter embedding
+ * pipeline). This function serves as a DETERMINISTIC FALLBACK. Bigram scoring
+ * is deliberately kept low-weight to avoid false positives (e.g. "商品" matching
+ * "生成 Seedream 商品图" and shadowing "搜索 1688 货源").
+ *
+ * Scoring tiers (revised — bigrams demoted):
+ *   - 1.0: skill id or capability name present verbatim (form-match)
+ *   - 0.5: skill display name present verbatim (form-match, reduced from 0.8)
+ *   - 0.15: strong Chinese bigram overlap (≥2 matches — tiebreaker only)
+ *   - 0.10: single Chinese bigram overlap (weak hint)
+ *   - 0.2: description keyword overlap ≥3 (moderate signal)
+ *   - 0.1: description keyword overlap ≥1 (weak signal)
+ *   - 0.4: category match
  *
  * Returns results sorted by score descending.
  */
@@ -804,20 +1789,23 @@ function scoreSkills(message: string, skills: SkillSummary[]): ScoredSkill[] {
       score = Math.max(score, 1.0);
     }
 
-    // Skill display name match (verbatim)
+    // Skill display name match (verbatim) — reduced from 0.8 to 0.5.
+    // Verbatim name match is a form-match signal but NOT a semantic one —
+    // the embedding layer handles semantic matching.
     if (lower.includes(skill.name.toLowerCase())) {
-      score = Math.max(score, 0.8);
+      score = Math.max(score, 0.5);
     }
 
-    // Chinese character bigram overlap between message and skill name.
-    // "搜一下这件衣服的货源" vs "搜索1688货源" → bigrams ["搜索","1688","货源","搜索1688","1688货源"]
-    // overlap: ["货源"] → 1 match → score boost.
+    // Chinese character bigram overlap — DEMOTED to tiebreaker weight.
+    // Bigrams are structurally brittle: "商品" appears in both "生成Seedream商品图"
+    // AND "搜索1688货源" (via user message), causing false positives.
+    // Now used only as a weak hint; embedding similarity is the primary signal.
     const nameBigrams = extractBigrams(skill.name);
     const nameOverlap = nameBigrams.filter((bg) => lower.includes(bg));
     if (nameOverlap.length >= 2) {
-      score = Math.max(score, 0.8);
+      score = Math.max(score, 0.15);   // was 0.8 — now tiebreaker only
     } else if (nameOverlap.length === 1) {
-      score = Math.max(score, 0.6);
+      score = Math.max(score, 0.1);    // was 0.6 — now weak hint
     }
 
     // Description keyword overlap (handles English words and Chinese bigrams)
@@ -830,9 +1818,9 @@ function scoreSkills(message: string, skills: SkillSummary[]): ScoredSkill[] {
 
     const totalDescMatches = matchedWords.length + matchedBigrams.length;
     if (totalDescMatches >= 3) {
-      score = Math.max(score, 0.5);
+      score = Math.max(score, 0.2);    // was 0.5 — reduced
     } else if (totalDescMatches >= 1) {
-      score = Math.max(score, 0.3);
+      score = Math.max(score, 0.1);    // was 0.3 — reduced
     }
 
     // Category match
@@ -931,4 +1919,37 @@ function deriveRecentHistory(
       };
     })
     .filter((entry): entry is NonNullable<typeof entry> => entry !== null);
+}
+
+/** Clamp a value to [0, 1] with a default for NaN/undefined. */
+function clampConfidence(value: unknown): number {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return 0.5;
+  return Math.max(0, Math.min(1, n));
+}
+
+/** Attach trace metadata to a ToolDecision from DecisionMetadata (§P2). */
+function attachTrace(
+  decision: ToolDecision,
+  meta?: DecisionMetadata,
+): ToolDecision {
+  if (meta) {
+    decision.decisionPath = meta.decisionPath;
+    if (meta.retrievalMetadata) {
+      decision.retrievalTopK = meta.retrievalMetadata.topK;
+      decision.retrievalCandidateCount = meta.retrievalMetadata.candidates?.length;
+      decision.retrievalFallback = meta.retrievalMetadata.fallbackUsed;
+    }
+  }
+  return decision;
+}
+
+// ── Internal Types ─────────────────────────────────────────────────────
+
+interface ToolCallAccumulator {
+  index: number;
+  id: string;
+  type: "function";
+  functionName: string;
+  functionArguments: string;
 }

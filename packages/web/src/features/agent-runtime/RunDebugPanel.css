@@ -1,0 +1,47 @@
+/* ── Run Debug Panel — Ant Design powered, minimal custom styles ── */
+
+.run-debug-panel {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow: hidden;
+  background: var(--sp-page);
+}
+
+.run-debug-panel__scroll {
+  flex: 1;
+  overflow-y: auto;
+  padding: 20px clamp(16px, 3vw, 32px) 32px;
+  scroll-behavior: smooth;
+}
+
+/* custom scrollbar */
+.run-debug-panel__scroll::-webkit-scrollbar {
+  width: 6px;
+}
+.run-debug-panel__scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+.run-debug-panel__scroll::-webkit-scrollbar-thumb {
+  background: var(--sp-border);
+  border-radius: 3px;
+}
+.run-debug-panel__scroll::-webkit-scrollbar-thumb:hover {
+  background: var(--sp-subtle);
+}
+
+/* ── Header ─────────────────────────────────────────────── */
+
+.run-debug-header {
+  margin-bottom: 20px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid var(--sp-border-soft);
+}
+
+/* ── Responsive ─────────────────────────────────────────── */
+
+@media (max-width: 767px) {
+  .run-debug-panel__scroll {
+    padding: 14px 12px 24px;
+  }
+}

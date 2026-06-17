@@ -1,13 +1,47 @@
-.sidebar-nav .ant-btn {
-  justify-content: flex-start;
-  font-size: 15px;
-  padding: 4px 8px;
+.sidebar-nav {
+  margin-bottom: 4px;
 }
 
+.sidebar-nav-item.ant-btn {
+  justify-content: flex-start;
+  font-size: 18px;
+  font-weight: 500;
+  padding: 10px 14px;
+  border-radius: 10px;
+  color: var(--sp-ink);
+  transition: all 0.15s ease;
+  position: relative;
+  overflow: hidden;
+}
+
+.sidebar-nav-item.ant-btn:hover {
+  background: var(--sp-surface-soft);
+  color: var(--sp-ink);
+}
+
+.sidebar-nav-item--active.ant-btn {
+  background: var(--sp-blue-soft) !important;
+  color: var(--sp-blue-hover) !important;
+  font-weight: 600;
+}
+
+.sidebar-nav-item--active.ant-btn::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 6px;
+  bottom: 6px;
+  width: 3px;
+  background: var(--sp-blue);
+  border-radius: 0 2px 2px 0;
+}
+
+/* ── Responsive ──────────────────────────────────────────── */
+
 @media (max-width: 991px) {
-  .sidebar-nav .ant-btn {
+  .sidebar-nav-item.ant-btn {
     justify-content: center;
-    padding: 0 8px;
-    font-size: 14px;
+    padding: 8px;
+    font-size: 13px;
   }
 }

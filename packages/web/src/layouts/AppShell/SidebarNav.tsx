@@ -1,33 +1,57 @@
-import { AppstoreOutlined, PlusOutlined } from "@ant-design/icons";
+import { AppstoreOutlined, BugOutlined, ClockCircleOutlined, PlusOutlined } from "@ant-design/icons";
 import { Button, Flex } from "antd";
 import "./SidebarNav.css";
 
 export function SidebarNav({
-  active,
+  activePanel,
   onNewChat,
+  onOpenAutomation,
   onOpenPlugins,
+  onOpenDebug,
 }: {
-  active: boolean;
+  activePanel: "chat" | "automation" | "plugins" | "debug" | "settings";
   onNewChat: () => void;
+  onOpenAutomation: () => void;
   onOpenPlugins: () => void;
+  onOpenDebug: () => void;
 }) {
   return (
-    <Flex vertical gap={4} className="sidebar-nav">
+    <Flex vertical gap={2} className="sidebar-nav">
       <Button
         type="text"
-        size="small"
+        size="large"
         icon={<PlusOutlined />}
+        className={`sidebar-nav-item${activePanel === "chat" ? " sidebar-nav-item--active" : ""}`}
         onClick={onNewChat}
       >
         新对话
       </Button>
       <Button
-        type={active ? "primary" : "text"}
-        size="small"
+        type="text"
+        size="large"
+        icon={<ClockCircleOutlined />}
+        className={`sidebar-nav-item${activePanel === "automation" ? " sidebar-nav-item--active" : ""}`}
+        onClick={onOpenAutomation}
+      >
+        自动化
+      </Button>
+      <Button
+        type="text"
+        size="large"
         icon={<AppstoreOutlined />}
+        className={`sidebar-nav-item${activePanel === "plugins" ? " sidebar-nav-item--active" : ""}`}
         onClick={onOpenPlugins}
       >
         插件
+      </Button>
+      <Button
+        type="text"
+        size="large"
+        icon={<BugOutlined />}
+        className={`sidebar-nav-item${activePanel === "debug" ? " sidebar-nav-item--active" : ""}`}
+        onClick={onOpenDebug}
+      >
+        Debug
       </Button>
     </Flex>
   );

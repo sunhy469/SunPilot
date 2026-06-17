@@ -88,9 +88,8 @@ const PERMISSION_OPTIONS: PermissionOption[] = [
 // ── Model options ─────────────────────────────────────────────────────
 
 const MODEL_OPTIONS = [
-  { value: "claude-sonnet-4-6", label: "Sonnet 4.6" },
-  { value: "claude-opus-4-8", label: "Opus 4.8" },
-  { value: "claude-haiku-4-5", label: "Haiku 4.5" },
+  { value: "dp", label: "DeepSeek-4.0-flash" },
+  { value: "seed", label: "Seed-pro" },
 ];
 
 // ── Component ─────────────────────────────────────────────────────────
@@ -113,7 +112,7 @@ export function ChatComposer({
   variant?: "default" | "welcome";
   value?: string;
   onChange?: (value: string) => void;
-  onSend: (text: string, attachments?: AttachmentRef[], permissionMode?: "ask" | "auto" | "full") => void;
+  onSend: (text: string, attachments?: AttachmentRef[], permissionMode?: "ask" | "auto" | "full", modelId?: "dp" | "seed") => void;
   onStop?: () => void;
   /** Global send state from useChat — drives consistent UI across components. */
   sendState?: LocalSendState;
@@ -122,7 +121,7 @@ export function ChatComposer({
 }) {
   const [internalValue, setInternalValue] = useState("");
   const [permission, setPermission] = useState("auto");
-  const [model, setModel] = useState("claude-sonnet-4-6");
+  const [model, setModel] = useState("dp");
   // Track queued send when user clicks send while uploads are in progress
   const [queuedSend, setQueuedSend] = useState(false);
   const [uploadFailed, setUploadFailed] = useState(false);
@@ -213,11 +212,11 @@ export function ChatComposer({
     // All uploads finished — fire the queued send
     setQueuedSend(false);
     const text = currentValue.trim();
-    onSend(text || "请查看附件", toAttachmentRefs(), permission as "ask" | "auto" | "full");
+    onSend(text || "请查看附件", toAttachmentRefs(), permission as "ask" | "auto" | "full", model as "dp" | "seed");
     clearFiles();
     setCurrentValue("");
     onSendStateChange?.("sending");
-  }, [uploading, queuedSend, currentValue, onSend, toAttachmentRefs, clearFiles, setCurrentValue, onSendStateChange, permission]);
+  }, [uploading, queuedSend, currentValue, onSend, toAttachmentRefs, clearFiles, setCurrentValue, onSendStateChange, permission, model]);
 
   // ── Send ──────────────────────────────────────────────────────────
 
@@ -237,10 +236,10 @@ export function ChatComposer({
       return;
     }
 
-    onSend(text || "请查看附件", toAttachmentRefs(), permission as "ask" | "auto" | "full");
+    onSend(text || "请查看附件", toAttachmentRefs(), permission as "ask" | "auto" | "full", model as "dp" | "seed");
     clearFiles();
     setCurrentValue("");
-  }, [currentValue, disabled, files, uploading, onSend, setCurrentValue, toAttachmentRefs, clearFiles, onSendStateChange, permission]);
+  }, [currentValue, disabled, files, uploading, onSend, setCurrentValue, toAttachmentRefs, clearFiles, onSendStateChange, permission, model]);
 
   // ── Detect upload failures ────────────────────────────────────────
   // When uploads complete, check for any files with error status.
@@ -286,8 +285,8 @@ export function ChatComposer({
 
   const isWelcome = variant === "welcome";
   const isQueued = queuedSend && uploading;
-  const isActiveSending =
-    sendState === "sending" ||
+  const isActiveSending = sendState === "sending";
+  const isAiProcessing =
     sendState === "accepted" ||
     sendState === "running" ||
     sendState === "streaming";
@@ -303,11 +302,7 @@ export function ChatComposer({
     switch (sendState) {
       case "uploading": return uploadProgress ? `上传中 ${uploadProgress}%...` : "上传中...";
       case "sending": return "发送中...";
-      case "accepted": return "已接收，正在处理...";
-      case "running": return "工具调用中...";
-      case "streaming": return "生成回答中...";
       case "failed": return "发送失败，请重试";
-      case "completed": return undefined; // brief flash, then back to editing
       default: return undefined;
     }
   })();
@@ -340,23 +335,23 @@ export function ChatComposer({
         onKeyDown={handleKeyDown}
       />
 
-      {/* ── Upload progress bar + queued indicator ────────────── */}
+      {/* ── Upload indicator ────────────────────────────────── */}
       {uploading && (
-        <div className="chat-composer__upload-progress">
-          <div
-            className="chat-composer__upload-progress-bar"
-            style={{ width: `${uploadProgress ?? 0}%` }}
-          />
-          {isQueued && (
-            <Text type="secondary" style={{ fontSize: 12, marginTop: 4, display: "block" }}>
-              <LoadingOutlined style={{ marginRight: 4 }} />
+        <div className="chat-composer__upload-status">
+          <LoadingOutlined style={{ marginRight: 6 }} />
+          {isQueued ? (
+            <Text type="secondary" style={{ fontSize: 12 }}>
               附件上传完成后将自动发送
+            </Text>
+          ) : (
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              上传中...
             </Text>
           )}
         </div>
       )}
       {uploadFailed && (
-        <div className="chat-composer__upload-progress">
+        <div className="chat-composer__upload-status">
           <Text type="danger" style={{ fontSize: 12 }}>
             附件上传失败，
             <Button type="link" size="small" onClick={handleRetryUpload} style={{ padding: 0 }}>
@@ -472,7 +467,7 @@ export function ChatComposer({
             className="chat-composer__select"
             popupMatchSelectWidth={false}
           />
-          {(streaming || isActiveSending) && onStop ? (
+          {(streaming || isAiProcessing || isActiveSending) && onStop ? (
             <Button
               type="primary"
               danger
