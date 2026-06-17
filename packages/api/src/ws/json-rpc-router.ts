@@ -82,6 +82,7 @@ export class JsonRpcRouter {
             message: params.message,
             mode: params.mode,
             permissionMode: params.permissionMode,
+            modelId: params.modelId,
             clientRequestId: params.clientRequestId,
             attachments: params.attachments,
           },

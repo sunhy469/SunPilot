@@ -78,7 +78,9 @@ export class TokenBudgeter {
 
     const included: ContextChunk[] = [...mandatory];
     const excluded: ContextChunk[] = [];
-    let usedTokens = mandatoryTokens;
+    // remainingBudget already excludes mandatoryTokens — start at 0
+    // to avoid double-deducting mandatory from the optional pool.
+    let usedTokens = 0;
 
     for (const chunk of sorted) {
       if (usedTokens + chunk.tokenEstimate <= remainingBudget) {
@@ -89,11 +91,12 @@ export class TokenBudgeter {
       }
     }
 
+    const totalTokens = mandatoryTokens + usedTokens;
     return {
       included,
       excluded,
-      totalTokens: usedTokens,
-      budgetUsed: usedTokens,
+      totalTokens,
+      budgetUsed: totalTokens,
     };
   }
 

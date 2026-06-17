@@ -10,10 +10,10 @@ import "./Sidebar.css";
 
 const { Sider } = Layout;
 
-const MIN_WIDTH = 200;
-const MAX_WIDTH = 480;
-const DEFAULT_WIDTH = 260;
-const COLLAPSED_ICON_WIDTH = 72;
+const MIN_WIDTH = 240;
+const MAX_WIDTH = 520;
+const DEFAULT_WIDTH = 300;
+const COLLAPSED_ICON_WIDTH = 80;
 
 export function Sidebar({
   conversations,
@@ -21,14 +21,20 @@ export function Sidebar({
   activePanel,
   onNewChat,
   onSelect,
+  onOpenAutomation,
   onOpenPlugins,
+  onOpenDebug,
+  onOpenSettings,
 }: {
   conversations: Conversation[];
   activeConversationId: string;
-  activePanel: "chat" | "plugins";
+  activePanel: "chat" | "automation" | "plugins" | "debug" | "settings";
   onNewChat: () => void;
   onSelect: (id: string) => void;
+  onOpenAutomation: () => void;
   onOpenPlugins: () => void;
+  onOpenDebug: () => void;
+  onOpenSettings: () => void;
 }) {
   const responsive = useResponsive();
   const [sidebarWidth, setSidebarWidth] = useState(DEFAULT_WIDTH);
@@ -110,9 +116,11 @@ export function Sidebar({
     >
       <div className="sidebar-inner">
         <SidebarNav
-          active={activePanel === "plugins"}
+          activePanel={activePanel}
           onNewChat={onNewChat}
+          onOpenAutomation={onOpenAutomation}
           onOpenPlugins={onOpenPlugins}
+          onOpenDebug={onOpenDebug}
         />
 
         <RecentConversations
@@ -124,7 +132,7 @@ export function Sidebar({
           conversationTitle={conversationTitle}
         />
 
-        <UserFooter />
+        <UserFooter onOpenSettings={onOpenSettings} />
       </div>
 
       {/* Resize handle — hidden on mobile */}

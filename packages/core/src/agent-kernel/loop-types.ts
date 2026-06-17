@@ -46,6 +46,8 @@ export interface AgentLoopInput {
   mode: "chat" | "agent";
   /** User-selected permission mode controlling tool approval behavior. */
   permissionMode?: PermissionMode;
+  /** User-selected chat model. Routes all LLM calls to this model. */
+  modelId?: "dp" | "seed";
   attachments?: AttachmentRef[];
   client: {
     source: "web" | "cli" | "api";
@@ -113,6 +115,17 @@ export interface RoutedIntent {
   riskLevel: "low" | "medium" | "high" | "critical";
   candidateSkills: string[];
   reason: string;
+  /** Trace/debug metadata for the routing decision (§P2). */
+  trace?: {
+    /** "real" | "lexical_fallback" | "none" */
+    embeddingMode?: string;
+    /** Top embedding similarity score. */
+    embeddingTopScore?: number;
+    /** Number of skills considered in embedding pass. */
+    embeddingCandidateCount?: number;
+    /** Whether the intent was determined by form-match rules. */
+    formMatch?: boolean;
+  };
 }
 
 // ── Context ───────────────────────────────────────────────────────────
@@ -195,6 +208,14 @@ export interface AgentContextSnapshot {
     tokenEstimate: number;
     included: boolean;
     reason?: string;
+    /** Trust level of the chunk content (system/user/memory/tool/external). */
+    trust?: string;
+    /** Source URI for provenance trace (e.g. memory:<id>, tool_call:<id>). */
+    sourceUri?: string;
+    /** Relevance score from memory/tool search (if applicable). */
+    score?: number;
+    /** Warning message if the chunk was flagged (e.g. stale summary). */
+    warning?: string;
   }>;
   totalTokens: number;
   droppedCount: number;
@@ -286,6 +307,13 @@ export interface PlannedToolCall {
   };
   /** Capability input JSON Schema for argument validation. */
   inputSchema?: Record<string, unknown>;
+  /** Response projection hints from skill manifest (§P2-9). */
+  projectionHints?: {
+    summaryFields?: string[];
+    identityFields?: string[];
+    sourceUrlFields?: string[];
+    confidenceFields?: string[];
+  };
   /** Provenance tracking for each argument (source of the value). */
   argumentSources?: Array<{
     arg: string;
@@ -297,13 +325,42 @@ export interface PlannedToolCall {
 }
 
 export type ToolDecision =
-  | { type: "no_tool"; reason: string }
-  | { type: "use_tool"; toolCalls: PlannedToolCall[]; reason: string }
-  | { type: "ask_clarification"; question: string; reason: string }
+  | {
+      type: "no_tool";
+      reason: string;
+      /** Trace metadata for debugging tool selection (§P2). */
+      decisionPath?: string;
+      retrievalTopK?: number;
+      retrievalCandidateCount?: number;
+      retrievalFallback?: boolean;
+    }
+  | {
+      type: "use_tool";
+      toolCalls: PlannedToolCall[];
+      reason: string;
+      /** Trace metadata for debugging tool selection (§P2). */
+      decisionPath?: string;
+      retrievalTopK?: number;
+      retrievalCandidateCount?: number;
+      retrievalFallback?: boolean;
+    }
+  | {
+      type: "ask_clarification";
+      question: string;
+      reason: string;
+      decisionPath?: string;
+      retrievalTopK?: number;
+      retrievalCandidateCount?: number;
+      retrievalFallback?: boolean;
+    }
   | {
       type: "require_approval";
       approval: { title: string; description: string; riskLevel: string };
       reason: string;
+      decisionPath?: string;
+      retrievalTopK?: number;
+      retrievalCandidateCount?: number;
+      retrievalFallback?: boolean;
     };
 
 // ── Observation ───────────────────────────────────────────────────────
@@ -428,6 +485,30 @@ export interface ToolDecisionEngine {
     },
     signal: AbortSignal,
   ): Promise<ToolDecision>;
+
+  /** LLM native function calling loop — interleaves text + tool calls. */
+  executeStreaming(
+    input: {
+      runId: string;
+      conversationId: string;
+      context: AgentContext;
+      intent: RoutedIntent;
+      plan?: AgentPlan;
+      messageId?: string;
+      modelId?: "dp" | "seed";
+      prioritySkills?: Array<{
+        skillId: string;
+        reason: string;
+        argumentsHint?: Record<string, unknown>;
+      }>;
+    },
+    signal: AbortSignal,
+  ): Promise<{
+    messageId: string;
+    content: string;
+    artifacts: ArtifactRef[];
+    toolCalls: ToolCallSummary[];
+  }>;
 }
 
 export interface ExecutionOrchestrator {
@@ -517,6 +598,7 @@ export interface ResponseComposer {
       context: AgentContext;
       intent: RoutedIntent;
       plan?: AgentPlan;
+      modelId?: "dp" | "seed";
     },
     signal: AbortSignal,
   ): Promise<{
@@ -530,6 +612,8 @@ export interface ResponseComposer {
       context: AgentContext;
       observation: AgentObservation;
       reflection?: AgentReflection;
+      messageId?: string;
+      modelId?: "dp" | "seed";
     },
     signal: AbortSignal,
   ): Promise<{

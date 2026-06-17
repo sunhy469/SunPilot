@@ -169,27 +169,13 @@ describe("ResponseComposer", () => {
       ),
     ).rejects.toThrow("model unavailable");
 
-    const modelCalls = await database.modelCalls.listByRunId(input.runId);
-    expect(modelCalls).toEqual([
-      expect.objectContaining({
-        provider: "test.provider",
-        model: "test-model",
-        purpose: "response.compose",
-        status: "failed",
-        outputTokens: expect.any(Number),
-        error: expect.objectContaining({
-          code: "MODEL_UNAVAILABLE",
-          message: "model unavailable",
-          category: "provider",
-          retryable: true,
-        }),
-      }),
-    ]);
+    // Model call persistence is now handled by ModelRouter (§P1-5)
+    // ResponseComposer only emits lifecycle events
     expect(events.at(-1)).toMatchObject({
       type: "agent.model.failed",
       payload: expect.objectContaining({
         runId: input.runId,
-        modelCallId: modelCalls[0].id,
+        modelCallId: expect.any(String),
         error: expect.objectContaining({
           code: "MODEL_UNAVAILABLE",
           message: "model unavailable",

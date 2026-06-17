@@ -50,7 +50,7 @@ export class PostgresRunRepository implements RunRepository {
   }
 
   async list(input: ListRunsInput = {}): Promise<RunRecord[]> {
-    const limit = Math.max(1, Math.min(input.limit ?? 50, 200));
+    const limit = Math.max(1, Math.min(Number(input.limit ?? 50), 200));
     const conditions: string[] = [];
     const values: unknown[] = [];
     if (input.status) {

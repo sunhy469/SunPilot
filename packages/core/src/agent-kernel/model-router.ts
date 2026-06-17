@@ -21,6 +21,10 @@ export type ModelPurpose =
 // ── Model Config ─────────────────────────────────────────────────────────
 
 export interface ModelConfig {
+  /** Stable model identifier — matches ChatModelId for user-selectable models. */
+  id?: "dp" | "seed";
+  /** Human-readable label for UI display. */
+  label?: string;
   /** Provider instance. */
   provider: LlmProvider;
   /** Model name for tracking. */
@@ -38,6 +42,11 @@ export interface ModelRoute {
   priority: number;
   /** Model configuration. */
   config: ModelConfig;
+  /**
+   * Optional model ID filter. When set, this route only matches
+   * requests with the same modelId. Used for user-selected model routing.
+   */
+  modelId?: "dp" | "seed";
 }
 
 /** Minimal interface for writing model call records to DB (§P1-5).
@@ -76,6 +85,8 @@ export interface ModelRouterConfig {
 export interface ModelCallRecord {
   /** Unique call ID. */
   callId: string;
+  /** The run this call belongs to (§P1-5). */
+  runId?: string;
   /** Which purpose this call served. */
   purpose: ModelPurpose;
   /** The model that was actually used. */
@@ -109,6 +120,8 @@ export interface ModelRouterStats {
   fallbackCount: number;
   /** Recent call records (last 100). */
   recentCalls: ModelCallRecord[];
+  /** Number of persistence failures (DB write errors). */
+  persistFailures: number;
 }
 
 /**
@@ -131,6 +144,7 @@ export class ModelRouter {
   private readonly trackCalls: boolean;
   private readonly callRecords: ModelCallRecord[] = [];
   private readonly modelCallRecorder?: ModelCallRecorder;
+  private persistFailures = 0;
 
   constructor(config: ModelRouterConfig) {
     // Sort routes by priority within each purpose
@@ -157,9 +171,25 @@ export class ModelRouter {
       signal: signal ?? request.signal,
     };
 
-    const matchingRoutes = this.routes.filter((r) =>
+    // ── Route selection with optional modelId filter ──
+    // 1. If request.modelId is set, only use routes matching that modelId
+    // 2. Otherwise, use all routes serving this purpose
+    let matchingRoutes = this.routes.filter((r) =>
       r.purposes.includes(purpose),
     );
+
+    if (request.modelId) {
+      const modelRoutes = matchingRoutes.filter(
+        (r) => r.modelId === request.modelId,
+      );
+      if (modelRoutes.length === 0) {
+        throw new Error(
+          `Model "${request.modelId}" is not configured for purpose "${purpose}". ` +
+          `Available models: ${[...new Set(matchingRoutes.map((r) => r.modelId).filter(Boolean))].join(", ") || "none"}.`,
+        );
+      }
+      matchingRoutes = modelRoutes;
+    }
 
     if (matchingRoutes.length === 0 && !this.fallback) {
       throw new Error(
@@ -167,7 +197,7 @@ export class ModelRouter {
       );
     }
 
-    const callId = `model_call_${crypto.randomUUID()}`;
+    const callId = request.modelCallId ?? `model_call_${crypto.randomUUID()}`;
     const startedAt = new Date().toISOString();
     const startTime = Date.now();
     let outputTokens = 0;
@@ -200,6 +230,7 @@ export class ModelRouter {
         const inputTokens = estimateInputTokens(request);
         this.recordCall({
           callId,
+          runId: request.runId,
           purpose,
           model: usedModel,
           providerId: usedProviderId,
@@ -210,10 +241,11 @@ export class ModelRouter {
           fallbackReason,
           startedAt,
         });
-        // Fire-and-forget DB write
+        // Persist model call to DB — await to surface failures (§P1-5)
         if (this.modelCallRecorder) {
           this.modelCallRecorder.create({
             id: callId,
+            runId: request.runId,
             provider: usedProviderId,
             model: usedModel,
             purpose,
@@ -221,8 +253,9 @@ export class ModelRouter {
             outputTokens,
             latencyMs,
             status: "completed",
+            metadata: request.metadata,
             createdAt: startedAt,
-          }).catch(() => { /* best effort */ });
+          }).catch(() => { this.persistFailures++; });
         }
         return;
       } catch (error) {
@@ -246,6 +279,7 @@ export class ModelRouter {
     const finalInput = estimateInputTokens(request);
     this.recordCall({
       callId,
+      runId: request.runId,
       purpose,
       model: usedModel,
       providerId: usedProviderId,
@@ -260,6 +294,7 @@ export class ModelRouter {
     if (this.modelCallRecorder) {
       this.modelCallRecorder.create({
         id: callId,
+        runId: request.runId,
         provider: usedProviderId,
         model: usedModel,
         purpose,
@@ -268,8 +303,9 @@ export class ModelRouter {
         latencyMs: finalLatency,
         status: "failed",
         error: lastError,
+        metadata: request.metadata,
         createdAt: startedAt,
-      }).catch(() => { /* best effort */ });
+      }).catch(() => { this.persistFailures++; });
     }
 
     throw new Error(
@@ -318,6 +354,7 @@ export class ModelRouter {
       totalCostEstimate: Math.round(totalCostEstimate * 10000) / 10000,
       fallbackCount,
       recentCalls: this.callRecords.slice(-100),
+      persistFailures: this.persistFailures,
     };
   }
 

@@ -35,7 +35,7 @@ import type { RepositoryTraceManager } from "./trace-persistence.js";
 import type { PromptInjectionDetector } from "./safety/prompt-injection-detector.js";
 import type { ToolSandbox } from "./safety/tool-sandbox.js";
 import type { TaskScopedPermissionManager, TaskScopedPermission } from "./safety/task-scoped-permission-manager.js";
-import type { PlanSnapshotRepository } from "@sunpilot/storage";
+import type { PlanSnapshotRepository, ToolCallRepository } from "@sunpilot/storage";
 
 const MAX_TOOL_ITERATIONS = 5;
 
@@ -69,6 +69,8 @@ export interface AgentLoopEngineDeps {
   scopedPermissionManager?: TaskScopedPermissionManager;
   /** Optional — persists plan snapshots (§P0-2). */
   planSnapshotRepo?: PlanSnapshotRepository;
+  /** Optional — persists tool calls for auditability (§P0-3). */
+  toolCalls?: ToolCallRepository;
 }
 
 export interface ApprovalResumeInput {
@@ -112,9 +114,40 @@ export class AgentLoopEngine {
 
   constructor(private readonly deps: AgentLoopEngineDeps) {}
 
+  /** Start a trace span if traceManager is available (§P1-5). Best-effort — never throws. */
+  private _startSpan(
+    runId: string,
+    kind: import("./trace-manager.js").SpanKind,
+    parentSpanId?: string,
+  ): { spanId: string; endSpan: (summary: string, metrics?: import("./trace-manager.js").SpanMetrics, error?: string) => void } | null {
+    if (!this.deps.traceManager) return null;
+    try {
+      const { spanId, endSpan } = this.deps.traceManager.startSpan(runId, kind, parentSpanId);
+      return { spanId, endSpan };
+    } catch {
+      // No active trace yet (e.g. test harness without startTrace) — silently skip
+      return null;
+    }
+  }
+
   /** Release permission grants for a run to prevent unbounded memory growth. */
   private cleanupGrants(runId: string): void {
     this.grantsByRun.delete(runId);
+  }
+
+  /** Increment and return the next plan version for a run (§P0-2). */
+  private _nextPlanVersion(runId: string): number {
+    if (!this._planRevisionCounts) {
+      this._planRevisionCounts = new Map();
+    }
+    const next = (this._planRevisionCounts.get(runId) ?? 0) + 1;
+    this._planRevisionCounts.set(runId, next);
+    return next;
+  }
+
+  /** Clean up plan revision counter when a run completes. */
+  private _cleanupPlanVersion(runId: string): void {
+    this._planRevisionCounts?.delete(runId);
   }
 
   /**
@@ -127,12 +160,55 @@ export class AgentLoopEngine {
     input: AgentLoopInput,
     signal: AbortSignal,
   ): Promise<AgentLoopResult> {
+    // Start trace for this run (§P0-2)
+    if (this.deps.traceManager) {
+      this.deps.traceManager.startTrace(input.runId, input.conversationId);
+    }
+
     try {
       const { context, intent } = await this.buildContextAndIntent(
         input,
         signal,
       );
       const plan = await this.maybeCreatePlan(input, context, intent, signal);
+
+      // Validate plan structure before tool decision (§P0-2)
+      if (plan && this.deps.planValidator) {
+        const validation = await this.deps.planValidator.validate(plan);
+        this.deps.eventBus.emit(
+          "agent.plan.validated",
+          {
+            runId: input.runId,
+            planId: plan.id,
+            valid: validation.valid,
+            issues: validation.issues,
+            executableSteps: validation.executableSteps,
+            blockedSteps: validation.blockedSteps,
+          },
+          { runId: input.runId, conversationId: input.conversationId },
+        );
+
+        // Persist validated plan snapshot (§P0-2)
+        if (this.deps.planSnapshotRepo) {
+          const version = this._nextPlanVersion(input.runId);
+          try {
+            await this.deps.planSnapshotRepo.create({
+              id: crypto.randomUUID(),
+              runId: input.runId,
+              planId: plan.id,
+              version,
+              eventType: "agent.plan.validated",
+              planJson: plan as unknown as Record<string, unknown>,
+              diffSummary: validation.valid
+                ? "Plan validated successfully"
+                : `Validation found ${validation.issues.length} issue(s): ${validation.blockedSteps.length} blocked step(s)`,
+            });
+          } catch {
+            // Best effort
+          }
+        }
+      }
+
       const decision = await this.decideTools(
         input,
         context,
@@ -170,6 +246,12 @@ export class AgentLoopEngine {
       }
     } catch (error) {
       return this.handleLoopError(input, error, signal);
+    } finally {
+      // Always end the trace and clean up plan version counter (§P0-2)
+      if (this.deps.traceManager) {
+        this.deps.traceManager.endTrace(input.runId);
+      }
+      this._cleanupPlanVersion(input.runId);
     }
   }
 
@@ -182,6 +264,10 @@ export class AgentLoopEngine {
   ): Promise<{ context: AgentContext; intent: RoutedIntent }> {
     const { runId, conversationId } = input;
 
+    // ── Context building span (§P1-5) ──
+    const ctxSpan = this._startSpan(runId, "context_building");
+    const ctxStart = Date.now();
+
     await this.deps.runStateManager.markStatus(runId, "context_building");
     this.deps.eventBus.emit(
       "agent.context.started",
@@ -189,7 +275,13 @@ export class AgentLoopEngine {
       { runId, conversationId },
     );
 
-    const context = await this.deps.contextBuilder.build(input, signal);
+    let context: AgentContext;
+    try {
+      context = await this.deps.contextBuilder.build(input, signal);
+    } catch (err) {
+      ctxSpan?.endSpan("Context building failed", { errorCode: "CONTEXT_BUILD_FAILED" }, String(err));
+      throw err;
+    }
 
     this.deps.eventBus.emit(
       "agent.context.completed",
@@ -205,9 +297,25 @@ export class AgentLoopEngine {
       },
       { runId, conversationId },
     );
+    ctxSpan?.endSpan(
+      `Context built: ${context.messages.length} msgs, ${context.memories.length} memories, ${context.tokenEstimate} tokens`,
+      {
+        tokenInput: context.tokenEstimate,
+        toolCalls: context.toolResults.length,
+      },
+    );
+
+    // ── Intent routing span (§P1-5) ──
+    const intentSpan = this._startSpan(runId, "intent_routing", ctxSpan?.spanId);
 
     await this.deps.runStateManager.markStatus(runId, "intent_routing");
-    const intent = await this.deps.intentRouter.route(context, signal);
+    let intent: RoutedIntent;
+    try {
+      intent = await this.deps.intentRouter.route(context, signal);
+    } catch (err) {
+      intentSpan?.endSpan("Intent routing failed", { errorCode: "INTENT_ROUTE_FAILED" }, String(err));
+      throw err;
+    }
 
     this.deps.eventBus.emit(
       "agent.intent.detected",
@@ -218,6 +326,18 @@ export class AgentLoopEngine {
         candidateSkills: intent.candidateSkills,
       },
       { runId, conversationId },
+    );
+    intentSpan?.endSpan(
+      `Intent: ${intent.type} (confidence: ${intent.confidence})`,
+      {
+        toolCalls: intent.candidateSkills?.length,
+        // Trace metadata for debugging tool selection (§P2):
+        // embedding mode, top similarity score, form-match flag
+        embeddingMode: intent.trace?.embeddingMode,
+        embeddingTopScore: intent.trace?.embeddingTopScore,
+        embeddingCandidateCount: intent.trace?.embeddingCandidateCount,
+        formMatch: intent.trace?.formMatch,
+      },
     );
 
     return { context, intent };
@@ -233,8 +353,16 @@ export class AgentLoopEngine {
     if (!intent.requiresPlanning) return undefined;
 
     const { runId, conversationId } = input;
+    const planSpan = this._startSpan(runId, "planning");
+
     await this.deps.runStateManager.markStatus(runId, "planning");
-    const plan = await this.deps.planner.createPlan(context, intent, signal);
+    let plan: AgentPlan;
+    try {
+      plan = await this.deps.planner.createPlan(context, intent, signal);
+    } catch (err) {
+      planSpan?.endSpan("Planning failed", { errorCode: "PLAN_CREATE_FAILED" }, String(err));
+      throw err;
+    }
 
     this.deps.eventBus.emit(
       "agent.plan.created",
@@ -249,6 +377,42 @@ export class AgentLoopEngine {
       },
       { runId, conversationId },
     );
+    planSpan?.endSpan(
+      `Plan: ${plan.goal} (${plan.steps.length} steps, risk: ${plan.riskLevel})`,
+    );
+
+    // Persist plan snapshot (§P0-2)
+    if (this.deps.planSnapshotRepo) {
+      const version = this._nextPlanVersion(runId);
+      try {
+        await this.deps.planSnapshotRepo.create({
+          id: crypto.randomUUID(),
+          runId,
+          planId: plan.id,
+          version,
+          eventType: "agent.plan.created",
+          planJson: plan as unknown as Record<string, unknown>,
+        });
+        await this.deps.planSnapshotRepo.updateRunPlanState(
+          runId,
+          plan as unknown as Record<string, unknown>,
+          version,
+        );
+      } catch (err) {
+        // Snapshot persistence is best-effort — don't fail the run
+        this.deps.eventBus.emit(
+          "agent.error",
+          {
+            runId,
+            error: {
+              code: "PLAN_SNAPSHOT_WRITE_FAILED",
+              message: `Failed to persist plan snapshot: ${String(err)}`,
+            },
+          },
+          { runId, conversationId },
+        );
+      }
+    }
 
     return plan;
   }
@@ -267,11 +431,27 @@ export class AgentLoopEngine {
       argumentsHint?: Record<string, unknown>;
     }>,
   ): Promise<ToolDecision> {
+    const toolSpan = this._startSpan(input.runId, "tool_deciding");
     await this.deps.runStateManager.markStatus(input.runId, "tool_deciding");
-    return this.deps.toolDecisionEngine.decide(
+    const decision = await this.deps.toolDecisionEngine.decide(
       { context, intent, plan, previousObservation, prioritySkills },
       signal,
     );
+    toolSpan?.endSpan(
+      `Tool decision: ${decision.type}${decision.type === "use_tool" ? ` (${decision.toolCalls.length} tools)` : ""}`,
+      {
+        toolCalls: decision.type === "use_tool" ? decision.toolCalls.length : 0,
+        // Decision path for debugging tool selection (§P2):
+        // plan / intent_match / priority / deterministic_scorer /
+        // llm_semantic / scorer_fallback / intent_skill_map / no_tool
+        decisionPath: decision.decisionPath,
+        // Retrieval metadata when available
+        retrievalTopK: decision.retrievalTopK,
+        retrievalCandidateCount: decision.retrievalCandidateCount,
+        retrievalFallback: decision.retrievalFallback,
+      },
+    );
+    return decision;
   }
 
   // ── Branch handlers ────────────────────────────────────────────────
@@ -289,6 +469,86 @@ export class AgentLoopEngine {
     taskState?: AgentTaskState,
   ): Promise<AgentLoopResult> {
     const { runId, conversationId } = input;
+
+    // ── Generate ONE messageId per run ──
+    // Emit agent.response.started once so the frontend only creates a
+    // single assistant message card. Both the streaming path and the
+    // fallback old path reuse this messageId.
+    const assistantMessageId = `msg_${crypto.randomUUID()}`;
+
+    // ── Streaming path (LLM native function calling) ──
+    // ToolDecisionEngine.executeStreaming() interleaves text + tool calls
+    // in a single LLM-driven loop. On failure, fall through to the
+    // traditional safety + execution path.
+    if (iteration === 1) {
+      // Emit once before trying either path — the fallback reuses the same messageId
+      this.deps.eventBus.emit(
+        "agent.response.started",
+        { runId, conversationId, messageId: assistantMessageId },
+        { runId, conversationId },
+      );
+
+      try {
+        await this.deps.runStateManager.markStatus(runId, "executing");
+        const result = await this.deps.toolDecisionEngine.executeStreaming(
+          { runId, conversationId, context, intent, plan, messageId: assistantMessageId, modelId: input.modelId },
+          signal,
+        );
+
+        // Legal state path: executing → responding → completed
+        await this.deps.runStateManager.markStatus(runId, "responding");
+        await this.deps.runStateManager.markStatus(runId, "completed");
+        this.deps.eventBus.emit(
+          "agent.run.completed",
+          {
+            runId,
+            assistantMessageId: result.messageId,
+            artifacts: result.artifacts.map((a) => a.id),
+            toolCalls: result.toolCalls.length,
+          },
+          { runId, conversationId },
+        );
+        this.cleanupGrants(runId);
+        this._cleanupPlanVersion(runId);
+
+        if (this.deps.traceManager) {
+          this.deps.traceManager.endTrace(runId);
+        }
+
+        return {
+          runId,
+          conversationId,
+          assistantMessageId: result.messageId,
+          status: "completed",
+          artifacts: result.artifacts,
+          toolCalls: result.toolCalls,
+        };
+      } catch (error) {
+        if (signal.aborted) {
+          await this.deps.runStateManager.markCancelled(runId, "aborted by user");
+          this.deps.eventBus.emit(
+            "agent.run.cancelled",
+            { runId, reason: "aborted by user" },
+            { runId, conversationId },
+          );
+          this.cleanupGrants(runId);
+          this._cleanupPlanVersion(runId);
+          return {
+            runId,
+            conversationId,
+            status: "cancelled",
+            artifacts: [],
+            toolCalls: [],
+          };
+        }
+        // Streaming failed — fall through to old safety + execution path.
+        // The safety checks (sandbox, permission, scope) below ensure
+        // tool calls are validated before reaching executeToolDecision.
+        // The same assistantMessageId is passed to the fallback path so
+        // the frontend only sees one assistant message.
+      }
+    }
+
     const deniedToolCalls = new Set<string>();
 
     for (const tc of decision.toolCalls) {
@@ -390,8 +650,37 @@ export class AgentLoopEngine {
         id: tc.id, skillId: tc.skillId, name: tc.name,
         status: "failed" as const,
         summary: `[SAFETY_DENIED] ${tc.name} was blocked`,
-        metadata: { safety: (tc.metadata as Record<string, unknown>)?.["safety"], trust: "untrusted" as const, blocked: true },
+        blocked: true as const,
+        trust: "untrusted" as const,
+        metadata: { safety: (tc.metadata as Record<string, unknown>)?.["safety"] },
       }));
+
+      // Persist denied tool calls for auditability (§P0-3)
+      // Use create() not updateStatus() — these records don't exist yet since
+      // the ExecutionOrchestrator never ran them.
+      if (this.deps.toolCalls) {
+        for (const tc of decision.toolCalls) {
+          const safetyMeta = (tc.metadata as Record<string, unknown>)?.["safety"];
+          this.deps.toolCalls.create({
+            id: tc.id,
+            runId,
+            skillId: tc.skillId,
+            name: tc.name,
+            arguments: tc.arguments,
+            status: "failed",
+            riskLevel: tc.riskLevel,
+            metadata: {
+              ...(tc.metadata ?? {}),
+              safety_denied: true,
+              deniedBy: (safetyMeta as Record<string, unknown>)?.["deniedBy"] ?? "safety_policy",
+              blocked: true,
+              trust: "untrusted",
+            },
+            startedAt: new Date().toISOString(),
+          }).catch(() => { /* best effort */ });
+        }
+      }
+
       const safetyObservation: AgentObservation = {
         runId, toolCalls: deniedSummaries, artifacts: [],
         summary: `Safety denied ${deniedToolCalls.size} tool(s): ${deniedSummaries.map((d) => d.skillId).join(", ")}`,
@@ -402,7 +691,7 @@ export class AgentLoopEngine {
         { context, intent, plan, observation: safetyObservation, taskState: taskState ?? emptyTaskState() },
         signal,
       );
-      return this.respondAfterReflection(input, context, intent, plan, safetyObservation, reflectResult, signal);
+      return this.respondAfterReflection(input, context, intent, plan, safetyObservation, reflectResult, signal, assistantMessageId);
     }
 
     // Build safe decision without denied calls
@@ -422,7 +711,7 @@ export class AgentLoopEngine {
     }
 
     return this.executeToolDecision(
-      input, context, intent, plan, safeDecision, signal, iteration, accumulatedObservation, taskState,
+      input, context, intent, plan, safeDecision, signal, iteration, accumulatedObservation, taskState, assistantMessageId,
     );
   }
 
@@ -438,7 +727,7 @@ export class AgentLoopEngine {
 
     await this.deps.runStateManager.markStatus(runId, "responding");
     const response = await this.deps.responseComposer.composeDirect(
-      { input, context, intent, plan },
+      { input, context, intent, plan, modelId: input.modelId },
       signal,
     );
 
@@ -560,6 +849,8 @@ export class AgentLoopEngine {
         { runId, reason: "aborted by user" },
         { runId, conversationId },
       );
+      this.cleanupGrants(runId);
+      this._cleanupPlanVersion(runId);
       return {
         runId,
         conversationId,
@@ -596,6 +887,8 @@ export class AgentLoopEngine {
       { runId, conversationId },
     );
 
+    this.cleanupGrants(runId);
+    this._cleanupPlanVersion(runId);
     return {
       runId,
       conversationId,
@@ -809,14 +1102,42 @@ export class AgentLoopEngine {
         ],
       };
 
-      return await this.executeToolDecision(
+      // Restore plan from snapshot if available (§P0-2: evidence chain continuity)
+      let resumePlan: AgentPlan | undefined;
+      if (this.deps.planSnapshotRepo) {
+        try {
+          const snapshots = await this.deps.planSnapshotRepo.listByRunId(run.runId);
+          const latest = snapshots[snapshots.length - 1];
+          if (latest) {
+            resumePlan = latest.planJson as unknown as AgentPlan | undefined;
+            // Restore version counter so resumed snapshots continue numbering (§P0-2)
+            if (!this._planRevisionCounts) {
+              this._planRevisionCounts = new Map();
+            }
+            this._planRevisionCounts.set(run.runId, latest.version);
+          }
+        } catch {
+          // Best effort — continue without plan
+        }
+      }
+
+      // Resume trace for approval continuation (§P0-2)
+      if (this.deps.traceManager) {
+        this.deps.traceManager.startTrace(run.runId, run.conversationId);
+      }
+
+      const result = await this.executeToolDecision(
         input,
         context,
         intent,
-        undefined,
+        resumePlan,
         decision,
         signal,
       );
+      if (this.deps.traceManager) {
+        this.deps.traceManager.endTrace(run.runId);
+      }
+      return result;
     } catch (error) {
       if (signal.aborted) {
         await this.deps.runStateManager.markCancelled(
@@ -828,6 +1149,9 @@ export class AgentLoopEngine {
           { runId: run.runId, reason: "aborted by user" },
           { runId: run.runId, conversationId },
         );
+        if (this.deps.traceManager) {
+          this.deps.traceManager.endTrace(run.runId);
+        }
         return {
           runId: run.runId,
           conversationId,
@@ -862,6 +1186,9 @@ export class AgentLoopEngine {
         },
         { runId: run.runId, conversationId },
       );
+      if (this.deps.traceManager) {
+        this.deps.traceManager.endTrace(run.runId);
+      }
       return {
         runId: run.runId,
         conversationId,
@@ -946,8 +1273,12 @@ export class AgentLoopEngine {
     iteration = 1,
     accumulatedObservation?: AgentObservation,
     taskState?: AgentTaskState,
+    messageId?: string,
   ): Promise<AgentLoopResult> {
     const { runId, conversationId } = input;
+
+    // ── Tool execution span (§P1-5) ──
+    const execSpan = this._startSpan(runId, "tool_executing");
 
     await this.deps.runStateManager.markStatus(runId, "executing");
     const latestObservation = await this.deps.executionOrchestrator.execute(
@@ -982,6 +1313,16 @@ export class AgentLoopEngine {
         // Best effort — non-blocking
       });
 
+    // End execution span with tool call metrics (§P1-5)
+    const execToolFailures = observation.toolCalls.filter((tc) => tc.status !== "completed").length;
+    execSpan?.endSpan(
+      `Executed ${observation.toolCalls.length} tools (${execToolFailures} failures), ${observation.artifacts.length} artifacts`,
+      {
+        toolCalls: observation.toolCalls.length,
+        toolFailures: execToolFailures,
+      },
+    );
+
     // ── Injection scan on latest execution results (§P0-3) ───────────
     if (this.deps.injectionDetector) {
       for (const tc of latestObservation.toolCalls) {
@@ -1005,8 +1346,13 @@ export class AgentLoopEngine {
       }
     }
 
+    // ── Reflection span (§P1-5) ──
+    const reflectSpan = this._startSpan(runId, "reflecting");
+
     await this.deps.runStateManager.markStatus(runId, "reflecting");
-    const reflection = await this.deps.reflectionEngine.reflect(
+    let reflection: AgentReflection;
+    try {
+      reflection = await this.deps.reflectionEngine.reflect(
       {
         context,
         intent,
@@ -1015,6 +1361,14 @@ export class AgentLoopEngine {
         taskState: updatedTaskState,
       },
       signal,
+    );
+    } catch (err) {
+      reflectSpan?.endSpan("Reflection failed", { errorCode: "REFLECTION_FAILED" }, String(err));
+      throw err;
+    }
+    reflectSpan?.endSpan(
+      `Reflection: goalAchieved=${reflection.goalAchieved}, nextAction=${reflection.nextAction}`,
+      { modelCalls: 1 },
     );
 
     // Apply max-iterations stop reason when the loop is forced to stop
@@ -1037,6 +1391,77 @@ export class AgentLoopEngine {
       !reflection.goalAchieved &&
       iteration < MAX_TOOL_ITERATIONS
     ) {
+      // ── Replan (§P0-2): revise the plan based on execution outcome ──
+      let currentPlan = plan;
+      if (this.deps.replanner && plan) {
+        const trigger = inferReplanTrigger(
+          observation,
+          reflection,
+          iteration,
+          MAX_TOOL_ITERATIONS,
+        );
+        if (trigger) {
+          try {
+            const result = await this.deps.replanner.replan({
+              trigger,
+              originalPlan: plan,
+              context,
+              observation,
+              reflection,
+              iteration,
+              maxIterations: MAX_TOOL_ITERATIONS,
+            });
+            if (result.changed) {
+              // Emit plan revision event
+              this.deps.eventBus.emit(
+                "agent.plan.revised",
+                {
+                  runId,
+                  planId: result.plan.id,
+                  originalPlanId: plan.id,
+                  summary: result.summary,
+                  addedSteps: result.addedSteps.length,
+                  removedSteps: result.removedSteps.length,
+                  modifiedSteps: result.modifiedSteps.length,
+                },
+                { runId, conversationId },
+              );
+
+              // Persist revised plan snapshot (§P0-2)
+              if (this.deps.planSnapshotRepo) {
+                const version = this._nextPlanVersion(runId);
+                try {
+                  await this.deps.planSnapshotRepo.create({
+                    id: crypto.randomUUID(),
+                    runId,
+                    planId: result.plan.id,
+                    version,
+                    eventType: "agent.plan.revised",
+                    planJson: result.plan as unknown as Record<string, unknown>,
+                    diffSummary: result.summary,
+                    trigger,
+                    addedSteps: result.addedSteps.length,
+                    removedSteps: result.removedSteps.length,
+                    modifiedSteps: result.modifiedSteps.length,
+                  });
+                  await this.deps.planSnapshotRepo.updateRunPlanState(
+                    runId,
+                    result.plan as unknown as Record<string, unknown>,
+                    version,
+                  );
+                } catch {
+                  // Best effort
+                }
+              }
+
+              currentPlan = result.plan;
+            }
+          } catch {
+            // Replan failure is not fatal — continue with original plan
+          }
+        }
+      }
+
       // Pass reflection's next-tool suggestions as priority skills.
       // The ToolDecisionEngine tries these first before falling back
       // to normal candidate matching, giving reflection a stronger
@@ -1046,7 +1471,7 @@ export class AgentLoopEngine {
         input,
         nextContext,
         intent,
-        plan,
+        currentPlan,
         signal,
         observation,
         reflection.nextToolCandidates,
@@ -1058,7 +1483,7 @@ export class AgentLoopEngine {
             input,
             nextContext,
             intent,
-            plan,
+            currentPlan,
             nextDecision,
             signal,
             iteration + 1,
@@ -1075,11 +1500,24 @@ export class AgentLoopEngine {
       }
     }
 
+    // ── Response composition span (§P1-5) ──
+    const respSpan = this._startSpan(runId, "responding");
+
     await this.deps.runStateManager.markStatus(runId, "responding");
 
-    const response = await this.deps.responseComposer.composeFromObservation(
-      { input, context, observation, reflection: effectiveReflection },
-      signal,
+    let response: Awaited<ReturnType<typeof this.deps.responseComposer.composeFromObservation>>;
+    try {
+      response = await this.deps.responseComposer.composeFromObservation(
+        { input, context, observation, reflection: effectiveReflection, messageId, modelId: input.modelId },
+        signal,
+      );
+    } catch (err) {
+      respSpan?.endSpan("Response composition failed", { errorCode: "RESPONSE_COMPOSE_FAILED" }, String(err));
+      throw err;
+    }
+    respSpan?.endSpan(
+      `Response composed: messageId=${response.messageId}`,
+      { modelCalls: 1 },
     );
 
     this.deps.eventBus.emit(
@@ -1201,17 +1639,19 @@ export class AgentLoopEngine {
     observation: AgentObservation,
     reflection: AgentReflection,
     signal: AbortSignal,
+    messageId?: string,
   ): Promise<AgentLoopResult> {
     const { runId, conversationId } = input;
     await this.deps.runStateManager.markStatus(runId, "responding");
     const response = await this.deps.responseComposer.composeFromObservation(
-      { input, context, observation, reflection },
+      { input, context, observation, reflection, messageId, modelId: input.modelId },
       signal,
     );
     if (this.deps.traceManager) {
       this.deps.traceManager.endTrace(runId);
     }
     this.cleanupGrants(runId);
+    this._cleanupPlanVersion(runId);
     return {
       runId, conversationId,
       assistantMessageId: response.messageId,
@@ -1463,4 +1903,44 @@ function validateSandbox(
 /** Create an empty task state for initial safety-denial reflection. */
 function emptyTaskState(): AgentTaskState {
   return { goal: "", completedSteps: [], pendingSteps: [], gatheredFacts: {}, openQuestions: [], iteration: 1 };
+}
+
+/** Infer the appropriate replan trigger from observation and reflection state (§P0-2). */
+function inferReplanTrigger(
+  observation: AgentObservation,
+  reflection: AgentReflection,
+  iteration: number,
+  maxIterations: number,
+): import("./planning/replanner.js").ReplanTrigger | null {
+  // Safety denials take highest priority — tools blocked by sandbox/injection (§P0-3)
+  const safetyDenied = observation.toolCalls.filter(
+    (tc) => {
+      const meta = (tc as unknown as Record<string, unknown>);
+      return meta.blocked === true;
+    },
+  );
+  if (safetyDenied.length > 0) return "safety_denied";
+
+  // Tool failures
+  const failedTools = observation.toolCalls.filter(
+    (tc) => tc.status === "failed" || tc.status === "timeout",
+  );
+  if (failedTools.length > 0) return "tool_failed";
+
+  // Missing parameters from reflection
+  if (reflection.missingInfo && reflection.missingInfo.length > 0) {
+    return "missing_parameters";
+  }
+
+  // Tool results were insufficient
+  if (!reflection.goalAchieved && observation.toolCalls.every((tc) => tc.status === "completed")) {
+    return "tool_result_insufficient";
+  }
+
+  // Approaching max iterations — summarize remaining work
+  if (iteration >= maxIterations - 1) {
+    return "max_iterations_approaching";
+  }
+
+  return null;
 }

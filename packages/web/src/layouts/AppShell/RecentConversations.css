@@ -9,26 +9,46 @@
 
 .recent-title {
   cursor: pointer;
-  margin-bottom: 6px;
-  margin-top: 10px;
-  padding: 4px 6px;
+  margin-bottom: 8px;
+  margin-top: 12px;
+  padding: 8px 10px;
   border-radius: 6px;
   user-select: none;
-  font-size: 14px;
+  font-size: 17px;
+  font-weight: 550;
 }
-
 .recent-title:hover {
   background: var(--sp-surface-soft);
 }
-
 .recent-title:first-child {
   margin-top: 0;
 }
 
+/* ── Time group label ───────────────────────────────────────── */
+
+.recent-time-group {
+  margin-bottom: 4px;
+}
+
+.recent-time-group__label {
+  display: block;
+  font-size: 14px;
+  font-weight: 550;
+  color: var(--sp-subtle);
+  padding: 3px 8px 5px;
+  text-transform: none;
+  letter-spacing: 0.2px;
+}
+
+/* ── Conversation items ──────────────────────────────────────── */
+
 .recent-item {
   justify-content: flex-start !important;
-  font-size: 15px;
-  padding: 4px 8px;
+  font-size: 18px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  font-weight: 450;
+  transition: all 0.15s ease;
 }
 
 /* Force single-line ellipsis on the button's text span */
@@ -40,7 +60,12 @@
   text-align: left;
 }
 
+.recent-item:hover {
+  background: var(--sp-surface-soft);
+}
+
 .recent-item--active {
-  background: #f1f5f9 !important;
-  border-radius: 8px;
+  background: var(--sp-blue-soft) !important;
+  color: var(--sp-blue-hover) !important;
+  font-weight: 550;
 }

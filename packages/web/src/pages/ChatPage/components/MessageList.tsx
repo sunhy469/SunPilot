@@ -1,7 +1,7 @@
 import { memo } from "react";
 import { Spin } from "antd";
 import type { ChatMessage } from "../../../features/conversations/types";
-import type { ChatViewState } from "../types";
+import type { ChatViewState, LocalSendState } from "../types";
 import { useAutoScroll } from "../hooks/useAutoScroll";
 import { UserMessage } from "./UserMessage";
 import { AssistantMessage } from "./AssistantMessage";
@@ -13,9 +13,13 @@ const MemoAssistantMessage = memo(AssistantMessage);
 export function MessageList({
   messages,
   status,
+  sendState,
+  toolName,
 }: {
   messages: ChatMessage[];
   status: ChatViewState;
+  sendState?: LocalSendState;
+  toolName?: string | null;
 }) {
   const isStreaming = status === "streaming";
   const scrollRef = useAutoScroll([messages, status], isStreaming);
@@ -45,6 +49,8 @@ export function MessageList({
                 message={message}
                 isStreaming={isLastAssistant}
                 cards={message.cards}
+                sendState={isLast ? sendState : undefined}
+                toolName={isLast ? (toolName ?? undefined) : undefined}
               />
             );
           }

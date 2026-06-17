@@ -33,7 +33,7 @@ export class PostgresConversationRepository implements ConversationRepository {
   async list(
     input: ListConversationsInput = {},
   ): Promise<ConversationRecord[]> {
-    const limit = Math.max(1, Math.min(input.limit ?? 50, 200));
+    const limit = Math.max(1, Math.min(Number(input.limit ?? 50), 200));
     const cursor = decodeConversationCursor(input.cursor);
     const result = cursor
       ? await this.pool.query(

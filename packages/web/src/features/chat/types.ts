@@ -9,11 +9,15 @@ export interface AttachmentRef {
   checksum?: string;
 }
 
+export type ChatModelId = "dp" | "seed";
+
 export interface ChatSendParams {
   conversationId?: string;
   message: string;
   mode?: "chat" | "agent";
   permissionMode?: "ask" | "auto" | "full";
+  /** User-selected chat model. When unset, the default model is used. */
+  modelId?: ChatModelId;
   clientRequestId?: string;
   attachments?: AttachmentRef[];
 }
