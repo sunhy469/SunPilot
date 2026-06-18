@@ -1,25 +1,18 @@
-import type { RichCardView } from "../../rich-cards";
-
-export interface AgentActivity {
-  id: string;
-  kind: "thinking" | "tool" | "model" | "result" | "error";
-  label: string;
-  detail?: string;
-  status?: "running" | "completed" | "failed";
-  createdAt: string;
-}
-
-export interface Conversation {
-  id: string;
-  title?: string;
-  status: "active" | "archived";
-  kind?: "project" | "chat";
-  pinned?: boolean;
-  createdAt: string;
-  updatedAt: string;
-}
-
-// ── Content-block message parts (§Phase 1 of streaming refactoring) ──
+/**
+ * AssistantMessagePart — canonical content-block types.
+ *
+ * These are the authoritative definitions for the interleaved text +
+ * tool status streaming model (§Phase 1+2 of streaming refactoring).
+ *
+ * Consumers:
+ *   - packages/core   → imports from @sunpilot/protocol
+ *   - packages/daemon → imports from @sunpilot/protocol
+ *   - packages/web    → has its own copy (no @sunpilot/protocol dep yet)
+ *
+ * When updating these types, keep web's copy in
+ *   packages/web/src/features/conversations/types.ts
+ * in sync.
+ */
 
 export type AssistantMessagePart =
   | AssistantTextPart
@@ -84,28 +77,4 @@ export interface AssistantErrorPart {
   code?: string;
   recoverable?: boolean;
   createdAt: string;
-}
-
-export interface ChatMessage {
-  id: string;
-  conversationId: string;
-  role: "system" | "user" | "assistant";
-  content: string;
-  createdAt: string;
-  /** Transient UI status for local optimistic updates (pending/streaming/completed). */
-  status?: "pending" | "streaming" | "completed" | "error" | "stopped";
-  /** Content-block parts for interleaved text + tool status rendering (§Phase 1). */
-  parts?: AssistantMessagePart[];
-  /** Legacy event timeline — being replaced by parts. */
-  activities?: AgentActivity[];
-  cards?: RichCardView[];
-  attachments?: Array<{
-    id: string;
-    name: string;
-    type: string;
-    sizeBytes?: number;
-    url?: string;
-    dataUrl?: string;
-    storageKey?: string;
-  }>;
 }

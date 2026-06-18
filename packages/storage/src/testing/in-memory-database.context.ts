@@ -19,6 +19,7 @@ import type {
   ConversationRecord,
   CreateConversationInput,
   ListConversationsInput,
+  UpdateConversationPatch,
 } from "../repositories/conversation.repository.js";
 import type {
   CreateMessageInput,
@@ -60,6 +61,16 @@ function byUpdatedAtDesc<T extends { updatedAt: string }>(
   return right.updatedAt.localeCompare(left.updatedAt);
 }
 
+function byPinnedAndUpdatedAtDesc<T extends { pinned?: boolean; updatedAt: string }>(
+  left: T,
+  right: T,
+): number {
+  const lp = left.pinned ? 1 : 0;
+  const rp = right.pinned ? 1 : 0;
+  if (rp !== lp) return rp - lp;
+  return right.updatedAt.localeCompare(left.updatedAt);
+}
+
 export class InMemoryDatabaseContext implements DatabaseContext {
   private readonly conversationRecords = new Map<string, ConversationRecord>();
   private readonly messageRecords = new Map<string, MessageRecord[]>();
@@ -87,6 +98,7 @@ export class InMemoryDatabaseContext implements DatabaseContext {
         title: input.title,
         status: "active",
         kind: input.kind ?? "chat",
+        pinned: false,
         createdAt: now,
         updatedAt: now,
       };
@@ -100,7 +112,7 @@ export class InMemoryDatabaseContext implements DatabaseContext {
       input: ListConversationsInput = {},
     ): Promise<ConversationRecord[]> =>
       [...this.conversationRecords.values()]
-        .sort(byUpdatedAtDesc)
+        .sort(byPinnedAndUpdatedAtDesc)
         .filter((conversation) =>
           isAfterDescendingCursor(
             { updatedAt: conversation.updatedAt, id: conversation.id },
@@ -116,6 +128,21 @@ export class InMemoryDatabaseContext implements DatabaseContext {
           updatedAt: new Date().toISOString(),
         });
     },
+    update: async (
+      id: string,
+      patch: { title?: string; pinned?: boolean },
+    ): Promise<ConversationRecord | null> => {
+      const conversation = this.conversationRecords.get(id);
+      if (!conversation) return null;
+      const updated = {
+        ...conversation,
+        ...(patch.title !== undefined ? { title: patch.title } : {}),
+        ...(patch.pinned !== undefined ? { pinned: patch.pinned } : {}),
+        updatedAt: new Date().toISOString(),
+      };
+      this.conversationRecords.set(id, updated);
+      return updated;
+    },
     delete: async (id: string): Promise<boolean> => {
       const deleted = this.conversationRecords.delete(id);
       this.messageRecords.delete(id);
@@ -126,12 +153,18 @@ export class InMemoryDatabaseContext implements DatabaseContext {
   readonly messages = {
     create: async (input: CreateMessageInput): Promise<MessageRecord> => {
       const now = new Date().toISOString();
+      // §5.3: Store attachments in metadata so they survive the persist→restore round-trip.
+      // Mirrors PostgresMessageRepository behavior where attachments are stored in JSONB metadata.
+      const metadata = {
+        ...(input.metadata ?? {}),
+        ...(input.attachments?.length ? { attachments: input.attachments } : {}),
+      };
       const message: MessageRecord = {
         id: input.id ?? `msg_${crypto.randomUUID()}`,
         conversationId: input.conversationId,
         role: input.role,
         content: input.content,
-        metadata: input.metadata ?? {},
+        metadata,
         createdAt: now,
       };
       this.messageRecords.set(input.conversationId, [

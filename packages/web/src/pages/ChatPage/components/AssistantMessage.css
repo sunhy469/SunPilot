@@ -7,11 +7,11 @@
 .assistant-content {
   flex: 1;
   min-width: 0;
-  background: var(--sp-surface);
-  border: 1px solid var(--sp-border-soft);
-  border-radius: var(--sp-radius-md);
-  padding: 18px 22px;
-  box-shadow: var(--sp-shadow-card);
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  padding: 4px 10px 6px;
+  box-shadow: none;
 }
 
 /* ── AI status indicator ─────────────────────────────────── */
@@ -32,8 +32,13 @@
 }
 
 @keyframes pulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.5; }
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.5;
+  }
 }
 
 .assistant-text {
@@ -48,12 +53,74 @@
   /* Allow blocks like code/pre inside the card to breathe */
 }
 
+/* ── Agent activity timeline ───────────────────────────────── */
+
+.assistant-activity-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid var(--sp-border-soft);
+}
+
+.assistant-activity {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  gap: 8px;
+  align-items: start;
+  color: var(--sp-muted);
+}
+
+.assistant-activity__icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  margin-top: 2px;
+  font-size: 12px;
+  color: var(--sp-blue);
+}
+
+.assistant-activity--running .assistant-activity__icon {
+  animation: pulse 1.5s ease-in-out infinite;
+}
+
+.assistant-activity--completed .assistant-activity__icon {
+  color: #16a34a;
+}
+
+.assistant-activity--failed .assistant-activity__icon {
+  color: #dc2626;
+}
+
+.assistant-activity__body {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.assistant-activity__label {
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--sp-ink);
+}
+
+.assistant-activity__detail {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
 /* ── Action row (copy / like / dislike / time) ────────────── */
 
 .assistant-actions {
   margin-top: 12px;
   padding-top: 8px;
-  border-top: 1px solid var(--sp-border-soft);
+  border-top: 1px solid rgba(148, 163, 184, 0.18);
 }
 
 .assistant-actions .ant-btn-text {
@@ -76,11 +143,177 @@
     margin-bottom: 24px;
   }
   .assistant-content {
-    padding: 14px 16px;
-    border-radius: var(--sp-radius-sm);
+    padding: 2px 4px 4px;
   }
   .assistant-text {
     font-size: 14px;
     line-height: 1.65;
   }
+}
+
+/* ── Content-block parts (§Phase 4) ────────────────────────── */
+
+.assistant-parts {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* Status block (interleaved tool status) */
+
+.assistant-status-block {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 0;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.assistant-status-block__icon {
+  font-size: 12px;
+  flex-shrink: 0;
+}
+
+.assistant-status-block--running .assistant-status-block__icon {
+  color: var(--sp-blue);
+  animation: pulse 1.5s ease-in-out infinite;
+}
+
+.assistant-status-block--completed .assistant-status-block__icon {
+  color: #16a34a;
+}
+
+.assistant-status-block--failed .assistant-status-block__icon {
+  color: #dc2626;
+}
+
+.assistant-status-block__label {
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.assistant-status-block__progress {
+  font-size: 12px;
+  color: var(--sp-muted);
+  margin-left: auto;
+}
+
+/* Completed status collapses to a compact gray row (§Frontend gap) */
+
+.assistant-status-block--collapsed {
+  opacity: 0.6;
+  transition: opacity 0.15s ease;
+}
+
+.assistant-status-block--collapsed:hover {
+  opacity: 0.85;
+}
+
+.assistant-status-block__collapsed-label {
+  font-size: 12px;
+  color: var(--sp-muted);
+  user-select: none;
+}
+
+/* Tool use (collapsed by default) */
+
+.assistant-tool-use {
+  padding: 2px 0;
+}
+
+.assistant-tool-use__header {
+  font-size: 13px;
+  user-select: none;
+}
+
+.assistant-tool-use__icon {
+  font-size: 12px;
+  color: var(--sp-muted);
+}
+
+.assistant-tool-use__name {
+  font-size: 13px;
+}
+
+.assistant-tool-use__args {
+  margin-top: 4px;
+  margin-left: 22px;
+  padding: 6px 8px;
+  background: var(--sp-surface-soft, #f8fafc);
+  border-radius: 4px;
+  font-size: 12px;
+  border: 1px solid rgba(148, 163, 184, 0.18);
+}
+
+.assistant-tool-use__arg {
+  display: flex;
+  gap: 4px;
+}
+
+.assistant-tool-use__arg-key {
+  flex-shrink: 0;
+  font-weight: 500;
+}
+
+.assistant-tool-use__arg-value {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Tool result (collapsed by default) */
+
+.assistant-tool-result {
+  padding: 2px 0;
+}
+
+.assistant-tool-result__header {
+  font-size: 13px;
+  user-select: none;
+}
+
+.assistant-tool-result__icon {
+  font-size: 12px;
+  color: #16a34a;
+  flex-shrink: 0;
+}
+
+.assistant-tool-result__summary {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+}
+
+.assistant-tool-result__detail {
+  margin-top: 4px;
+  margin-left: 22px;
+  padding: 6px 8px;
+  background: var(--sp-surface-soft, #f8fafc);
+  border-radius: 4px;
+  font-size: 12px;
+  border: 1px solid rgba(148, 163, 184, 0.18);
+}
+
+/* Error block */
+
+.assistant-error-block {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 4px 0;
+  font-size: 13px;
+}
+
+.assistant-error-block__icon {
+  font-size: 12px;
+  color: #dc2626;
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+
+.assistant-error-block__message {
+  font-size: 13px;
+  line-height: 1.45;
 }

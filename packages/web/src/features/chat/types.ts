@@ -4,8 +4,10 @@ export interface AttachmentRef {
   type: string;
   sizeBytes?: number;
   url?: string;
+  /** Base64-encoded data URL as fallback when no public URL is available. */
+  dataUrl?: string;
   storageKey?: string;
-  provider?: "aliyun-oss" | "s3" | "minio";
+  provider?: "aliyun-oss" | "s3" | "minio" | "local";
   checksum?: string;
 }
 
@@ -303,6 +305,54 @@ export type AgentUiEvent = AgentSocketEnvelopeMetadata &
           memoryId: string;
           type?: string;
           scope?: string;
+        };
+      }
+    // ── Message content-block events (§Phase 1) ──────────────
+    | {
+        method: "agent.message.started";
+        params: {
+          runId: string;
+          conversationId: string;
+          messageId: string;
+        };
+      }
+    | {
+        method: "agent.message.part.started";
+        params: {
+          runId: string;
+          conversationId: string;
+          messageId: string;
+          part: Record<string, unknown>;
+        };
+      }
+    | {
+        method: "agent.message.part.delta";
+        params: {
+          runId: string;
+          conversationId: string;
+          messageId: string;
+          partId: string;
+          delta: string;
+        };
+      }
+    | {
+        method: "agent.message.part.updated";
+        params: {
+          runId: string;
+          conversationId: string;
+          messageId: string;
+          partId: string;
+          patch: Record<string, unknown>;
+        };
+      }
+    | {
+        method: "agent.message.completed";
+        params: {
+          runId?: string;
+          conversationId?: string;
+          messageId: string;
+          content: string;
+          parts: Array<Record<string, unknown>>;
         };
       }
   );

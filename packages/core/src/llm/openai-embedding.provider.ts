@@ -1,5 +1,9 @@
 import type { EmbeddingProvider } from "../agent-kernel/context/llm-embedding-service.js";
-import { DEFAULT_LLM_BASE_URL, DEEPSEEK_API_KEY_ENV, LLM_API_KEY_ENV } from "./llm.config.js";
+import {
+  DEFAULT_LLM_BASE_URL,
+  DEEPSEEK_API_KEY_ENV,
+  LLM_API_KEY_ENV,
+} from "./llm.config.js";
 import type { FetchLike } from "./llm.types.js";
 
 interface EmbeddingResponse {
@@ -51,7 +55,7 @@ export class OpenAICompatibleEmbeddingProvider implements EmbeddingProvider {
 
   async embed(text: string): Promise<number[]> {
     const response = await this.fetchImpl(
-      new URL("/embeddings", this.baseUrl).toString(),
+      new URL("embeddings", this.baseUrl).toString(),
       {
         method: "POST",
         headers: {
@@ -76,14 +80,16 @@ export class OpenAICompatibleEmbeddingProvider implements EmbeddingProvider {
     const json = (await response.json()) as EmbeddingResponse;
     const embedding = json.data?.[0]?.embedding;
     if (!embedding || embedding.length === 0) {
-      throw new Error("Embedding API returned empty or missing embedding vector.");
+      throw new Error(
+        "Embedding API returned empty or missing embedding vector.",
+      );
     }
     return embedding;
   }
 
   async embedBatch(texts: string[]): Promise<number[][]> {
     const response = await this.fetchImpl(
-      new URL("/embeddings", this.baseUrl).toString(),
+      new URL("embeddings", this.baseUrl).toString(),
       {
         method: "POST",
         headers: {

@@ -1,5 +1,94 @@
 import type { AgentEventType } from "@sunpilot/protocol";
 
+// ── Content-block message parts (§Phase 1+2 of streaming refactoring) ─
+// Canonical types now live in @sunpilot/protocol (§P2-1).
+
+import type {
+  AssistantMessagePart,
+  AssistantTextPart,
+  AssistantStatusPart,
+  AssistantToolUsePart,
+  AssistantToolResultPart,
+  AssistantErrorPart,
+} from "@sunpilot/protocol";
+
+export type {
+  AssistantMessagePart,
+  AssistantTextPart,
+  AssistantStatusPart,
+  AssistantToolUsePart,
+  AssistantToolResultPart,
+  AssistantErrorPart,
+};
+
+/** Save a completed assistant message with metadata. */
+export type SaveMessageFn = (msg: {
+  id: string;
+  conversationId: string;
+  role: "assistant";
+  content: string;
+  runId: string;
+  metadata?: Record<string, unknown>;
+}) => Promise<void>;
+
+/**
+ * Opaque interface for AssistantMessageStream to avoid circular
+ * dependency between loop-types.ts and assistant-message-stream.ts.
+ */
+export interface IAssistantMessageStream {
+  readonly runId: string;
+  readonly conversationId: string;
+  readonly messageId: string;
+  start(): void;
+  startTextPart(): AssistantTextPart;
+  appendText(partId: string, delta: string): void;
+  completeTextPart(partId: string): void;
+  startStatus(input: {
+    label: string;
+    toolCallId?: string;
+    metadata?: AssistantStatusPart["metadata"];
+  }): AssistantStatusPart;
+  updateStatus(
+    partId: string,
+    patch: Partial<Pick<AssistantStatusPart, "label" | "status"> & {
+      completedAt: string;
+      metadata: AssistantStatusPart["metadata"];
+    }>,
+  ): void;
+  addToolUse(input: {
+    toolCallId: string;
+    skillId: string;
+    name: string;
+    inputPreview?: Record<string, unknown>;
+  }): AssistantToolUsePart;
+  /** Update a tool_use part's status (pending → running → completed/failed) (§P1-3). */
+  updateToolUse(
+    toolCallId: string,
+    patch: Pick<Partial<AssistantToolUsePart>, "status">,
+  ): void;
+  addToolResult(input: {
+    toolCallId: string;
+    skillId: string;
+    summary: string;
+    artifactIds?: string[];
+    trust?: "trusted" | "untrusted";
+  }): AssistantToolResultPart;
+  addError(input: {
+    message: string;
+    code?: string;
+    recoverable?: boolean;
+  }): AssistantErrorPart;
+  /** §Step 1b: Snapshot current parts without completing. */
+  getPartsSnapshot(): AssistantMessagePart[];
+  /** Set rich cards for inline rendering (image/video artifacts). */
+  setRichCards(cards: Array<{ type: string; title?: string; data: Record<string, unknown> }>): void;
+  complete(): Promise<{
+    messageId: string;
+    content: string;
+    parts: AssistantMessagePart[];
+  }>;
+}
+
 // ── Agent Loop ────────────────────────────────────────────────────────
 
 export type AgentLoopStatus =
@@ -27,10 +116,13 @@ export interface AttachmentRef {
   sizeBytes?: number;
   /** Public access URL or backend-downloadable address. */
   url?: string;
+  /** Base64-encoded data URL as fallback when no public URL is available.
+   *  Limited to 4 MB to avoid overwhelming WebSocket payloads and model context. */
+  dataUrl?: string;
   /** OSS object key for backend record-keeping, deletion, and re-signing. */
   storageKey?: string;
   /** OSS provider identifier. */
-  provider?: "aliyun-oss" | "s3" | "minio";
+  provider?: "aliyun-oss" | "s3" | "minio" | "local";
   /** Optional file checksum for integrity verification. */
   checksum?: string;
 }
@@ -501,6 +593,8 @@ export interface ToolDecisionEngine {
         reason: string;
         argumentsHint?: Record<string, unknown>;
       }>;
+      /** Optional stream for content-block parts emission (§Phase 3). */
+      stream?: IAssistantMessageStream;
     },
     signal: AbortSignal,
   ): Promise<{
@@ -511,6 +605,16 @@ export interface ToolDecisionEngine {
   }>;
 }
 
+/** Progress emitted during tool execution (§P1-4). */
+export interface ToolExecutionProgress {
+  phase: "queued" | "running" | "polling" | "completed";
+  message: string;
+  /** 0-100 progress percentage, when available. */
+  percent?: number;
+  /** External task ID for async/polling operations. */
+  externalTaskId?: string;
+}
+
 export interface ExecutionOrchestrator {
   execute(
     input: {
@@ -519,6 +623,8 @@ export interface ExecutionOrchestrator {
       intent: RoutedIntent;
       plan?: AgentPlan;
       decision: ToolDecision & { type: "use_tool" };
+      /** Optional progress callback for content-block status updates (§P1-4). */
+      onProgress?: (progress: ToolExecutionProgress) => void;
     },
     signal: AbortSignal,
   ): Promise<AgentObservation>;
@@ -560,6 +666,7 @@ export interface ApprovalGate {
       skillId: string;
       arguments: Record<string, unknown>;
       permissions: Permission[];
+      messageId?: string;
     };
   }): Promise<{ id: string; status: string }>;
 
@@ -577,7 +684,9 @@ export interface ApprovalGate {
       arguments: Record<string, unknown>;
       permissions: Permission[];
       toolCallId?: string;
+      messageId?: string;
     };
+    messageId?: string;
   }>;
   reject(
     approvalId: string,
@@ -599,6 +708,11 @@ export interface ResponseComposer {
       intent: RoutedIntent;
       plan?: AgentPlan;
       modelId?: "dp" | "seed";
+      /** Optional stream + textPartId for content-block parts (§P0-1). */
+      stream?: {
+        stream: IAssistantMessageStream;
+        textPartId: string;
+      };
     },
     signal: AbortSignal,
   ): Promise<{

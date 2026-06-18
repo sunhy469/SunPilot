@@ -7,6 +7,11 @@ import type {
   RoutedIntent,
 } from "../loop-types.js";
 import type { SkillSummary } from "./tool-types.js";
+import {
+  extractRequiredFields,
+  findMissingRequired,
+  getAnyOfBranches,
+} from "./tool-schema-utils.js";
 
 // ── Types ────────────────────────────────────────────────────────────────
 
@@ -150,11 +155,17 @@ export class DefaultToolArgumentBuilder implements ToolArgumentBuilder {
 
     // ── Priority 4: Attachments ──────────────────────────────────────────
     if (allAttachments.length > 0) {
+      // Find the best image attachment: prefer one with a URL, then one with dataUrl.
       const imageAttachment = allAttachments.find(
         (a) =>
           Boolean(a.url) &&
           (a.type.startsWith("image/") ||
             /\.(png|jpe?g|webp|gif|bmp|avif)(\?|#|$)/i.test(a.url ?? "")),
+      ) ?? allAttachments.find(
+        (a) =>
+          Boolean(a.dataUrl) &&
+          (a.type.startsWith("image/") ||
+            /\.(png|jpe?g|webp|gif|bmp|avif)(\?|#|$)/i.test(a.name ?? "")),
       );
 
       args.attachments = allAttachments.map((a) => ({
@@ -162,15 +173,30 @@ export class DefaultToolArgumentBuilder implements ToolArgumentBuilder {
         name: a.name,
         type: a.type,
         url: a.url,
+        dataUrl: a.dataUrl,
         storageKey: a.storageKey,
         provider: a.provider,
       }));
       sources.push({ arg: "attachments", source: "attachment" });
 
-      if (imageAttachment?.url) {
-        args.imageUrl = imageAttachment.url;
-        args.image_url = imageAttachment.url;
-        sources.push({ arg: "imageUrl", source: "attachment", ref: imageAttachment.id });
+      if (imageAttachment) {
+        fillImageArguments(args, imageAttachment);
+        if (imageAttachment.url) {
+          sources.push({ arg: "imageUrl", source: "attachment", ref: imageAttachment.id });
+        }
+        if (imageAttachment.dataUrl) {
+          sources.push({ arg: "imageDataUrl", source: "attachment", ref: imageAttachment.id });
+        }
+      }
+
+      // §Attachment fix: If schema requires "url" and no URL was extracted
+      // from message text, populate from the first attachment with a URL.
+      if (requiredFields.includes("url") && args.url === undefined) {
+        const attachmentWithUrl = allAttachments.find((a) => Boolean(a.url));
+        if (attachmentWithUrl?.url) {
+          args.url = attachmentWithUrl.url;
+          sources.push({ arg: "url", source: "attachment", ref: attachmentWithUrl.id });
+        }
       }
     }
 
@@ -327,33 +353,29 @@ export class DefaultToolArgumentBuilder implements ToolArgumentBuilder {
 
   /**
    * Extract required field names from a JSON Schema / capability input schema.
+   * Delegates to the shared `extractRequiredFields` in tool-schema-utils.ts (§5.5).
    */
   private extractRequiredFields(schema?: Record<string, unknown>): string[] {
-    if (!schema) return [];
-    const required = schema.required;
-    if (Array.isArray(required)) {
-      return required.filter((f): f is string => typeof f === "string");
-    }
-    // If no explicit 'required', extract top-level property names
-    const properties = schema.properties;
-    if (properties && typeof properties === "object") {
-      return Object.keys(properties);
-    }
-    return [];
+    return extractRequiredFields(schema);
+  }
+
+  /**
+   * Extract anyOf/oneOf branches from a schema.
+   * Delegates to the shared `getAnyOfBranches` in tool-schema-utils.ts (§5.5).
+   */
+  private getAnyOfBranches(schema: Record<string, unknown>): Array<Record<string, unknown>> {
+    return getAnyOfBranches(schema);
   }
 
   /**
    * Find required fields that are missing or empty in the current arguments.
+   * Delegates to the shared `findMissingRequired` in tool-schema-utils.ts (§5.5).
    */
   private findMissingRequired(
     args: Record<string, unknown>,
     schema?: Record<string, unknown>,
   ): string[] {
-    const required = this.extractRequiredFields(schema);
-    return required.filter((field) => {
-      const value = args[field];
-      return value === undefined || value === null || value === "";
-    });
+    return findMissingRequired(args, schema);
   }
 
   /**
@@ -470,4 +492,25 @@ function extractUrls(text: string): string[] {
     text.matchAll(/https?:\/\/[^\s)）"'<>]+/gi),
     (match) => match[0],
   );
+}
+
+/**
+ * Fill all image-related argument aliases from an AttachmentRef.
+ *
+ * Canonical fields: imageUrl (public URL), imageDataUrl (base64 fallback).
+ * Compat aliases: image_url, image_data_url.
+ */
+function fillImageArguments(
+  args: Record<string, unknown>,
+  image: { url?: string; dataUrl?: string },
+): void {
+  if (image.url) {
+    args.imageUrl = image.url;
+    args.image_url = image.url;
+    if (!args.url) args.url = image.url;
+  }
+  if (image.dataUrl) {
+    args.imageDataUrl = image.dataUrl;
+    args.image_data_url = image.dataUrl;
+  }
 }

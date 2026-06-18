@@ -26,6 +26,9 @@ export function ChatPage() {
     conversations.activeConversationId,
     conversations.setActiveConversationId,
     conversations.setMessages,
+    (conversationId: string) => {
+      void conversations.addConversationById(conversationId);
+    },
   );
 
   const active = conversations.conversations.find(
@@ -46,7 +49,7 @@ export function ChatPage() {
           activePanel={activePanel}
           onNewChat={() => {
             setActivePanel("chat");
-            void conversations.newChat();
+            conversations.newChat();
           }}
           onSelect={(id) => {
             setActivePanel("chat");
@@ -56,6 +59,9 @@ export function ChatPage() {
           onOpenPlugins={() => setActivePanel("plugins")}
           onOpenDebug={() => setActivePanel("debug")}
           onOpenSettings={() => setActivePanel("settings")}
+          onRename={(id, title) => { void conversations.renameConversation(id, title); }}
+          onDeleteConversation={(id) => conversations.deleteConversation(id)}
+          onTogglePin={(id, pinned) => { void conversations.togglePin(id, pinned); }}
         />
       }
     >

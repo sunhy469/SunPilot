@@ -6,6 +6,8 @@ import type {
   AgentContext,
   AgentObservation,
   AgentPlan,
+  AgentPlanStepStatus,
+  AgentReflection,
   AgentTaskState,
   RoutedIntent,
   Permission,
@@ -27,8 +29,8 @@ import type {
 import type { RunStateManager } from "./run-state-manager.js";
 import type { MemoryWriter } from "./memory/memory-types.js";
 import type { PlanValidator } from "./planning/plan-validator.js";
-import type { Replanner } from "./planning/replanner.js";
-import type { ModelRouter } from "./model-router.js";
+import type { Replanner, ReplanTrigger } from "./planning/replanner.js";
+import type { ModelRouter, ModelPurpose } from "./model-router.js";
 import type { TraceManager } from "./trace-manager.js";
 import type { RepositoryTraceManager } from "./trace-persistence.js";
 import type { PromptInjectionDetector } from "./safety/prompt-injection-detector.js";
@@ -196,7 +198,8 @@ export class AgentLoopEngine {
     // §Codex flow: Emit message.started early so the frontend creates
     // the assistant message card immediately, before context/plan/decision.
     // The model starts producing text once the content-block loop begins.
-    // (stream.start() inside runContentBlockLoop will handle the rest.)
+    // (stream.start() inside runContentBlockLoop will handle the rest,
+    // including legacy agent.response.started for backward compat.)
     if (this.deps.saveMessage) {
       this.deps.eventBus.emit("agent.message.started",
         { runId: input.runId, conversationId: input.conversationId, messageId },
@@ -647,15 +650,201 @@ export class AgentLoopEngine {
         };
       }
 
-      // §5.7: runNarrativeLoop fallback removed — streaming failures
-      // are now handled by the stream's error mechanism directly.
-      // No fallback to legacy narrative path.
+      // §Step 3: If streaming failed (e.g. model doesn't support native
+      // tool calling), fall back to the narrative content-block loop
+      // instead of the old final-summary-only path.
+      if (decision.type === "use_tool") {
+        try {
+          return await this.runNarrativeLoop(
+            input,
+            context,
+            intent,
+            plan,
+            decision,
+            messageId,
+            signal,
+          );
+        } catch {
+          // Narrative loop also failed — fall through to error
+        }
+      }
 
       // Complete stream with error
       await stream.complete().catch(() => {
         // Best effort
       });
 
+      throw error;
+    }
+  }
+
+  /**
+   * §Step 3: Fallback narrative content-block loop.
+   *
+   * Used when the model/provider doesn't support native tool calling,
+   * or when executeStreaming() fails. Uses the old execute→reflect→respond
+   * pipeline but wraps each phase in content-block parts:
+   *
+   *   1. Narrative pre-tool text ("I'll check...")
+   *   2. Tool execution with status/tool_use/tool_result parts
+   *   3. Narrative post-tool observation text
+   *   4. Repeat or final response
+   *
+   * This ensures the Codex-style "边做边说" experience even without
+   * native function calling support.
+   */
+  private async runNarrativeLoop(
+    input: AgentLoopInput,
+    context: AgentContext,
+    intent: RoutedIntent,
+    plan: AgentPlan | undefined,
+    decision: ToolDecision & { type: "use_tool" },
+    messageId: string,
+    signal: AbortSignal,
+    iteration = 1,
+    previousObservation?: AgentObservation,
+    taskState?: AgentTaskState,
+  ): Promise<AgentLoopResult> {
+    const { runId, conversationId } = input;
+
+    const stream = new AssistantMessageStream({
+      runId,
+      conversationId,
+      messageId,
+      eventBus: this.deps.eventBus,
+      saveMessage: this.deps.saveMessage!,
+      skipStartedEvents: true,
+    });
+    stream.start();
+
+    try {
+      // §Step 3: Pre-tool narrative — a brief text telling the user what we're doing
+      const preToolText = stream.startTextPart();
+      const toolNames = decision.toolCalls.map((tc) => tc.name).join("、");
+      stream.appendText(preToolText.id, `我先${toolNames}，确认相关信息。`);
+      stream.completeTextPart(preToolText.id);
+
+      // Execute tools with status parts
+      await this.deps.runStateManager.markStatus(runId, "executing");
+      for (const tc of decision.toolCalls) {
+        stream.addToolUse({
+          toolCallId: tc.id,
+          skillId: tc.skillId,
+          name: tc.name,
+        });
+        stream.updateToolUse(tc.id, { status: "running" });
+
+        const statusPart = stream.startStatus({
+          label: `正在调用工具: ${tc.name}`,
+          toolCallId: tc.id,
+          metadata: { skillId: tc.skillId },
+        });
+
+        try {
+          const observation = await this.deps.executionOrchestrator.execute(
+            {
+              runId,
+              context,
+              intent,
+              plan,
+              decision: { type: "use_tool", reason: tc.reason, toolCalls: [tc] },
+            },
+            signal,
+          );
+
+          const ok = observation.toolCalls.every((s) => s.status === "completed");
+          stream.updateStatus(statusPart.id, {
+            status: ok ? "completed" : "failed",
+            label: ok ? `完成: ${tc.name}` : `失败: ${tc.name}`,
+          });
+          stream.updateToolUse(tc.id, {
+            status: ok ? "completed" : "failed",
+          });
+
+          for (const summary of observation.toolCalls) {
+            stream.addToolResult({
+              toolCallId: summary.id,
+              skillId: summary.skillId,
+              summary: summary.summary,
+              trust: summary.status === "completed" ? "trusted" : "untrusted",
+            });
+          }
+        } catch (err) {
+          stream.updateStatus(statusPart.id, {
+            status: "failed",
+            label: `执行失败: ${tc.name}`,
+          });
+          stream.updateToolUse(tc.id, { status: "failed" });
+          stream.addError({
+            message: err instanceof Error ? err.message : String(err),
+            code: "NARRATIVE_TOOL_FAILED",
+            recoverable: true,
+          });
+        }
+      }
+
+      // §Step 3: Post-tool observation — model summarizes what was found
+      await this.deps.runStateManager.markStatus(runId, "responding");
+      const postToolText = stream.startTextPart();
+      const textPartId = postToolText.id;
+      await this.deps.responseComposer.composeDirect(
+        {
+          input,
+          context,
+          intent,
+          plan,
+          modelId: input.modelId,
+          stream: { stream, textPartId },
+        },
+        signal,
+      );
+      stream.completeTextPart(textPartId);
+
+      const completed = await stream.complete();
+
+      await this.deps.runStateManager.markStatus(runId, "completed");
+      this.deps.eventBus.emit(
+        "agent.run.completed",
+        {
+          runId,
+          assistantMessageId: completed.messageId,
+          artifacts: [],
+          toolCalls: decision.toolCalls.length,
+        },
+        { runId, conversationId },
+      );
+
+      return {
+        runId,
+        conversationId,
+        assistantMessageId: completed.messageId,
+        status: "completed",
+        artifacts: [],
+        toolCalls: [],
+      };
+    } catch (error) {
+      if (signal.aborted) {
+        try {
+          stream.startStatus({ label: "已停止", metadata: { phase: "completed" } });
+          const stopText = stream.startTextPart();
+          stream.appendText(stopText.id, "已停止。");
+          stream.completeTextPart(stopText.id);
+        } catch { /* Best effort */ }
+        await stream.complete().catch(() => {});
+        return {
+          runId,
+          conversationId,
+          status: "cancelled",
+          artifacts: [],
+          toolCalls: [],
+        };
+      }
+      stream.addError({
+        message: error instanceof Error ? error.message : String(error),
+        code: "NARRATIVE_LOOP_FAILED",
+        recoverable: false,
+      });
+      await stream.complete().catch(() => {});
       throw error;
     }
   }
@@ -861,13 +1050,7 @@ export class AgentLoopEngine {
   }): Promise<{ id: string; status: string }> {
     if (this.deps.approvalRequestService) {
       const result =
-        await this.deps.approvalRequestService.requestApproval({
-          ...input,
-          requestedAction: {
-            ...input.requestedAction,
-            messageId: input.messageId,
-          },
-        });
+        await this.deps.approvalRequestService.requestApproval(input);
       this.deps.eventBus.publish(result.event);
       return result.approval;
     }
@@ -914,6 +1097,415 @@ export class AgentLoopEngine {
 
   // ── Branch handlers ────────────────────────────────────────────────
 
+  /**
+   * 分支 A：使用工具 — 权限检查 → 审批或执行。
+   *
+   * §P1-3 DEPRECATED as primary execution path. This method is now a
+   * COMPATIBILITY FALLBACK only. The primary path is `runContentBlockLoop`
+   * with LLM native function calling interleaved text + tool parts.
+   *
+   * Remaining call sites (all legacy fallback):
+   *   - runContentBlockLoop: only when saveMessage is unavailable
+   *   - executeToolDecision: old reflect→continue→decideTools→handleUseTool loop
+   */
+  private async handleUseTool(
+    input: AgentLoopInput,
+    context: AgentContext,
+    intent: RoutedIntent,
+    plan: AgentPlan | undefined,
+    decision: ToolDecision & { type: "use_tool" },
+    signal: AbortSignal,
+    iteration = 1,
+    accumulatedObservation?: AgentObservation,
+    taskState?: AgentTaskState,
+  ): Promise<AgentLoopResult> {
+    const { runId, conversationId } = input;
+
+    // ── Generate ONE messageId per run ──
+    // Emit agent.response.started once so the frontend only creates a
+    // single assistant message card. Both the streaming path and the
+    // fallback old path reuse this messageId.
+    const assistantMessageId = `msg_${crypto.randomUUID()}`;
+
+    // ── Streaming path (LLM native function calling) ──
+    // ToolDecisionEngine.executeStreaming() interleaves text + tool calls
+    // in a single LLM-driven loop. On failure, fall through to the
+    // traditional safety + execution path.
+    const canUseStreamingToolLoop =
+      iteration === 1 &&
+      decision.toolCalls.every(
+        (tc) =>
+          !tc.requiresApproval &&
+          tc.riskLevel !== "high" &&
+          tc.riskLevel !== "critical",
+      );
+
+    if (iteration === 1) {
+      // Emit once before either tool path so progress/tool events have an
+      // assistant message to attach to in the UI.
+      this.deps.eventBus.emit(
+        "agent.response.started",
+        { runId, conversationId, messageId: assistantMessageId },
+        { runId, conversationId },
+      );
+    }
+
+    if (canUseStreamingToolLoop) {
+      try {
+        await this.deps.runStateManager.markStatus(runId, "executing");
+        const result = await this.deps.toolDecisionEngine.executeStreaming(
+          {
+            runId,
+            conversationId,
+            context,
+            intent,
+            plan,
+            messageId: assistantMessageId,
+            modelId: input.modelId,
+          },
+          signal,
+        );
+
+        // Legal state path: executing → responding → completed
+        await this.deps.runStateManager.markStatus(runId, "responding");
+        await this.deps.runStateManager.markStatus(runId, "completed");
+        this.deps.eventBus.emit(
+          "agent.run.completed",
+          {
+            runId,
+            assistantMessageId: result.messageId,
+            artifacts: result.artifacts.map((a) => a.id),
+            toolCalls: result.toolCalls.length,
+          },
+          { runId, conversationId },
+        );
+        this.cleanupGrants(runId);
+        this._cleanupPlanVersion(runId);
+
+        if (this.deps.traceManager) {
+          this.deps.traceManager.endTrace(runId);
+        }
+
+        return {
+          runId,
+          conversationId,
+          assistantMessageId: result.messageId,
+          status: "completed",
+          artifacts: result.artifacts,
+          toolCalls: result.toolCalls,
+        };
+      } catch (error) {
+        if (signal.aborted) {
+          await this.deps.runStateManager.markCancelled(
+            runId,
+            "aborted by user",
+          );
+          this.deps.eventBus.emit(
+            "agent.run.cancelled",
+            { runId, reason: "aborted by user" },
+            { runId, conversationId },
+          );
+          this.cleanupGrants(runId);
+          this._cleanupPlanVersion(runId);
+          return {
+            runId,
+            conversationId,
+            status: "cancelled",
+            artifacts: [],
+            toolCalls: [],
+          };
+        }
+        // Streaming failed — fall through to old safety + execution path.
+        // The safety checks (sandbox, permission, scope) below ensure
+        // tool calls are validated before reaching executeToolDecision.
+        // The same assistantMessageId is passed to the fallback path so
+        // the frontend only sees one assistant message.
+      }
+    }
+
+    const deniedToolCalls = new Set<string>();
+
+    for (const tc of decision.toolCalls) {
+      this.deps.eventBus.emit(
+        "agent.tool.selected",
+        {
+          runId,
+          toolCallId: tc.id,
+          skillId: tc.skillId,
+          name: tc.name,
+          riskLevel: tc.riskLevel,
+        },
+        { runId, conversationId },
+      );
+    }
+
+    // ── Safety pre-validation (§P0-3): sandbox + permission + scope ──
+    for (const tc of decision.toolCalls) {
+      // Layer 1: Sandbox validation — deny dangerous operations without throwing
+      let sandboxDenied = false;
+      if (this.deps.toolSandbox) {
+        sandboxDenied = validateSandbox(
+          this.deps.toolSandbox,
+          tc,
+          (op, reason) => {
+            this.deps.eventBus!.emit(
+              "agent.safety.sandbox_denied",
+              {
+                runId,
+                conversationId,
+                toolCallId: tc.id,
+                skillId: tc.skillId,
+                operation: op,
+                reason,
+                mode: this.deps.toolSandbox!.config.mode,
+                recoverable: true,
+              },
+              { runId, conversationId },
+            );
+          },
+        );
+        if (sandboxDenied) {
+          deniedToolCalls.add(tc.id);
+          tc.metadata = {
+            ...(tc.metadata ?? {}),
+            safety: { deniedBy: "sandbox", blocked: true },
+          };
+          continue;
+        }
+      }
+
+      // Layer 2: Scoped permission check — detect reauth needs
+      if (this.deps.scopedPermissionManager) {
+        const existingGrants = this.grantsByRun.get(runId) ?? [];
+        const planStepId = plan?.steps.find(
+          (s) =>
+            s.skillId === tc.skillId &&
+            (s.status === "pending" || s.status === "in_progress"),
+        )?.id;
+        const scopedCheck = this.deps.scopedPermissionManager.check({
+          requestedPermission: tc.permissions[0] ?? "shell.execute",
+          runId,
+          planStepId,
+          toolCallId: tc.id,
+          skillId: tc.skillId,
+          arguments: tc.arguments,
+          existingGrants,
+          permissionMode: input.permissionMode ?? "ask",
+        });
+        if (scopedCheck.needsReapproval) {
+          this.deps.eventBus.emit(
+            "agent.safety.scope_reauth_required",
+            {
+              runId,
+              conversationId,
+              toolCallId: tc.id,
+              skillId: tc.skillId,
+              reason: scopedCheck.reason,
+            },
+            { runId, conversationId },
+          );
+          tc.requiresApproval = true;
+        }
+      }
+
+      // Layer 3: Permission policy evaluation
+      const permDecision = await this.deps.permissionPolicy.evaluate({
+        userId: input.userId,
+        runId,
+        skillId: tc.skillId,
+        permissions: tc.permissions,
+        arguments: tc.arguments,
+        context,
+        permissionMode: input.permissionMode,
+        riskHints: tc.riskHints,
+      });
+
+      if (!permDecision.allowed) {
+        this.deps.eventBus.emit(
+          "agent.safety.scope_reauth_required",
+          {
+            runId,
+            conversationId,
+            toolCallId: tc.id,
+            skillId: tc.skillId,
+            reason: `Permission denied: ${permDecision.reasons.join(", ")}`,
+          },
+          { runId, conversationId },
+        );
+        deniedToolCalls.add(tc.id);
+        tc.metadata = {
+          ...(tc.metadata ?? {}),
+          safety: {
+            deniedBy: "permission",
+            reasons: permDecision.reasons,
+            blocked: true,
+          },
+        };
+        continue;
+      }
+
+      if (permDecision.requiresApproval) {
+        await this.requestApproval({
+          runId,
+          conversationId,
+          toolCallId: tc.id,
+          title: `Approve ${tc.name}`,
+          description: `Run tool ${tc.name} with arguments: ${JSON.stringify(summarizeArguments(tc.arguments))}`,
+          riskLevel: maxRiskLevel(tc.riskLevel, permDecision.riskLevel),
+          requestedAction: {
+            skillId: tc.skillId,
+            arguments: tc.arguments,
+            permissions: tc.permissions,
+            toolCallId: tc.id,
+          },
+        });
+        return {
+          runId,
+          conversationId,
+          status: "waiting_approval",
+          artifacts: [],
+          toolCalls: [],
+        };
+      }
+
+      // Record grant for completed permission checks
+      if (this.deps.scopedPermissionManager) {
+        const grants = this.grantsByRun.get(runId) ?? [];
+        grants.push({
+          permission: tc.permissions[0] ?? "shell.execute",
+          runId,
+          toolCallId: tc.id,
+          skillId: tc.skillId,
+          approvedArgs: { ...tc.arguments },
+          grantedAt: new Date().toISOString(),
+          expiresAt: new Date(Date.now() + 30 * 60_000).toISOString(),
+          grantedBy: "agent",
+          riskLevel: tc.riskLevel as RiskLevel,
+          scope: "this_run" as const,
+        });
+        this.grantsByRun.set(runId, grants);
+      }
+    }
+
+    // If all tool calls were denied by sandbox/permission, create synthetic observation
+    // and enter reflection directly — the agent can explain the denial (§P0-3).
+    if (
+      deniedToolCalls.size > 0 &&
+      deniedToolCalls.size === decision.toolCalls.length
+    ) {
+      const deniedSummaries = decision.toolCalls.map((tc) => ({
+        id: tc.id,
+        skillId: tc.skillId,
+        name: tc.name,
+        status: "failed" as const,
+        summary: `[SAFETY_DENIED] ${tc.name} was blocked`,
+        blocked: true as const,
+        trust: "untrusted" as const,
+        metadata: {
+          safety: (tc.metadata as Record<string, unknown>)?.["safety"],
+        },
+      }));
+
+      // Persist denied tool calls for auditability (§P0-3)
+      // Use create() not updateStatus() — these records don't exist yet since
+      // the ExecutionOrchestrator never ran them.
+      if (this.deps.toolCalls) {
+        for (const tc of decision.toolCalls) {
+          const safetyMeta = (tc.metadata as Record<string, unknown>)?.[
+            "safety"
+          ];
+          this.deps.toolCalls
+            .create({
+              id: tc.id,
+              runId,
+              skillId: tc.skillId,
+              name: tc.name,
+              arguments: tc.arguments,
+              status: "failed",
+              riskLevel: tc.riskLevel,
+              metadata: {
+                ...(tc.metadata ?? {}),
+                safety_denied: true,
+                deniedBy:
+                  (safetyMeta as Record<string, unknown>)?.["deniedBy"] ??
+                  "safety_policy",
+                blocked: true,
+                trust: "untrusted",
+              },
+              startedAt: new Date().toISOString(),
+            })
+            .catch(() => {
+              /* best effort */
+            });
+        }
+      }
+
+      const safetyObservation: AgentObservation = {
+        runId,
+        toolCalls: deniedSummaries,
+        artifacts: [],
+        summary: `Safety denied ${deniedToolCalls.size} tool(s): ${deniedSummaries.map((d) => d.skillId).join(", ")}`,
+      };
+      // Skip execution, go directly to reflection/response
+      await this.deps.runStateManager.markStatus(runId, "reflecting");
+      const reflectResult = await this.deps.reflectionEngine.reflect(
+        {
+          context,
+          intent,
+          plan,
+          observation: safetyObservation,
+          taskState: taskState ?? emptyTaskState(),
+        },
+        signal,
+      );
+      return this.respondAfterReflection(
+        input,
+        context,
+        intent,
+        plan,
+        safetyObservation,
+        reflectResult,
+        signal,
+        assistantMessageId,
+      );
+    }
+
+    // Build safe decision without denied calls
+    const safeCalls = decision.toolCalls.filter(
+      (tc) => !deniedToolCalls.has(tc.id),
+    );
+    const safeDecision: ToolDecision & { type: "use_tool" } = {
+      ...decision,
+      toolCalls: safeCalls,
+    };
+
+    // Mark plan steps in_progress and bind planStepId
+    if (plan) {
+      for (const tc of safeCalls) {
+        const matchingStep = plan.steps.find(
+          (s) => s.skillId === tc.skillId && s.status === "pending",
+        );
+        if (matchingStep) {
+          matchingStep.status = "in_progress";
+          matchingStep.updatedAt = new Date().toISOString();
+          tc.metadata = { ...(tc.metadata ?? {}), planStepId: matchingStep.id };
+        }
+      }
+    }
+
+    return this.executeToolDecision(
+      input,
+      context,
+      intent,
+      plan,
+      safeDecision,
+      signal,
+      iteration,
+      accumulatedObservation,
+      taskState,
+      assistantMessageId,
+    );
+  }
 
   /** 分支 B：无需工具 — 直接 LLM 生成回复。 */
   /** 分支 C：请求澄清 — 向用户发问（§P1: content-block stream）。 */
@@ -1002,6 +1594,12 @@ export class AgentLoopEngine {
       reason: decision.reason,
     });
 
+    this.deps.eventBus.emit(
+      "agent.response.completed",
+      { runId, conversationId, messageId: response.messageId },
+      { runId, conversationId },
+    );
+
     await this.deps.runStateManager.markStatus(runId, "completed");
     this.deps.eventBus.emit(
       "agent.run.completed",
@@ -1025,6 +1623,30 @@ export class AgentLoopEngine {
   }
 
   /** 分支 D：决策阶段即需审批。 */
+  private async handleApprovalRequired(
+    input: AgentLoopInput,
+    decision: ToolDecision & { type: "require_approval" },
+    signal: AbortSignal,
+  ): Promise<AgentLoopResult> {
+    await this.requestApproval({
+      runId: input.runId,
+      conversationId: input.conversationId,
+      title: decision.approval.title,
+      description: decision.approval.description,
+      riskLevel: decision.approval.riskLevel as RiskLevel,
+      requestedAction: { skillId: "", arguments: {}, permissions: [] },
+    });
+
+    return {
+      runId: input.runId,
+      conversationId: input.conversationId,
+      status: "waiting_approval",
+      artifacts: [],
+      toolCalls: [],
+    };
+  }
+
+  /** 异常处理：区分用户取消 vs 系统错误。 */
   private async handleLoopError(
     input: AgentLoopInput,
     error: unknown,
@@ -1229,6 +1851,16 @@ export class AgentLoopEngine {
         signal,
       );
 
+      this.deps.eventBus.emit(
+        "agent.response.completed",
+        {
+          runId: input.runId,
+          conversationId: input.conversationId,
+          messageId: response.messageId,
+        },
+        { runId: input.runId, conversationId: input.conversationId },
+      );
+
       await this.deps.runStateManager.markStatus(input.runId, "completed");
       this.deps.eventBus.emit(
         "agent.run.completed",
@@ -1393,8 +2025,6 @@ export class AgentLoopEngine {
         });
         stream.start();
 
-        await this.deps.runStateManager.markStatus(run.runId, "executing");
-
         // §P1-2 fix: Execute approved tool calls DIRECTLY instead of
         // re-calling executeStreaming() which lets the LLM re-decide tools.
         // Recover pending tool calls from the saved task state (saved by
@@ -1513,7 +2143,6 @@ export class AgentLoopEngine {
         }
 
         // Let the model compose a follow-up narrative after tool execution
-        await this.deps.runStateManager.markStatus(run.runId, "responding");
         if (allSummaries.length > 0) {
           const followUpPart = stream.startTextPart();
           await this.deps.responseComposer.composeDirect(
@@ -1545,8 +2174,6 @@ export class AgentLoopEngine {
         if (this.deps.traceManager) {
           this.deps.traceManager.endTrace(run.runId);
         }
-
-        await this.deps.runStateManager.markStatus(run.runId, "completed");
 
         this.deps.eventBus.emit(
           "agent.run.completed",
@@ -1692,6 +2319,349 @@ export class AgentLoopEngine {
     return approval;
   }
 
+  /**
+   * 工具执行的子状态机：executing → reflecting → responding → writeMemories。
+   *
+   * 这是 use_tool 分支的核心执行路径：
+   * 1. executionOrchestrator.execute：并发执行工具调用（含重试）
+   * 2. reflectionEngine.reflect：评估工具执行结果是否达成目标
+   * 3. responseComposer.composeFromObservation：LLM 将工具结果总结为用户可读的回复
+   * 4. writeMemories：根据 turn 中的显式记忆请求或隐式规则写入记忆
+   */
+  private async executeToolDecision(
+    input: AgentLoopInput,
+    context: AgentContext,
+    intent: RoutedIntent,
+    plan: AgentPlan | undefined,
+    decision: ToolDecision & { type: "use_tool" },
+    signal: AbortSignal,
+    iteration = 1,
+    accumulatedObservation?: AgentObservation,
+    taskState?: AgentTaskState,
+    messageId?: string,
+  ): Promise<AgentLoopResult> {
+    const { runId, conversationId } = input;
+
+    // ── Tool execution span (§P1-5) ──
+    const execSpan = this._startSpan(runId, "tool_executing");
+
+    await this.deps.runStateManager.markStatus(runId, "executing");
+    const latestObservation = await this.deps.executionOrchestrator.execute(
+      {
+        runId,
+        context,
+        intent,
+        plan,
+        decision,
+      },
+      signal,
+    );
+    const observation = mergeObservations(
+      runId,
+      accumulatedObservation,
+      latestObservation,
+    );
+
+    // Maintain task state across iterations
+    const updatedTaskState = updateTaskState(
+      taskState,
+      observation,
+      plan,
+      intent,
+      iteration,
+    );
+
+    // Persist task state so resume/retry retains multi-turn progress
+    await this.deps.runStateManager
+      .saveTaskState(runId, updatedTaskState)
+      .catch(() => {
+        // Best effort — non-blocking
+      });
+
+    // End execution span with tool call metrics (§P1-5)
+    const execToolFailures = observation.toolCalls.filter(
+      (tc) => tc.status !== "completed",
+    ).length;
+    execSpan?.endSpan(
+      `Executed ${observation.toolCalls.length} tools (${execToolFailures} failures), ${observation.artifacts.length} artifacts`,
+      {
+        toolCalls: observation.toolCalls.length,
+        toolFailures: execToolFailures,
+      },
+    );
+
+    // ── Injection scan on latest execution results (§P0-3) ───────────
+    if (this.deps.injectionDetector) {
+      for (const tc of latestObservation.toolCalls) {
+        if (tc.summary) {
+          const detection = this.deps.injectionDetector.detect(tc.summary);
+          if (detection.shouldBlock) {
+            tc.summary = `[BLOCKED] Content blocked due to potential prompt injection (${detection.matches.length} matches).`;
+            (tc as unknown as Record<string, unknown>).trust = "untrusted";
+            (tc as unknown as Record<string, unknown>).blocked = true;
+            this.deps.eventBus.emit(
+              "agent.safety.injection_detected",
+              {
+                runId,
+                conversationId,
+                toolCallId: tc.id,
+                source: "tool_result",
+                matches: detection.matches.map((m) => ({
+                  category: m.category,
+                  severity: m.severity,
+                  explanation: m.explanation,
+                })),
+                blocked: true,
+                contentSnippet: tc.summary.slice(0, 200),
+              },
+              { runId, conversationId },
+            );
+          } else if (detection.shouldWarn && detection.warningMessage) {
+            tc.summary = `${detection.warningMessage}\n\n${tc.summary}`;
+          }
+        }
+      }
+    }
+
+    // ── Reflection span (§P1-5) ──
+    const reflectSpan = this._startSpan(runId, "reflecting");
+
+    await this.deps.runStateManager.markStatus(runId, "reflecting");
+    let reflection: AgentReflection;
+    try {
+      reflection = await this.deps.reflectionEngine.reflect(
+        {
+          context,
+          intent,
+          plan,
+          observation,
+          taskState: updatedTaskState,
+        },
+        signal,
+      );
+    } catch (err) {
+      reflectSpan?.endSpan(
+        "Reflection failed",
+        { errorCode: "REFLECTION_FAILED" },
+        String(err),
+      );
+      throw err;
+    }
+    reflectSpan?.endSpan(
+      `Reflection: goalAchieved=${reflection.goalAchieved}, nextAction=${reflection.nextAction}`,
+      { modelCalls: 1 },
+    );
+
+    // Apply max-iterations stop reason when the loop is forced to stop
+    const stoppedByMaxIterations =
+      reflection.nextAction === "continue" &&
+      !reflection.goalAchieved &&
+      iteration >= MAX_TOOL_ITERATIONS;
+    const effectiveReflection = stoppedByMaxIterations
+      ? {
+          ...reflection,
+          stopReason: "max_iterations" as const,
+          summary: reflection.summary
+            ? `${reflection.summary} (stopped after ${MAX_TOOL_ITERATIONS} tool iterations)`
+            : `Task interrupted after ${MAX_TOOL_ITERATIONS} tool iterations.`,
+        }
+      : reflection;
+
+    if (
+      reflection.nextAction === "continue" &&
+      !reflection.goalAchieved &&
+      iteration < MAX_TOOL_ITERATIONS
+    ) {
+      // ── Replan (§P0-2): revise the plan based on execution outcome ──
+      let currentPlan = plan;
+      if (this.deps.replanner && plan) {
+        const trigger = inferReplanTrigger(
+          observation,
+          reflection,
+          iteration,
+          MAX_TOOL_ITERATIONS,
+        );
+        if (trigger) {
+          try {
+            const result = await this.deps.replanner.replan({
+              trigger,
+              originalPlan: plan,
+              context,
+              observation,
+              reflection,
+              iteration,
+              maxIterations: MAX_TOOL_ITERATIONS,
+            });
+            if (result.changed) {
+              // Emit plan revision event
+              this.deps.eventBus.emit(
+                "agent.plan.revised",
+                {
+                  runId,
+                  planId: result.plan.id,
+                  originalPlanId: plan.id,
+                  summary: result.summary,
+                  addedSteps: result.addedSteps.length,
+                  removedSteps: result.removedSteps.length,
+                  modifiedSteps: result.modifiedSteps.length,
+                },
+                { runId, conversationId },
+              );
+
+              // Persist revised plan snapshot (§P0-2)
+              if (this.deps.planSnapshotRepo) {
+                const version = this._nextPlanVersion(runId);
+                try {
+                  await this.deps.planSnapshotRepo.create({
+                    id: crypto.randomUUID(),
+                    runId,
+                    planId: result.plan.id,
+                    version,
+                    eventType: "agent.plan.revised",
+                    planJson: result.plan as unknown as Record<string, unknown>,
+                    diffSummary: result.summary,
+                    trigger,
+                    addedSteps: result.addedSteps.length,
+                    removedSteps: result.removedSteps.length,
+                    modifiedSteps: result.modifiedSteps.length,
+                  });
+                  await this.deps.planSnapshotRepo.updateRunPlanState(
+                    runId,
+                    result.plan as unknown as Record<string, unknown>,
+                    version,
+                  );
+                } catch {
+                  // Best effort
+                }
+              }
+
+              currentPlan = result.plan;
+            }
+          } catch {
+            // Replan failure is not fatal — continue with original plan
+          }
+        }
+      }
+
+      // Pass reflection's next-tool suggestions as priority skills.
+      // The ToolDecisionEngine tries these first before falling back
+      // to normal candidate matching, giving reflection a stronger
+      // influence on the next round of tool selection.
+      const nextContext = appendObservationToContext(context, observation);
+      const nextDecision = await this.decideTools(
+        input,
+        nextContext,
+        intent,
+        currentPlan,
+        signal,
+        observation,
+        reflection.nextToolCandidates,
+      );
+
+      switch (nextDecision.type) {
+        case "use_tool":
+          return this.handleUseTool(
+            input,
+            nextContext,
+            intent,
+            currentPlan,
+            nextDecision,
+            signal,
+            iteration + 1,
+            observation,
+            updatedTaskState,
+          );
+        case "ask_clarification":
+          return this.handleClarification(input, nextDecision, signal);
+        case "require_approval":
+          return this.handleApprovalRequired(input, nextDecision, signal);
+        case "no_tool":
+          context = nextContext;
+          break;
+      }
+    }
+
+    // ── Response composition span (§P1-5) ──
+    const respSpan = this._startSpan(runId, "responding");
+
+    await this.deps.runStateManager.markStatus(runId, "responding");
+
+    let response: Awaited<
+      ReturnType<typeof this.deps.responseComposer.composeFromObservation>
+    >;
+    try {
+      response = await this.deps.responseComposer.composeFromObservation(
+        {
+          input,
+          context,
+          observation,
+          reflection: effectiveReflection,
+          messageId,
+          modelId: input.modelId,
+        },
+        signal,
+      );
+    } catch (err) {
+      respSpan?.endSpan(
+        "Response composition failed",
+        { errorCode: "RESPONSE_COMPOSE_FAILED" },
+        String(err),
+      );
+      throw err;
+    }
+    respSpan?.endSpan(`Response composed: messageId=${response.messageId}`, {
+      modelCalls: 1,
+    });
+
+    this.deps.eventBus.emit(
+      "agent.response.completed",
+      {
+        runId,
+        conversationId,
+        messageId: response.messageId,
+      },
+      { runId, conversationId },
+    );
+
+    // Determine if a proactive conversation summary should be generated.
+    // Trigger when token budget is strained (>40% used) or many iterations.
+    const tokenRatio =
+      context.limits.usedTokensEstimate / Math.max(1, context.limits.maxTokens);
+    const shouldForceSummary =
+      tokenRatio > 0.4 || observation.toolCalls.length >= 15 || iteration > 3;
+
+    await this.writeMemories({
+      input,
+      context,
+      intent,
+      plan,
+      responseMessageId: response.messageId,
+      observation,
+      reflection: effectiveReflection,
+      forceSummary: shouldForceSummary,
+    });
+
+    await this.deps.runStateManager.markStatus(runId, "completed");
+    this.deps.eventBus.emit(
+      "agent.run.completed",
+      {
+        runId,
+        assistantMessageId: response.messageId,
+        artifacts: observation.artifacts.map((a) => a.id),
+        toolCalls: observation.toolCalls.length,
+      },
+      { runId, conversationId },
+    );
+
+    return {
+      runId,
+      conversationId,
+      assistantMessageId: response.messageId,
+      status: "completed",
+      artifacts: observation.artifacts,
+      toolCalls: observation.toolCalls,
+    };
+  }
 
   /**
    * 写入记忆（最佳努力，失败不阻塞主流程）。
@@ -1746,6 +2716,48 @@ export class AgentLoopEngine {
       );
     }
   }
+
+  /**
+   * Compose a response after safety-denial reflection (§P0-3).
+   * Used when all tool calls were blocked by sandbox/permission.
+   */
+  private async respondAfterReflection(
+    input: AgentLoopInput,
+    context: AgentContext,
+    intent: RoutedIntent,
+    plan: AgentPlan | undefined,
+    observation: AgentObservation,
+    reflection: AgentReflection,
+    signal: AbortSignal,
+    messageId?: string,
+  ): Promise<AgentLoopResult> {
+    const { runId, conversationId } = input;
+    await this.deps.runStateManager.markStatus(runId, "responding");
+    const response = await this.deps.responseComposer.composeFromObservation(
+      {
+        input,
+        context,
+        observation,
+        reflection,
+        messageId,
+        modelId: input.modelId,
+      },
+      signal,
+    );
+    if (this.deps.traceManager) {
+      this.deps.traceManager.endTrace(runId);
+    }
+    this.cleanupGrants(runId);
+    this._cleanupPlanVersion(runId);
+    return {
+      runId,
+      conversationId,
+      assistantMessageId: response.messageId,
+      status: "completed",
+      artifacts: observation.artifacts,
+      toolCalls: observation.toolCalls as ToolCallSummary[],
+    };
+  }
 }
 
 function intentFromSkillId(skillId: string): RoutedIntent["type"] {
@@ -1758,6 +2770,136 @@ function intentFromSkillId(skillId: string): RoutedIntent["type"] {
   return "unknown";
 }
 
+function appendObservationToContext(
+  context: AgentContext,
+  observation: AgentObservation,
+): AgentContext {
+  const toolResults = observation.toolCalls.map((call) => ({
+    toolCallId: call.id,
+    summary: call.summary,
+    status: call.status,
+  }));
+  const toolMessages = observation.toolCalls.map((call) => ({
+    role: "tool" as const,
+    name: call.name,
+    content: `${call.name} (${call.skillId}) ${call.status}: ${call.summary}`,
+    metadata: {
+      toolCallId: call.id,
+      skillId: call.skillId,
+      status: call.status,
+    },
+  }));
+
+  return {
+    ...context,
+    messages: [...context.messages, ...toolMessages],
+    toolResults: [...context.toolResults, ...toolResults],
+    artifacts: [
+      ...context.artifacts,
+      ...observation.artifacts.map((artifact) => ({
+        id: artifact.id,
+        name: artifact.name,
+        type: artifact.type,
+        summary: artifact.name,
+      })),
+    ],
+  };
+}
+
+function mergeObservations(
+  runId: string,
+  previous: AgentObservation | undefined,
+  latest: AgentObservation,
+): AgentObservation {
+  if (!previous) return latest;
+
+  return {
+    runId,
+    toolCalls: [...previous.toolCalls, ...latest.toolCalls],
+    artifacts: [...previous.artifacts, ...latest.artifacts],
+    summary: [previous.summary, latest.summary].filter(Boolean).join("\n"),
+  };
+}
+
+/**
+ * Update AgentTaskState with the results of the latest tool execution.
+ * Accumulates completed steps, gathered facts, and tracks open questions
+ * across iterations to improve reflection accuracy.
+ */
+function updateTaskState(
+  previous: AgentTaskState | undefined,
+  observation: AgentObservation,
+  plan: AgentPlan | undefined,
+  intent: RoutedIntent,
+  iteration: number,
+): AgentTaskState {
+  const goal =
+    previous?.goal ?? plan?.goal ?? intent.reason ?? "Complete user request";
+
+  // Track completed steps
+  const completedSteps = [...(previous?.completedSteps ?? [])];
+  const pendingSteps = [...(previous?.pendingSteps ?? [])];
+
+  // On first iteration, initialize pending steps from plan
+  if (!previous && plan) {
+    for (const step of plan.steps) {
+      if (!completedSteps.includes(step.id)) {
+        pendingSteps.push(step.id);
+      }
+    }
+  }
+
+  // Mark tool steps as completed based on observation.
+  // Prefer planStepId from metadata for stable binding when same skill
+  // appears multiple times in the plan (§P0-2).
+  for (const tc of observation.toolCalls) {
+    const planStepId = (tc.metadata as Record<string, unknown> | undefined)?.[
+      "planStepId"
+    ] as string | undefined;
+    const stepId = planStepId ?? `tool:${tc.skillId}`;
+    if (tc.status === "completed") {
+      if (!completedSteps.includes(stepId)) {
+        completedSteps.push(stepId);
+      }
+      const pendingIdx = pendingSteps.indexOf(stepId);
+      if (pendingIdx >= 0) pendingSteps.splice(pendingIdx, 1);
+    }
+  }
+
+  // Accumulate gathered facts from tool results
+  const gatheredFacts: Record<string, unknown> = {
+    ...(previous?.gatheredFacts ?? {}),
+  };
+  for (const tc of observation.toolCalls) {
+    if (tc.structured) {
+      const totalResults =
+        tc.structured.totalResults ??
+        (Array.isArray(tc.structured.candidates)
+          ? (tc.structured.candidates as unknown[]).length
+          : Array.isArray(tc.structured.results)
+            ? (tc.structured.results as unknown[]).length
+            : undefined);
+      if (totalResults !== undefined) {
+        gatheredFacts[`${tc.skillId}.totalResults`] = totalResults;
+      }
+      if (tc.structured.summary) {
+        gatheredFacts[`${tc.skillId}.summary`] = tc.structured.summary;
+      }
+    }
+  }
+
+  // Track open questions from reflection's missing info
+  const openQuestions = [...(previous?.openQuestions ?? [])];
+
+  return {
+    goal,
+    completedSteps,
+    pendingSteps,
+    gatheredFacts,
+    openQuestions,
+    iteration,
+  };
+}
 
 function maxRiskLevel(left: RiskLevel, right: RiskLevel): RiskLevel {
   const order: Record<RiskLevel, number> = {
@@ -1820,4 +2962,117 @@ function buildRiskReasons(
     reasons.push("Low-risk operation");
   }
   return reasons;
+}
+
+// ── Safety helpers (§P0-3) ────────────────────────────────────────────────
+
+/**
+ * Validate a planned tool call against sandbox rules.
+ * Returns true if the tool was denied, and calls onDenied with operation + reason.
+ */
+function validateSandbox(
+  sandbox: NonNullable<AgentLoopEngineDeps["toolSandbox"]>,
+  tc: PlannedToolCall,
+  onDenied: (operation: string, reason: string) => void,
+): boolean {
+  // Filesystem validation
+  if (tc.permissions.some((p) => p.startsWith("filesystem."))) {
+    const path = (tc.arguments["path"] ??
+      tc.arguments["target"] ??
+      tc.arguments["file"]) as string | undefined;
+    if (path) {
+      const op = tc.permissions.includes("filesystem.delete")
+        ? "delete"
+        : tc.permissions.includes("filesystem.write")
+          ? "write"
+          : "read";
+      const result = sandbox.validateFilesystem({
+        operation: op as "read" | "write" | "delete",
+        path,
+      });
+      if (!result.allowed) {
+        onDenied(`filesystem.${op}`, result.reason!);
+        return true;
+      }
+    }
+  }
+  // Shell validation
+  if (tc.permissions.includes("shell.execute")) {
+    const command = tc.arguments["command"] as string | undefined;
+    if (command) {
+      const result = sandbox.validateShell({
+        command,
+        arguments: tc.arguments["args"] as string[] | undefined,
+      });
+      if (!result.allowed) {
+        onDenied("shell.execute", result.reason!);
+        return true;
+      }
+    }
+  }
+  // Network validation
+  if (tc.permissions.includes("network.request")) {
+    const url = tc.arguments["url"] as string | undefined;
+    if (url) {
+      const result = sandbox.validateNetwork({ url });
+      if (!result.allowed) {
+        onDenied("network.request", result.reason!);
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+/** Create an empty task state for initial safety-denial reflection. */
+function emptyTaskState(): AgentTaskState {
+  return {
+    goal: "",
+    completedSteps: [],
+    pendingSteps: [],
+    gatheredFacts: {},
+    openQuestions: [],
+    iteration: 1,
+  };
+}
+
+/** Infer the appropriate replan trigger from observation and reflection state (§P0-2). */
+function inferReplanTrigger(
+  observation: AgentObservation,
+  reflection: AgentReflection,
+  iteration: number,
+  maxIterations: number,
+): import("./planning/replanner.js").ReplanTrigger | null {
+  // Safety denials take highest priority — tools blocked by sandbox/injection (§P0-3)
+  const safetyDenied = observation.toolCalls.filter((tc) => {
+    const meta = tc as unknown as Record<string, unknown>;
+    return meta.blocked === true;
+  });
+  if (safetyDenied.length > 0) return "safety_denied";
+
+  // Tool failures
+  const failedTools = observation.toolCalls.filter(
+    (tc) => tc.status === "failed" || tc.status === "timeout",
+  );
+  if (failedTools.length > 0) return "tool_failed";
+
+  // Missing parameters from reflection
+  if (reflection.missingInfo && reflection.missingInfo.length > 0) {
+    return "missing_parameters";
+  }
+
+  // Tool results were insufficient
+  if (
+    !reflection.goalAchieved &&
+    observation.toolCalls.every((tc) => tc.status === "completed")
+  ) {
+    return "tool_result_insufficient";
+  }
+
+  // Approaching max iterations — summarize remaining work
+  if (iteration >= maxIterations - 1) {
+    return "max_iterations_approaching";
+  }
+
+  return null;
 }
