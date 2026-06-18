@@ -1,8 +1,9 @@
 import type { ReactNode } from "react";
-import { ConfigProvider } from "antd";
+import { App, ConfigProvider } from "antd";
 
 export function AppProviders({ children }: { children: ReactNode }) {
   return (
+    <App>
     <ConfigProvider
       theme={{
         token: {
@@ -53,5 +54,6 @@ export function AppProviders({ children }: { children: ReactNode }) {
     >
       {children}
     </ConfigProvider>
+    </App>
   );
 }

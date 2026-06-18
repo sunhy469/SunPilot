@@ -25,6 +25,9 @@ export function Sidebar({
   onOpenPlugins,
   onOpenDebug,
   onOpenSettings,
+  onRename,
+  onDeleteConversation,
+  onTogglePin,
 }: {
   conversations: Conversation[];
   activeConversationId: string;
@@ -35,6 +38,9 @@ export function Sidebar({
   onOpenPlugins: () => void;
   onOpenDebug: () => void;
   onOpenSettings: () => void;
+  onRename: (id: string, title: string) => void;
+  onDeleteConversation: (id: string) => void | Promise<void>;
+  onTogglePin: (id: string, pinned: boolean) => void;
 }) {
   const responsive = useResponsive();
   const [sidebarWidth, setSidebarWidth] = useState(DEFAULT_WIDTH);
@@ -130,6 +136,9 @@ export function Sidebar({
           active={activePanel === "chat"}
           onSelect={onSelect}
           conversationTitle={conversationTitle}
+          onRename={onRename}
+          onDelete={onDeleteConversation}
+          onTogglePin={onTogglePin}
         />
 
         <UserFooter onOpenSettings={onOpenSettings} />

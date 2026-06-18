@@ -177,6 +177,68 @@ describe("JsonRpcRouter", () => {
     expect(errParams.sequence).toBe(-1);
   });
 
+  test("forwards content-block part deltas without downgrading to legacy response delta", async () => {
+    const notifications: unknown[] = [];
+    const router = new JsonRpcRouter({
+      database: new InMemoryDatabaseContext(),
+      getChatAgent: async () =>
+        ({
+          startChatCommand: async (_input: any, _ctx: any, hooks: any) => {
+            hooks?.onDelta?.({
+              type: "agent.message.part.delta",
+              runId: "run_stream",
+              conversationId: "conv_stream",
+              messageId: "msg_stream",
+              partId: "part_text_1",
+              delta: "你好",
+            });
+            return {
+              accepted: true,
+              runId: "run_stream",
+              conversationId: "conv_stream",
+              messageId: "msg_stream",
+            };
+          },
+        }) as any,
+    });
+
+    await expect(
+      router.handle(
+        {
+          method: "chat.send",
+          params: { conversationId: "conv_stream", message: "hello" },
+        },
+        createContext(notifications),
+      ),
+    ).resolves.toEqual({
+      result: {
+        accepted: true,
+        conversationId: "conv_stream",
+        runId: "run_stream",
+        messageId: "msg_stream",
+      },
+    });
+
+    expect(notifications).toEqual([
+      {
+        jsonrpc: "2.0",
+        method: "agent.message.part.delta",
+        params: expect.objectContaining({
+          sequence: -1,
+          runId: "run_stream",
+          conversationId: "conv_stream",
+          payload: {
+            runId: "run_stream",
+            conversationId: "conv_stream",
+            messageId: "msg_stream",
+            partId: "part_text_1",
+            delta: "你好",
+          },
+        }),
+      },
+    ]);
+  });
+
   test("subscribes to a conversation and replays missed events", async () => {
     const db = new InMemoryDatabaseContext();
     await db.events.append({

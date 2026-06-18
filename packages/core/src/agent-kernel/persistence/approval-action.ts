@@ -5,6 +5,7 @@ export interface NormalizedApprovalAction {
   arguments: Record<string, unknown>;
   permissions: Permission[];
   toolCallId?: string;
+  messageId?: string;
 }
 
 export function normalizeRequestedAction(
@@ -35,5 +36,9 @@ export function normalizeRequestedAction(
       : [],
     toolCallId:
       typeof action.toolCallId === "string" ? action.toolCallId : undefined,
+    messageId:
+      typeof (action as { messageId?: unknown }).messageId === "string"
+        ? (action as { messageId: string }).messageId
+        : undefined,
   };
 }

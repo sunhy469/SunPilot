@@ -31,27 +31,30 @@ function createService(
     overrides.run ??
     (async (input) => {
       const messageId = `msg_assistant_${input.runId}`;
+      const partId = "part_text_test";
       eventBus.emit(
-        "agent.response.started",
-        { runId: input.runId, messageId },
+        "agent.message.started",
+        { runId: input.runId, conversationId: input.conversationId, messageId },
         { runId: input.runId, conversationId: input.conversationId },
       );
       eventBus.emit(
-        "agent.response.delta",
+        "agent.message.part.delta",
         {
           runId: input.runId,
           conversationId: input.conversationId,
           messageId,
+          partId,
           delta: "hello from ",
         },
         { runId: input.runId, conversationId: input.conversationId },
       );
       eventBus.emit(
-        "agent.response.delta",
+        "agent.message.part.delta",
         {
           runId: input.runId,
           conversationId: input.conversationId,
           messageId,
+          partId,
           delta: "agent loop",
         },
         { runId: input.runId, conversationId: input.conversationId },
@@ -487,6 +490,94 @@ describe("AgentService", () => {
     // The slow-published events should have been delivered before handleChatCommand returned.
     const slowEvents = onEventCalls.filter((e) => e.type.startsWith("slow."));
     expect(slowEvents.length).toBeGreaterThan(0);
+  });
+
+  test("handleChatCommand rejects 1688 search without image attachments", async () => {
+    const { service, conversations } = createService();
+    await conversations.createConversation({ id: "conv_img" });
+
+    await expect(
+      service.handleChatCommand(
+        {
+          conversationId: "conv_img",
+          message: "帮我用1688搜索这件衣服的同款",
+          attachments: [], // no image attachments
+        },
+        { source: "web" },
+      ),
+    ).rejects.toMatchObject({
+      code: "IMAGE_ATTACHMENT_REQUIRED",
+      message: "搜索 1688 货源需要上传商品图片，请先上传图片后再试。",
+    });
+  });
+
+  test("handleChatCommand rejects image search when attachments lack url/dataUrl/storageKey", async () => {
+    const { service, conversations } = createService();
+    await conversations.createConversation({ id: "conv_img2" });
+
+    await expect(
+      service.handleChatCommand(
+        {
+          conversationId: "conv_img2",
+          message: "帮我搜同款货源",
+          attachments: [
+            {
+              id: "att_1",
+              name: "photo.jpg",
+              type: "image/jpeg",
+              // missing url, dataUrl, and storageKey
+            },
+          ],
+        },
+        { source: "web" },
+      ),
+    ).rejects.toMatchObject({
+      code: "IMAGE_ATTACHMENT_REF_MISSING",
+      message: "图片尚未上传完成，缺少可用的图片链接。请等待上传完成后再试。",
+    });
+  });
+
+  test("handleChatCommand preserves dataUrl and full attachment fields in persisted message", async () => {
+    const { service, conversations } = createService();
+    await conversations.createConversation({ id: "conv_attach" });
+
+    const response = await service.handleChatCommand(
+      {
+        conversationId: "conv_attach",
+        message: "搜索同款",
+        attachments: [
+          {
+            id: "att_full",
+            name: "test.png",
+            type: "image/png",
+            sizeBytes: 1024,
+            url: "https://oss.example.com/test.png",
+            dataUrl: "data:image/png;base64,abc123",
+            storageKey: "uploads/test.png",
+            provider: "aliyun-oss",
+            checksum: "sha256:def456",
+          },
+        ],
+      },
+      { source: "web" },
+    );
+
+    const messages = await conversations.listMessages(response.conversationId);
+    const userMsg = messages.find((m) => m.role === "user");
+    expect(userMsg).toBeDefined();
+    expect(userMsg!.attachments).toEqual([
+      {
+        id: "att_full",
+        name: "test.png",
+        type: "image/png",
+        sizeBytes: 1024,
+        url: "https://oss.example.com/test.png",
+        dataUrl: "data:image/png;base64,abc123",
+        storageKey: "uploads/test.png",
+        provider: "aliyun-oss",
+        checksum: "sha256:def456",
+      },
+    ]);
   });
 
   test("onDelta receives delta events via raw eventBus without waiting for persist", async () => {

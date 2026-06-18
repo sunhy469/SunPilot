@@ -20,6 +20,7 @@ export interface ApprovalRequestInput {
     skillId: string;
     arguments: Record<string, unknown>;
     permissions: Permission[];
+    messageId?: string;
   };
 }
 
@@ -55,6 +56,7 @@ export class RepositoryApprovalRequestService {
         requestedAction: {
           ...input.requestedAction,
           toolCallId: input.toolCallId,
+          messageId: input.requestedAction.messageId,
         },
         createdAt: now,
         expiresAt:

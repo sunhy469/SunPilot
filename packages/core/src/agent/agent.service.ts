@@ -24,6 +24,15 @@ import type {
 } from "../agent-kernel/persistence/repository-approval-decision-service.js";
 import type { RepositoryAgentRunInitializer } from "../agent-kernel/persistence/repository-agent-run-initializer.js";
 
+export type AgentStreamDelta = {
+  type: "agent.message.part.delta";
+  runId?: string;
+  conversationId: string;
+  messageId: string;
+  partId: string;
+  delta: string;
+};
+
 export interface AgentLoopServiceConfig {
   loopEngine: AgentLoopEngine;
   abortRegistry: AbortRegistry;
@@ -54,11 +63,57 @@ export interface AgentLoopServiceConfig {
         type: string;
         sizeBytes?: number;
         url?: string;
+        dataUrl?: string;
         storageKey?: string;
+        provider?: "aliyun-oss" | "s3" | "minio" | "local";
+        checksum?: string;
       }>;
     }): Promise<AgentMessage>;
     listMessages(conversationId: string): Promise<AgentMessage[]>;
   };
+}
+
+/** §5.4: Validate image attachment integrity before entering agent loop. */
+function isImageAttachment(a: { type: string; name?: string }): boolean {
+  return (
+    a.type.startsWith("image/") ||
+    /\.(png|jpe?g|webp|gif|bmp|avif)(\?|#|$)/i.test(a.name ?? "")
+  );
+}
+
+function assertUsableImageAttachments(input: {
+  message: string;
+  attachments?: Array<{
+    id: string;
+    name: string;
+    type: string;
+    url?: string;
+    dataUrl?: string;
+    storageKey?: string;
+  }>;
+}): void {
+  const asksImageSearch =
+    /1688|货源|同款|搜图|图片|相机|商品/i.test(input.message);
+
+  if (!asksImageSearch) return;
+
+  const imageAttachments = (input.attachments ?? []).filter(isImageAttachment);
+  if (imageAttachments.length === 0) {
+    throw Object.assign(
+      new Error("搜索 1688 货源需要上传商品图片，请先上传图片后再试。"),
+      { code: "IMAGE_ATTACHMENT_REQUIRED", category: "input_validation", retryable: false },
+    );
+  }
+
+  const usable = imageAttachments.some(
+    (a) => Boolean(a.url || a.dataUrl || a.storageKey),
+  );
+  if (!usable) {
+    throw Object.assign(
+      new Error("图片尚未上传完成，缺少可用的图片链接。请等待上传完成后再试。"),
+      { code: "IMAGE_ATTACHMENT_REF_MISSING", category: "input_validation", retryable: false },
+    );
+  }
 }
 
 /**
@@ -109,7 +164,10 @@ export class AgentService {
         type: string;
         sizeBytes?: number;
         url?: string;
+        dataUrl?: string;
         storageKey?: string;
+        provider?: "aliyun-oss" | "s3" | "minio" | "local";
+        checksum?: string;
       }>;
     },
     ctx: {
@@ -122,11 +180,7 @@ export class AgentService {
         message: AgentChatResponse["message"],
       ) => void | Promise<void>;
       onEvent?: (event: AgentEvent) => void;
-      onDelta?: (delta: {
-        conversationId: string;
-        messageId: string;
-        delta: string;
-      }) => void;
+      onDelta?: (delta: AgentStreamDelta) => void;
       onCompleted?: (result: AgentLoopResult) => void;
       onError?: (error: unknown) => void;
     },
@@ -183,6 +237,9 @@ export class AgentService {
       };
     }
 
+    // §5.4: Validate image attachment integrity before creating run
+    assertUsableImageAttachments({ message: input.message, attachments: input.attachments });
+
     // Create abort signal for this run
     const signal = abortRegistry.create(runId);
 
@@ -196,16 +253,20 @@ export class AgentService {
       if (event.runId !== runId) return;
       if (
         streamHooks?.onDelta &&
-        event.type === "agent.response.delta"
+        event.type === "agent.message.part.delta"
       ) {
         const payload = event.payload as {
-          conversationId: string;
+          conversationId?: string;
           messageId: string;
+          partId: string;
           delta: string;
         };
         streamHooks.onDelta({
-          conversationId: payload.conversationId,
+          type: "agent.message.part.delta",
+          runId: event.runId,
+          conversationId: payload.conversationId ?? event.conversationId ?? "",
           messageId: payload.messageId,
+          partId: payload.partId,
           delta: payload.delta,
         });
       }
@@ -215,6 +276,7 @@ export class AgentService {
     if (shouldCreateConversation && this.loopConfig.conversations) {
       await this.loopConfig.conversations.createConversation({
         id: conversationId,
+        title: input.message.slice(0, 100),
       });
     }
 
@@ -241,7 +303,10 @@ export class AgentService {
           type: a.type,
           sizeBytes: a.sizeBytes,
           url: a.url,
+          dataUrl: a.dataUrl,
           storageKey: a.storageKey,
+          provider: a.provider,
+          checksum: a.checksum,
         })),
       });
       await streamHooks?.onUserMessage?.(userMessage);
@@ -341,7 +406,10 @@ export class AgentService {
         type: string;
         sizeBytes?: number;
         url?: string;
+        dataUrl?: string;
         storageKey?: string;
+        provider?: "aliyun-oss" | "s3" | "minio" | "local";
+        checksum?: string;
       }>;
     },
     ctx: {
@@ -354,11 +422,7 @@ export class AgentService {
         message: AgentChatResponse["message"],
       ) => void | Promise<void>;
       onEvent?: (event: AgentEvent) => void;
-      onDelta?: (delta: {
-        conversationId: string;
-        messageId: string;
-        delta: string;
-      }) => void;
+      onDelta?: (delta: AgentStreamDelta) => void;
       onCompleted?: (result: AgentLoopResult) => void;
       onError?: (error: unknown) => void;
     },
@@ -390,6 +454,10 @@ export class AgentService {
         connectionId: ctx.connectionId,
       },
     };
+
+    // §5.4: Validate image attachment integrity before entering agent loop
+    assertUsableImageAttachments({ message: input.message, attachments: input.attachments });
+
     // 幂等性保护：若客户端携带 clientRequestId 重放相同请求，
     // 则直接返回缓存结果，避免重复执行 Agent Loop。
     const idempotency = input.clientRequestId
@@ -420,20 +488,23 @@ export class AgentService {
     // Raw eventBus subscription — only for real-time delta streaming.
     // Deltas are transient and must not wait for DB persist; they arrive
     // here before the persist subscriber writes them to the database.
+    // §Token ordering fix: also sync-forward agent.message.part.delta
+    // (bypasses the async persistence bridge which can reorder chunks).
     const unsub = eventBus.subscribe((event) => {
-      if (event.runId !== runId) return;
-      if (
-        streamHooks?.onDelta &&
-        event.type === "agent.response.delta"
-      ) {
+      if (event.runId !== runId || !streamHooks?.onDelta) return;
+      if (event.type === "agent.message.part.delta") {
         const payload = event.payload as {
-          conversationId: string;
+          conversationId?: string;
           messageId: string;
+          partId: string;
           delta: string;
         };
         streamHooks.onDelta({
-          conversationId: payload.conversationId,
+          type: "agent.message.part.delta",
+          runId: event.runId,
+          conversationId: payload.conversationId ?? event.conversationId ?? "",
           messageId: payload.messageId,
+          partId: payload.partId,
           delta: payload.delta,
         });
       }
@@ -444,6 +515,7 @@ export class AgentService {
       if (shouldCreateConversation && this.loopConfig.conversations) {
         await this.loopConfig.conversations.createConversation({
           id: conversationId,
+          title: input.message.slice(0, 100),
         });
       }
 
@@ -470,7 +542,10 @@ export class AgentService {
             type: a.type,
             sizeBytes: a.sizeBytes,
             url: a.url,
+            dataUrl: a.dataUrl,
             storageKey: a.storageKey,
+            provider: a.provider,
+            checksum: a.checksum,
           })),
         });
         await streamHooks?.onUserMessage?.(userMessage);
@@ -670,6 +745,7 @@ export class AgentService {
           decidedBy: approval.decidedBy,
           title: approval.title,
           riskLevel: approval.riskLevel,
+          messageId: approval.messageId ?? approval.requestedAction.messageId,
           requestedAction: approval.requestedAction,
         },
         signal,
@@ -845,11 +921,20 @@ export class AgentService {
     }
 
     const mode = normalizeAttemptMode(sourceRun.mode);
+
+    // §5.3: Preserve original attachments on retry/resume so image search
+    // tools have access to previously uploaded image references. The source
+    // run stores { message, attachments, client } in its input field.
+    // RunRecord has `.input`, RunState does not — only extract when available.
+    const sourceInput = (sourceRun as { input?: unknown }).input;
+    const sourceAttachments = extractAttachments(sourceInput);
+
     const result = await this.handleChatCommand(
       {
         conversationId,
         message,
         mode,
+        attachments: sourceAttachments,
       },
       { source: "api" },
     );
@@ -960,7 +1045,10 @@ export class AgentService {
         type: string;
         sizeBytes?: number;
         url?: string;
+        dataUrl?: string;
         storageKey?: string;
+        provider?: "aliyun-oss" | "s3" | "minio" | "local";
+        checksum?: string;
       }>;
     },
     input: AgentLoopInput,
@@ -1162,4 +1250,40 @@ function messageFromRun(run: { goal?: string; input?: unknown }): string {
     category: "run_state",
     retryable: false,
   });
+}
+
+/**
+ * §5.3: Extract attachments from a run's stored input for retry/resume.
+ * The source run stores `{ message, attachments, client }` in its input field.
+ * Returns undefined when no attachments are stored (e.g. original request had none).
+ */
+function extractAttachments(
+  input: unknown,
+): Array<{
+  id: string;
+  name: string;
+  type: string;
+  sizeBytes?: number;
+  url?: string;
+  dataUrl?: string;
+  storageKey?: string;
+  provider?: "aliyun-oss" | "s3" | "minio" | "local";
+  checksum?: string;
+}> | undefined {
+  if (!input || typeof input !== "object") return undefined;
+  const record = input as { attachments?: unknown };
+  if (!Array.isArray(record.attachments) || record.attachments.length === 0) {
+    return undefined;
+  }
+  return record.attachments as Array<{
+    id: string;
+    name: string;
+    type: string;
+    sizeBytes?: number;
+    url?: string;
+    dataUrl?: string;
+    storageKey?: string;
+    provider?: "aliyun-oss" | "s3" | "minio" | "local";
+    checksum?: string;
+  }>;
 }

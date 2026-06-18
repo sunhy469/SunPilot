@@ -3,6 +3,18 @@ import type { InstalledSkillRecord, StepRecord } from "@sunpilot/protocol";
 import { InMemoryDatabaseContext } from "@sunpilot/storage";
 import { createAgentLoopService } from "./composition-root.js";
 
+async function waitFor(
+  predicate: () => boolean | Promise<boolean>,
+  timeoutMs = 1000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error("Timed out waiting for condition");
+}
+
 const installedSkill: InstalledSkillRecord = {
   id: "test.files",
   name: "Test Files",
@@ -122,14 +134,22 @@ describe("createAgentLoopService", () => {
             (m: any) => m.role === "tool",
           );
           if (request.tools && request.tools.length > 0 && !hasToolResults) {
+            expect(request.tools[0]?.function.name).toBe(
+              "test_files_filesystem_read",
+            );
             yield {
               delta: "Let me read that file.",
-              toolCalls: [{
-                index: 0,
-                id: "tc_stream_1",
-                type: "function" as const,
-                function: { name: "test.files:filesystem.read", arguments: "{}" },
-              }],
+              toolCalls: [
+                {
+                  index: 0,
+                  id: "tc_stream_1",
+                  type: "function" as const,
+                  function: {
+                    name: request.tools[0]?.function.name,
+                    arguments: "{}",
+                  },
+                },
+              ],
               raw: {},
             };
           } else if (hasToolResults) {
@@ -226,7 +246,9 @@ describe("createAgentLoopService", () => {
           // ApprovalGate) takes over. The streaming path doesn't yet support
           // approval pausing.
           if (request.tools && request.tools.length > 0) {
-            throw new Error("Streaming fallback: approval flow requires old path");
+            throw new Error(
+              "Streaming fallback: approval flow requires old path",
+            );
           }
           // Intent routing calls — return shell_operation to match high-risk skill
           yield { delta: "shell_operation", raw: {} };
@@ -257,7 +279,7 @@ describe("createAgentLoopService", () => {
     await expect(service.approve(approvals[0]!.id, "tester")).resolves.toEqual({
       approved: true,
     });
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await waitFor(() => executedSteps.length > 0);
 
     expect(executedSteps).toEqual([
       expect.objectContaining({

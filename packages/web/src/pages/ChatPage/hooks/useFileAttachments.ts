@@ -5,6 +5,32 @@ import type { AttachmentRef } from "../../../features/chat/types";
 import { useOssUpload } from "./useOssUpload";
 import { useDragDrop } from "./useDragDrop";
 
+/** Max file size (bytes) for dataUrl fallback. Larger files must use OSS URL. */
+const MAX_DATAURL_BYTES = 4 * 1024 * 1024; // 4 MB
+
+/** Check whether a File is an image by MIME type or extension. */
+function isImageFile(file: File): boolean {
+  return (
+    file.type.startsWith("image/") ||
+    /\.(png|jpe?g|webp|gif|bmp|avif)$/i.test(file.name)
+  );
+}
+
+/**
+ * Read a File as a base64 data URL.
+ * Returns undefined on failure or if the file exceeds the size limit.
+ */
+function readFileAsDataUrl(file: File): Promise<string | undefined> {
+  if (file.size > MAX_DATAURL_BYTES) return Promise.resolve(undefined);
+  if (!isImageFile(file)) return Promise.resolve(undefined);
+  return new Promise((resolve) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result as string | undefined);
+    reader.onerror = () => resolve(undefined);
+    reader.readAsDataURL(file);
+  });
+}
+
 export interface FileAttachmentsState {
   /** Current attachment list (antd UploadFile format). */
   files: UploadFile[];
@@ -48,18 +74,43 @@ export function useFileAttachments() {
           try {
             const { url, key } = await uploadFile(file);
             if (!mountedRef.current) return;
+            // §P0: When OSS returns no URL (or OSS is unavailable), generate
+            // a dataUrl fallback for small images so the backend can still
+            // use the image for search/lookup operations.
+            let dataUrl: string | undefined;
+            if (!url && isImageFile(file)) {
+              dataUrl = await readFileAsDataUrl(file);
+            }
             setFiles((prev) =>
               prev.map((f) =>
                 f.uid === entry.uid
-                  ? { ...f, status: "done", url: url || undefined, response: key ? { key } : undefined }
+                  ? {
+                      ...f,
+                      status: "done",
+                      url: url || undefined,
+                      response: { key, dataUrl },
+                    }
                   : f,
               ),
             );
           } catch {
             if (!mountedRef.current) return;
+            // §P0: On upload failure, still try to generate a dataUrl for
+            // small images so the user can at least search by image.
+            let dataUrl: string | undefined;
+            if (isImageFile(file)) {
+              dataUrl = await readFileAsDataUrl(file);
+            }
             setFiles((prev) =>
               prev.map((f) =>
-                f.uid === entry.uid ? { ...f, status: "error" } : f,
+                f.uid === entry.uid
+                  ? {
+                      ...f,
+                      status: dataUrl ? "done" : "error",
+                      url: undefined,
+                      response: dataUrl ? { dataUrl } : undefined,
+                    }
+                  : f,
               ),
             );
           }

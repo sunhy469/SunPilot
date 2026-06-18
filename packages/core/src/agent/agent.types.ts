@@ -1,5 +1,7 @@
 export type AgentMessageRole = "system" | "user" | "assistant";
 
+import type { AssistantMessagePart } from "@sunpilot/protocol";
+
 export interface AgentMessage {
   id: string;
   conversationId: string;
@@ -12,8 +14,13 @@ export interface AgentMessage {
     type: string;
     sizeBytes?: number;
     url?: string;
+    dataUrl?: string;
     storageKey?: string;
+    provider?: "aliyun-oss" | "s3" | "minio" | "local";
+    checksum?: string;
   }>;
+  /** Content-block parts from metadata.parts (§P0-3). */
+  parts?: AssistantMessagePart[];
 }
 
 export interface AgentConversation {
@@ -50,7 +57,10 @@ export interface CreateAgentMessageInput {
     type: string;
     sizeBytes?: number;
     url?: string;
+    dataUrl?: string;
     storageKey?: string;
+    provider?: "aliyun-oss" | "s3" | "minio" | "local";
+    checksum?: string;
   }>;
 }
 
