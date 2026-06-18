@@ -1,21 +1,27 @@
 .recent-section {
   margin-top: 18px;
-  padding-top: 14px;
+  padding-top: 12px;
   border-top: 1px solid var(--sp-border-soft);
   flex: 1;
   min-height: 0;
   overflow-y: auto;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+.recent-section::-webkit-scrollbar {
+  display: none;
 }
 
 .recent-title {
   cursor: pointer;
-  margin-bottom: 8px;
-  margin-top: 12px;
-  padding: 8px 10px;
+  margin: 10px 0 6px;
+  padding: 5px 8px;
   border-radius: 6px;
   user-select: none;
-  font-size: 17px;
-  font-weight: 550;
+  color: var(--sp-subtle);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 18px;
 }
 .recent-title:hover {
   background: var(--sp-surface-soft);
@@ -27,28 +33,39 @@
 /* ── Time group label ───────────────────────────────────────── */
 
 .recent-time-group {
-  margin-bottom: 4px;
+  margin-bottom: 8px;
 }
 
 .recent-time-group__label {
   display: block;
-  font-size: 14px;
-  font-weight: 550;
+  margin: 8px 0 3px;
+  padding: 0 10px;
   color: var(--sp-subtle);
-  padding: 3px 8px 5px;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 18px;
   text-transform: none;
-  letter-spacing: 0.2px;
+  letter-spacing: 0;
 }
 
 /* ── Conversation items ──────────────────────────────────────── */
 
 .recent-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  height: 34px;
   justify-content: flex-start !important;
-  font-size: 18px;
-  padding: 8px 12px;
-  border-radius: 8px;
+  padding: 0 6px 0 10px;
+  border-radius: 7px;
+  color: var(--sp-ink);
+  font-size: 14px;
   font-weight: 450;
-  transition: all 0.15s ease;
+  line-height: 20px;
+  transition:
+    background 0.15s ease,
+    color 0.15s ease;
 }
 
 /* Force single-line ellipsis on the button's text span */
@@ -61,11 +78,86 @@
 }
 
 .recent-item:hover {
-  background: var(--sp-surface-soft);
+  background: transparent;
 }
 
 .recent-item--active {
-  background: var(--sp-blue-soft) !important;
+  background: transparent !important;
   color: var(--sp-blue-hover) !important;
-  font-weight: 550;
+  font-weight: 600;
+}
+
+/* ── Conversation item wrapper (label + more button) ─────────── */
+
+.recent-item-wrap {
+  position: relative;
+  min-height: 34px;
+  margin: 1px 0;
+  border-radius: 7px;
+  transition:
+    background 0.15s ease,
+    box-shadow 0.15s ease;
+}
+
+.recent-item-wrap:hover {
+  background: var(--sp-surface-soft);
+}
+
+.recent-item-wrap--active {
+  background: var(--sp-blue-soft) !important;
+}
+
+.recent-item-wrap--active::before {
+  position: absolute;
+  top: 8px;
+  bottom: 8px;
+  left: 0;
+  width: 2px;
+  border-radius: 999px;
+  background: var(--sp-blue);
+  content: "";
+}
+
+/* ── "…" more button ─────────────────────────────────────────── */
+
+.recent-item__more-btn {
+  width: 28px;
+  min-width: 28px;
+  height: 28px;
+  margin-right: 2px;
+  color: var(--sp-muted);
+  flex-shrink: 0;
+  opacity: 0.45;
+  transition:
+    background 0.15s ease,
+    color 0.15s ease,
+    opacity 0.15s ease;
+}
+
+.recent-item__more-btn:hover {
+  color: var(--sp-muted);
+  background: rgba(148, 163, 184, 0.12);
+  opacity: 1;
+}
+
+.recent-item-wrap:hover .recent-item__more-btn {
+  opacity: 1;
+}
+
+/* ── Conversation label ellipsis ──────────────────────────────── */
+
+.recent-item__label {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.recent-item__pin {
+  width: 13px;
+  min-width: 13px;
+  color: var(--sp-blue);
+  font-size: 12px;
+  opacity: 0.85;
 }

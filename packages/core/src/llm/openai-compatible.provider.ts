@@ -4,9 +4,16 @@ import {
   DEFAULT_LLM_MODEL,
   LLM_API_KEY_ENV,
   LLM_BASE_URL_ENV,
-  LLM_MODEL_ENV
+  LLM_MODEL_ENV,
 } from "./llm.config.js";
-import type { ChatCompletionDelta, ChatCompletionRequest, FetchLike, LlmProvider, OpenAICompatibleChatProviderConfig, ToolCallDelta } from "./llm.types.js";
+import type {
+  ChatCompletionDelta,
+  ChatCompletionRequest,
+  FetchLike,
+  LlmProvider,
+  OpenAICompatibleChatProviderConfig,
+  ToolCallDelta,
+} from "./llm.types.js";
 
 interface OpenAIChatStreamChunk {
   id?: string;
@@ -49,7 +56,10 @@ export class OpenAICompatibleChatProvider implements LlmProvider {
   private readonly baseUrl: string;
   private readonly fetchImpl: FetchLike;
 
-  constructor(config: OpenAICompatibleChatProviderConfig, fetchImpl: FetchLike = fetch) {
+  constructor(
+    config: OpenAICompatibleChatProviderConfig,
+    fetchImpl: FetchLike = fetch,
+  ) {
     if (!config.apiKey.trim()) {
       throw new Error(`${LLM_API_KEY_ENV} is required.`);
     }
@@ -60,7 +70,9 @@ export class OpenAICompatibleChatProvider implements LlmProvider {
     this.fetchImpl = fetchImpl;
   }
 
-  async *streamChat(request: ChatCompletionRequest): AsyncIterable<ChatCompletionDelta> {
+  async *streamChat(
+    request: ChatCompletionRequest,
+  ): AsyncIterable<ChatCompletionDelta> {
     if (request.messages.length === 0) {
       throw new Error("At least one chat message is required.");
     }
@@ -81,23 +93,30 @@ export class OpenAICompatibleChatProvider implements LlmProvider {
       }
     }
 
-    const response = await this.fetchImpl(new URL("/chat/completions", this.baseUrl).toString(), {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${this.apiKey}`,
-        "Content-Type": "application/json"
+    const response = await this.fetchImpl(
+      new URL("chat/completions", this.baseUrl).toString(),
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${this.apiKey}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(body),
+        signal: request.signal,
       },
-      body: JSON.stringify(body),
-      signal: request.signal
-    });
+    );
 
     if (!response.ok) {
       const body = await safeResponseText(response);
-      throw new Error(`LLM request failed with HTTP ${response.status}${body ? `: ${body}` : ""}`);
+      throw new Error(
+        `LLM request failed with HTTP ${response.status}${body ? `: ${body}` : ""}`,
+      );
     }
 
     if (!response.body) {
-      throw new Error("LLM streaming response did not include a response body.");
+      throw new Error(
+        "LLM streaming response did not include a response body.",
+      );
     }
 
     for await (const data of parseOpenAIStream(response.body)) {
@@ -132,18 +151,23 @@ export class OpenAICompatibleChatProvider implements LlmProvider {
   }
 }
 
-export function createDefaultLlmProvider(env: NodeJS.ProcessEnv = process.env, fetchImpl?: FetchLike): OpenAICompatibleChatProvider {
+export function createDefaultLlmProvider(
+  env: NodeJS.ProcessEnv = process.env,
+  fetchImpl?: FetchLike,
+): OpenAICompatibleChatProvider {
   const apiKey = env[LLM_API_KEY_ENV] ?? env[DEEPSEEK_API_KEY_ENV];
   if (!apiKey) {
-    throw new Error(`${LLM_API_KEY_ENV} or ${DEEPSEEK_API_KEY_ENV} is required.`);
+    throw new Error(
+      `${LLM_API_KEY_ENV} or ${DEEPSEEK_API_KEY_ENV} is required.`,
+    );
   }
   return new OpenAICompatibleChatProvider(
     {
       apiKey,
       baseUrl: env[LLM_BASE_URL_ENV] ?? DEFAULT_LLM_BASE_URL,
-      model: env[LLM_MODEL_ENV] ?? DEFAULT_LLM_MODEL
+      model: env[LLM_MODEL_ENV] ?? DEFAULT_LLM_MODEL,
     },
-    fetchImpl
+    fetchImpl,
   );
 }
 
@@ -161,7 +185,9 @@ async function safeResponseText(response: Response): Promise<string> {
   }
 }
 
-async function* parseOpenAIStream(body: ReadableStream<Uint8Array>): AsyncIterable<string> {
+async function* parseOpenAIStream(
+  body: ReadableStream<Uint8Array>,
+): AsyncIterable<string> {
   const reader = body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";

@@ -4,6 +4,7 @@ import type {
   AgentLoopInput,
   AgentObservation,
   AgentReflection,
+  IAssistantMessageStream,
   IntentRouter,
   ResponseComposer as ResponseComposerInterface,
 } from "../loop-types.js";
@@ -35,6 +36,11 @@ export class ResponseComposer implements ResponseComposerInterface {
         : never;
       plan?: import("../loop-types.js").AgentPlan;
       modelId?: "dp" | "seed";
+      /** Optional stream + textPartId for content-block parts (§P0-1). */
+      stream?: {
+        stream: IAssistantMessageStream;
+        textPartId: string;
+      };
     },
     signal: AbortSignal,
   ): Promise<ComposeResult> {
@@ -48,6 +54,7 @@ export class ResponseComposer implements ResponseComposerInterface {
       input.context.contextSnapshot,
       undefined,
       input.modelId,
+      input.stream,
     );
   }
 
@@ -195,11 +202,6 @@ export class ResponseComposer implements ResponseComposerInterface {
     const { runId, conversationId } = input.input;
 
     this.deps.eventBus.emit(
-      "agent.response.started",
-      { runId, conversationId, messageId },
-      { runId, conversationId },
-    );
-    this.deps.eventBus.emit(
       "agent.clarification.requested",
       {
         runId,
@@ -207,16 +209,6 @@ export class ResponseComposer implements ResponseComposerInterface {
         messageId,
         question: input.question,
         reason: input.reason,
-      },
-      { runId, conversationId },
-    );
-    this.deps.eventBus.emit(
-      "agent.response.delta",
-      {
-        runId,
-        conversationId,
-        messageId,
-        delta: input.question,
       },
       { runId, conversationId },
     );
@@ -243,25 +235,23 @@ export class ResponseComposer implements ResponseComposerInterface {
     messageId?: string,
     /** User-selected model for request-level routing. */
     modelId?: "dp" | "seed",
+    /** Optional stream + textPartId for content-block parts (§P0-1). */
+    streamOpts?: {
+      stream: IAssistantMessageStream;
+      textPartId: string;
+    },
   ): Promise<ComposeResult> {
-    const id = messageId ?? `msg_${crypto.randomUUID()}`;
+    // §P0-1: When stream mode is active, use the stream's messageId and
+    // let the stream handle message persistence. This prevents double-save.
+    const id = streamOpts?.stream.messageId ?? messageId ?? `msg_${crypto.randomUUID()}`;
     const modelCallId = `model_${crypto.randomUUID()}`;
-    const startedAt = Date.now();
     const inputTokens = estimateTokens(
       messages.map((message) => message.content).join("\n"),
     );
     let content = "";
 
     try {
-      // Only emit agent.response.started if the caller didn't already.
-      // When messageId is provided, the caller has already emitted it.
-      if (!messageId) {
-        this.deps.eventBus.emit(
-          "agent.response.started",
-          { runId, conversationId, messageId: id },
-          { runId, conversationId },
-        );
-      }
+      // agent.response.started removed — use agent.message.started via stream instead
       // Model call is now persisted by ModelRouter via purpose provider (§P1-5)
       this.deps.eventBus.emit(
         "agent.model.started",
@@ -291,6 +281,7 @@ export class ResponseComposer implements ResponseComposerInterface {
           });
         }
         content += chunk.delta;
+
         this.deps.eventBus.emit(
           "agent.model.delta",
           {
@@ -300,16 +291,11 @@ export class ResponseComposer implements ResponseComposerInterface {
           },
           { runId, conversationId },
         );
-        this.deps.eventBus.emit(
-          "agent.response.delta",
-          {
-            runId,
-            conversationId,
-            messageId: id,
-            delta: chunk.delta,
-          },
-          { runId, conversationId },
-        );
+
+        // Route delta through stream when available (§P0-1)
+        if (streamOpts) {
+          streamOpts.stream.appendText(streamOpts.textPartId, chunk.delta);
+        }
       }
 
       // Model call persistence handled by ModelRouter (§P1-5)
@@ -324,15 +310,18 @@ export class ResponseComposer implements ResponseComposerInterface {
         { runId, conversationId },
       );
 
-      // Save the final message with provenance metadata
-      await this.deps.saveMessage({
-        id,
-        conversationId,
-        role: "assistant",
-        content,
-        runId,
-        metadata,
-      });
+      // §P0-1: In stream mode, the stream handles saveMessage on complete().
+      // Only save directly when NOT using a stream.
+      if (!streamOpts) {
+        await this.deps.saveMessage({
+          id,
+          conversationId,
+          role: "assistant",
+          content,
+          runId,
+          metadata,
+        });
+      }
     } catch (error) {
       const normalizedError = normalizeModelError(error);
       // Model call error status handled by ModelRouter (§P1-5)
@@ -345,8 +334,8 @@ export class ResponseComposer implements ResponseComposerInterface {
         },
         { runId, conversationId },
       );
-      // Save partial message on error
-      if (content.length > 0) {
+      // Save partial message on error (only when not using stream — stream handles its own errors)
+      if (!streamOpts && content.length > 0) {
         try {
           await this.deps.saveMessage({
             id,

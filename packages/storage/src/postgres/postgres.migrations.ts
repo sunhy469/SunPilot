@@ -23,6 +23,7 @@ const migrationFiles = [
   "016_tool_call_metadata.sql",
   "017_agent_trace_plan.sql",
   "018_memory_stale_columns.sql",
+  "019_add_conversations_pinned.sql",
 ];
 const migrationLockKey = 7_290_317_373_001;
 

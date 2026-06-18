@@ -23,7 +23,11 @@ import {
   sendChatMessage,
   sendChatStop,
 } from "../../../features/chat/ws";
-import type { ChatMessage } from "../../../features/conversations/types";
+import { validateAttachmentRefsForSend } from "../../../features/chat/attachment-utils";
+import type {
+  AgentActivity,
+  ChatMessage,
+} from "../../../features/conversations/types";
 import type { ChatViewState, LocalSendState } from "../types";
 
 type ChatSocketPayload = ChatSocketEvent | ChatSocketErrorResponse;
@@ -79,6 +83,11 @@ function parseSocketPayload(data: string): ChatSocketPayload | undefined {
       case "agent.artifact.created":
       case "agent.memory.written":
       case "agent.run.interrupted":
+      case "agent.message.started":
+      case "agent.message.part.started":
+      case "agent.message.part.delta":
+      case "agent.message.part.updated":
+      case "agent.message.completed":
       case "pong":
         return normalizeSocketEvent(payload as ChatSocketEvent);
       default:
@@ -127,10 +136,170 @@ function isAgentEnvelope(value: unknown): value is {
   );
 }
 
+function findActiveAssistantMessageIndex(messages: ChatMessage[]): number {
+  for (let idx = messages.length - 1; idx >= 0; idx--) {
+    const item = messages[idx];
+    if (
+      item?.role === "assistant" &&
+      (item.status === "pending" || item.status === "streaming")
+    ) {
+      return idx;
+    }
+  }
+  for (let idx = messages.length - 1; idx >= 0; idx--) {
+    if (messages[idx]?.role === "assistant") return idx;
+  }
+  return -1;
+}
+
+function upsertTextPartDelta(
+  messages: ChatMessage[],
+  input: {
+    conversationId: string;
+    messageId: string;
+    partId: string;
+    delta: string;
+  },
+): ChatMessage[] {
+  // §5.8: Don't append deltas to completed messages — the stream is closed.
+  // This prevents duplicate content when a late delta arrives after
+  // agent.message.completed.
+  const existing = messages.find((m) => m.id === input.messageId);
+  if (existing && existing.status === "completed") return messages;
+
+  const applyDelta = (item: ChatMessage): ChatMessage => {
+    const parts = item.parts ?? [];
+    const hasPart = parts.some((part) => part.id === input.partId);
+    const nextParts = hasPart
+      ? parts.map((part) =>
+          part.type === "text" && part.id === input.partId
+            ? { ...part, content: (part.content ?? "") + input.delta }
+            : part,
+        )
+      : [
+          ...parts,
+          {
+            id: input.partId,
+            type: "text" as const,
+            content: input.delta,
+            source: "model" as const,
+            status: "streaming" as const,
+            createdAt: new Date().toISOString(),
+          },
+        ];
+    return { ...item, status: "streaming", parts: nextParts };
+  };
+
+  let found = false;
+  const updated = messages.map((item) => {
+    if (item.id !== input.messageId) return item;
+    found = true;
+    return applyDelta(item);
+  });
+  if (found) return updated;
+
+  return [
+    ...messages,
+    applyDelta({
+      id: input.messageId,
+      conversationId: input.conversationId,
+      role: "assistant",
+      content: "",
+      createdAt: new Date().toISOString(),
+      status: "streaming",
+      activities: [],
+      parts: [],
+    }),
+  ];
+}
+
+/**
+ * Map agent events to user-visible activities.
+ *
+ * Internal lifecycle events (context, intent, plan, model lifecycle)
+ * are intentionally NOT mapped to activities — they are debug/trace
+ * information, not user-facing content. The debug panel shows full
+ * event traces separately.
+ *
+ * Phase 0 of content-block streaming refactoring:
+ *   https://github.com/sunhy469/SunPilot/blob/main/developer_docs/guides/
+ *   agent_interleaved_streaming_response_design.md
+ */
+function activityFromAgentEvent(
+  event: ChatSocketEvent,
+): AgentActivity | undefined {
+  if (event.method === "pong") return undefined;
+  const createdAt = event.createdAt ?? new Date().toISOString();
+  const id = event.id ?? `${event.method}_${createdAt}`;
+
+  switch (event.method) {
+    // ── Tool execution (user-visible) ──────────────────────────
+    case "agent.tool.started":
+      return {
+        id,
+        kind: "tool",
+        label: `正在调用工具: ${event.params.name}`,
+        detail: event.params.skillId,
+        status: "running",
+        createdAt,
+      };
+    case "agent.tool.delta":
+      return {
+        id,
+        kind: "tool",
+        label: event.params.delta || "工具正在执行",
+        status: "running",
+        createdAt,
+      };
+    case "agent.tool.completed":
+      return {
+        id,
+        kind: "result",
+        label: "工具调用完成",
+        detail: event.params.summary,
+        status: "completed",
+        createdAt,
+      };
+    case "agent.tool.failed":
+      return {
+        id,
+        kind: "error",
+        label: "工具调用失败",
+        detail: event.params.error.message,
+        status: "failed",
+        createdAt,
+      };
+
+    // ── Agent-level errors (user-visible) ──────────────────────
+    case "agent.error":
+      return {
+        id,
+        kind: "error",
+        label: "请求失败",
+        detail: event.params.error?.message ?? event.params.message,
+        status: "failed",
+        createdAt,
+      };
+
+    // ── Internal lifecycle events — intentionally hidden ──────
+    // agent.context.started    → debug only
+    // agent.context.completed  → debug only
+    // agent.intent.detected    → debug only
+    // agent.plan.created       → debug only
+    // agent.tool.selected      → debug only
+    // agent.model.started      → debug only
+    // agent.model.completed    → debug only
+    // agent.model.failed       → debug only
+    default:
+      return undefined;
+  }
+}
+
 export function useChat(
   conversationId: string,
   setConversationId: (id: string) => void,
   setMessages: Dispatch<SetStateAction<ChatMessage[]>>,
+  onConversationCreated?: (conversationId: string) => void,
 ) {
   const [pending, setPending] = useState(false);
   const [status, setStatus] = useState<"online" | "offline" | "thinking">(
@@ -144,6 +313,8 @@ export function useChat(
   const responseTimerRef = useRef<number | null>(null);
   const keepAliveTimerRef = useRef<number | null>(null);
   const pendingRef = useRef(false);
+  const onConversationCreatedRef = useRef(onConversationCreated);
+  onConversationCreatedRef.current = onConversationCreated;
   const activeRunIdRef = useRef<string | null>(null);
   const [activeRunId, setActiveRunId] = useState<string | null>(null);
   const requestRef = useRef(createRequest());
@@ -284,6 +455,11 @@ export function useChat(
         const payload = params as { runId: string; conversationId?: string };
         activeRunIdRef.current = payload.runId;
         setActiveRunId(payload.runId);
+        // If backend auto-created a conversation, update local state
+        if (payload.conversationId && !conversationId) {
+          setConversationId(payload.conversationId);
+          onConversationCreatedRef.current?.(payload.conversationId);
+        }
       }
       if (
         method === "agent.run.completed" ||
@@ -294,8 +470,169 @@ export function useChat(
         activeRunIdRef.current = null;
         setActiveRunId(null);
       }
+
+      // ── Message content-block events (§Phase 2d: unified reducer) ──
+      // These are applied here so both live WebSocket events AND
+      // replayConversationEvents() results update message parts.
+      // The live path also triggers startResponseTimer/setSendState
+      // in the WebSocket message handler, but the core state mutation
+      // (setMessages) lives here for both paths.
+      if (method === "agent.message.started") {
+        const msgParams = params as {
+          runId: string;
+          conversationId: string;
+          messageId: string;
+        };
+        setMessages((items) => {
+          const placeholderIdx = items.findIndex(
+            (item) => item.role === "assistant" && item.status === "pending",
+          );
+          if (placeholderIdx >= 0) {
+            return items.map((item, idx) =>
+              idx === placeholderIdx
+                ? {
+                    ...item,
+                    id: msgParams.messageId,
+                    conversationId: msgParams.conversationId ?? conversationId,
+                    status: "streaming" as const,
+                    parts: [],
+                  }
+                : item,
+            );
+          }
+          if (items.some((item) => item.id === msgParams.messageId)) {
+            return items;
+          }
+          return [
+            ...items,
+            {
+              id: msgParams.messageId,
+              conversationId: msgParams.conversationId ?? conversationId,
+              role: "assistant" as const,
+              content: "",
+              createdAt: new Date().toISOString(),
+              status: "streaming" as const,
+              activities: [],
+              parts: [],
+            },
+          ];
+        });
+        return;
+      }
+
+      if (method === "agent.message.part.started") {
+        const partParams = params as {
+          messageId: string;
+          part: Record<string, unknown>;
+        };
+        setMessages((items) =>
+          items.map((item) =>
+            item.id === partParams.messageId
+              ? {
+                  ...item,
+                  parts: [
+                    ...(item.parts ?? []),
+                    partParams.part as ChatMessage["parts"] extends Array<infer T> ? T : never,
+                  ],
+                }
+              : item,
+          ),
+        );
+        return;
+      }
+
+      if (method === "agent.message.part.delta") {
+        const deltaParams = params as {
+          conversationId?: string;
+          messageId: string;
+          partId: string;
+          delta: string;
+        };
+        setMessages((items) =>
+          upsertTextPartDelta(items, {
+            conversationId: deltaParams.conversationId ?? conversationId,
+            messageId: deltaParams.messageId,
+            partId: deltaParams.partId,
+            delta: deltaParams.delta,
+          }),
+        );
+        return;
+      }
+
+      if (method === "agent.message.part.updated") {
+        const updateParams = params as {
+          messageId: string;
+          partId: string;
+          patch: Record<string, unknown>;
+        };
+        setMessages((items) =>
+          items.map((item) =>
+            item.id === updateParams.messageId
+              ? {
+                  ...item,
+                  parts: (item.parts ?? []).map((part) =>
+                    part.id === updateParams.partId
+                      ? { ...part, ...updateParams.patch }
+                      : part,
+                  ),
+                }
+              : item,
+          ),
+        );
+        return;
+      }
+
+      if (method === "agent.message.completed") {
+        const completedParams = params as {
+          runId?: string;
+          conversationId?: string;
+          messageId: string;
+          content: string;
+          parts: Array<Record<string, unknown>>;
+          cards?: Array<{ type: string; title?: string; data: Record<string, unknown> }>;
+        };
+        setMessages((items) =>
+          items.map((item) =>
+            item.id === completedParams.messageId
+              ? {
+                  ...item,
+                  content: completedParams.content,
+                  parts: completedParams.parts as unknown as ChatMessage["parts"],
+                  status: "completed" as const,
+                  cards: (completedParams.cards as ChatMessage["cards"]) ?? item.cards,
+                }
+              : item,
+          ),
+        );
+        return;
+      }
     },
-    [],
+    [conversationId, setConversationId, setMessages],
+  );
+
+  const appendAssistantActivity = useCallback(
+    (activity: AgentActivity) => {
+      setMessages((items) => {
+        const targetIdx = findActiveAssistantMessageIndex(items);
+        if (targetIdx < 0) return items;
+        const target = items[targetIdx]!;
+        // §Cleanup: Don't accumulate activities for parts-based messages.
+        // Parts rendering replaces AgentActivityList for new content-block messages.
+        if (target.parts && target.parts.length > 0) return items;
+        if (target.activities?.some((item) => item.id === activity.id)) {
+          return items;
+        }
+        return items.map((item, idx) =>
+          idx === targetIdx
+            ? {
+                ...item,
+                activities: [...(item.activities ?? []), activity].slice(-16),
+              }
+            : item,
+        );
+      });
+    },
+    [setMessages],
   );
 
   const refreshApprovals = useCallback(async () => {
@@ -387,6 +724,10 @@ export function useChat(
         clearResponseTimer();
         setSendState("failed");
         applyAgentEvent(payload);
+        const activity = activityFromAgentEvent(payload);
+        if (activity) {
+          appendAssistantActivity(activity);
+        }
         setError(
           payload.params.error?.message ??
             payload.params.message ??
@@ -400,9 +741,13 @@ export function useChat(
       if (payload.method === "pong") return;
 
       applyAgentEvent(payload);
+      const activity = activityFromAgentEvent(payload);
+      if (activity) {
+        appendAssistantActivity(activity);
+      }
 
       if (payload.method === "agent.run.created") {
-        activeRunIdRef.current = payload.params.runId;
+        activeRunIdRef.current = payload.params.runId ?? null;
         setActiveRunId(payload.params.runId);
         setConversationId(payload.params.conversationId);
         setSendState("running");
@@ -421,6 +766,7 @@ export function useChat(
       if (payload.method === "agent.tool.started") {
         const toolParams = payload.params as { name?: string };
         toolCallCountRef.current += 1;
+        setSendState("running");
         if (toolParams.name) {
           setToolName(toolParams.name);
         }
@@ -441,7 +787,8 @@ export function useChat(
         const progressMsg =
           typeof progressPayload?.message === "string"
             ? progressPayload.message
-            : typeof deltaParams.delta === "string" && deltaParams.delta.length > 0
+            : typeof deltaParams.delta === "string" &&
+                deltaParams.delta.length > 0
               ? deltaParams.delta
               : undefined;
         const progressPct =
@@ -449,6 +796,7 @@ export function useChat(
             ? progressPayload.progress
             : undefined;
         if (progressMsg) {
+          setSendState("running");
           setToolName(
             progressPct != null
               ? `${progressMsg} (${progressPct}%)`
@@ -466,122 +814,36 @@ export function useChat(
         }
       }
 
-      if (payload.method === "agent.response.started") {
-        activeRunIdRef.current = payload.params.runId;
-        setActiveRunId(payload.params.runId);
+      // §5.7: agent.response.started UI handler removed —
+      // agent.message.started now handles message lifecycle.
+
+      // ── Message content-block events: live UI state (§Phase 2c+2d) ──
+      // Core data mutations (setMessages) are handled by applyAgentEvent()
+      // called above, so live + replay share the same reducer.
+      // Here we only manage live UI concerns: timers, sendState, status.
+      if (payload.method === "agent.message.started") {
+        const msgParams = payload.params as { runId: string };
+        activeRunIdRef.current = msgParams.runId;
+        setActiveRunId(msgParams.runId);
         setSendState("streaming");
         setStatus("thinking");
-        setMessages((items) => {
-          // Replace the local assistant placeholder (status="pending") with
-          // the real messageId from the server, preserving any accumulated content.
-          const placeholderIdx = items.findIndex(
-            (item) => item.role === "assistant" && item.status === "pending",
-          );
-          if (placeholderIdx >= 0) {
-            const placeholder = items[placeholderIdx]!;
-            return items.map((item, idx) =>
-              idx === placeholderIdx
-                ? {
-                    id: payload.params.messageId,
-                    conversationId: payload.params.conversationId ?? conversationId,
-                    role: placeholder.role as "assistant",
-                    content: placeholder.content,
-                    createdAt: placeholder.createdAt,
-                    status: "streaming" as const,
-                  }
-                : item,
-            );
-          }
-          // No placeholder found — create a new assistant message
-          if (items.some((item) => item.id === payload.params.messageId)) {
-            return items;
-          }
-          return [
-            ...items,
-            {
-              id: payload.params.messageId,
-              conversationId: payload.params.conversationId ?? conversationId,
-              role: "assistant" as const,
-              content: "",
-              createdAt: new Date().toISOString(),
-              status: "streaming" as const,
-            },
-          ];
-        });
       }
 
-      // ── Agent response delta ──────────────────────────────────
-      const deltaPayload =
-        payload.method === "agent.response.delta"
-          ? {
-              conversationId: payload.params.conversationId,
-              messageId: payload.params.messageId,
-              delta: payload.params.delta,
-            }
-          : null;
-
-      if (deltaPayload) {
+      if (payload.method === "agent.message.part.started") {
         startResponseTimer();
         setSendState("streaming");
-        activeRunIdRef.current = payload.params.runId;
-        setMessages((items) => {
-          const exists = items.some(
-            (item) => item.id === deltaPayload.messageId,
-          );
-          if (!exists) {
-            // Replace the local assistant placeholder (status="pending")
-            // with the real messageId from the first delta, if one exists.
-            const placeholderIdx = items.findIndex(
-              (item) => item.role === "assistant" && item.status === "pending",
-            );
-            if (placeholderIdx >= 0) {
-              const placeholder = items[placeholderIdx]!;
-              return items.map((item, idx) =>
-                idx === placeholderIdx
-                  ? {
-                      id: deltaPayload.messageId,
-                      conversationId: deltaPayload.conversationId,
-                      role: placeholder.role as "assistant",
-                      content: deltaPayload.delta,
-                      createdAt: placeholder.createdAt,
-                      status: "streaming" as const,
-                    }
-                  : item,
-              );
-            }
-            // No placeholder — create a new assistant message
-            return [
-              ...items,
-              {
-                id: deltaPayload.messageId,
-                conversationId: deltaPayload.conversationId,
-                role: "assistant" as const,
-                content: deltaPayload.delta,
-                createdAt: new Date().toISOString(),
-                status: "streaming" as const,
-              },
-            ];
-          }
-          return items.map((item) =>
-            item.id === deltaPayload.messageId
-              ? {
-                  ...item,
-                  content: item.content + deltaPayload.delta,
-                  status: "streaming",
-                }
-              : item,
-          );
-        });
       }
 
-      // ── Agent response completed ──────────────────────────────
-      if (payload.method === "agent.response.completed") {
-        const completedParams = payload.params as {
-          runId?: string;
-          conversationId?: string;
-          messageId?: string;
-          cards?: Array<{ type: string; title?: string; data: Record<string, unknown> }>;
-        };
+      if (payload.method === "agent.message.part.delta") {
+        startResponseTimer();
+        setSendState("streaming");
+      }
+
+      if (payload.method === "agent.message.part.updated") {
+        setSendState("streaming");
+      }
+
+      if (payload.method === "agent.message.completed") {
         clearResponseTimer();
         setSendState("completed");
         setStatus("online");
@@ -590,19 +852,10 @@ export function useChat(
         toolCallCountRef.current = 0;
         activeRunIdRef.current = null;
         setActiveRunId(null);
-        // Apply rich cards from the completed event to the message
-        if (completedParams.cards && completedParams.cards.length > 0) {
-          setMessages((items) =>
-            items.map((item) =>
-              item.id === completedParams.messageId
-                ? { ...item, cards: completedParams.cards as ChatMessage["cards"] }
-                : item,
-            ),
-          );
-        }
       }
 
-      // ── Agent run completed ───────────────────────────────────
+      // ── Agent message completed via content-block event ──────────
+      // (agent.response.completed UI handler removed — agent.message.completed handles this)
       if (payload.method === "agent.run.completed") {
         clearResponseTimer();
         setSendState("completed");
@@ -637,6 +890,14 @@ export function useChat(
         toolCallCountRef.current = 0;
         activeRunIdRef.current = null;
         setActiveRunId(null);
+        // §Frontend gap: Mark the active assistant message as stopped
+        setMessages((items) =>
+          items.map((item) =>
+            item.role === "assistant" && item.status === "streaming"
+              ? { ...item, status: "stopped" as const }
+              : item,
+          ),
+        );
       }
 
       // ── Agent run interrupted ─────────────────────────────────
@@ -649,10 +910,19 @@ export function useChat(
         toolCallCountRef.current = 0;
         activeRunIdRef.current = null;
         setActiveRunId(null);
+        // §Frontend gap: Mark the active assistant message as stopped
+        setMessages((items) =>
+          items.map((item) =>
+            item.role === "assistant" && item.status === "streaming"
+              ? { ...item, status: "stopped" as const }
+              : item,
+          ),
+        );
       }
     });
     return socket;
   }, [
+    appendAssistantActivity,
     applyAgentEvent,
     clearResponseTimer,
     conversationId,
@@ -692,9 +962,30 @@ export function useChat(
   }, [applyAgentEvent, conversationId]);
 
   const send = useCallback(
-    (message: string, attachments?: AttachmentRef[], permissionMode?: "ask" | "auto" | "full", modelId?: "dp" | "seed") => {
+    (
+      message: string,
+      attachments?: AttachmentRef[],
+      permissionMode?: "ask" | "auto" | "full",
+      modelId?: "dp" | "seed",
+    ) => {
       const text = message.trim();
-      if ((!text && (!attachments || attachments.length === 0)) || pending) return;
+      if ((!text && (!attachments || attachments.length === 0)) || pending)
+        return;
+
+      // §5.2: Final gate — validate AttachmentRef[] (not just UploadFile[] UI state).
+      // Defense-in-depth: ChatComposer validates at the UploadFile level, but we
+      // re-check the final AttachmentRef[] here to catch any edge case where the
+      // UploadFile→AttachmentRef conversion drops dataUrl/url/storageKey.
+      if (attachments && attachments.length > 0) {
+        const refCheck = validateAttachmentRefsForSend(attachments);
+        if (refCheck.missingImageRef) {
+          setError(
+            "图片尚未上传完成，缺少可用的图片链接。请等待上传完成后再试。",
+          );
+          setSendState("failed");
+          return;
+        }
+      }
 
       const placeholderId = `local_${crypto.randomUUID()}`;
 
@@ -722,7 +1013,10 @@ export function useChat(
             type: a.type,
             sizeBytes: a.sizeBytes,
             url: a.url,
+            dataUrl: a.dataUrl,
             storageKey: a.storageKey,
+            provider: a.provider,
+            checksum: a.checksum,
           })),
         },
         {
@@ -743,7 +1037,7 @@ export function useChat(
           message: text,
           mode: "agent",
           permissionMode: permissionMode ?? "auto",
-          modelId: modelId ?? "dp",
+          modelId: modelId ?? "seed",
           attachments,
         });
       };

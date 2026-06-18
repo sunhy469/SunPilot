@@ -14,6 +14,7 @@ export interface ApprovalDecisionResult {
   reason?: string;
   title?: string;
   riskLevel?: RiskLevel;
+  messageId?: string;
   requestedAction?: NormalizedApprovalAction;
   event: AgentEvent;
 }
@@ -116,6 +117,7 @@ export class RepositoryApprovalDecisionService {
         title: decided.title,
         riskLevel: decided.risk as RiskLevel,
         requestedAction: normalizeRequestedAction(decided.requestedAction),
+        messageId: normalizeRequestedAction(decided.requestedAction)?.messageId,
         event: {
           ...event,
           sequence: persisted.sequence,

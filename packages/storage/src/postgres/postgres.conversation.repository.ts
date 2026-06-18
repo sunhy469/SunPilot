@@ -3,6 +3,7 @@ import type {
   ConversationRepository,
   CreateConversationInput,
   ListConversationsInput,
+  UpdateConversationPatch,
 } from "../repositories/conversation.repository.js";
 import type { PostgresPool } from "./postgres.client.js";
 
@@ -16,7 +17,7 @@ export class PostgresConversationRepository implements ConversationRepository {
     const result = await this.pool.query(
       `INSERT INTO conversations (id, title, kind)
        VALUES ($1, $2, $3)
-       RETURNING id, title, status, kind, created_at, updated_at`,
+       RETURNING id, title, status, kind, pinned, created_at, updated_at`,
       [id, input.title ?? null, input.kind ?? "chat"],
     );
     return mapConversation(result.rows[0]);
@@ -24,7 +25,7 @@ export class PostgresConversationRepository implements ConversationRepository {
 
   async findById(id: string): Promise<ConversationRecord | null> {
     const result = await this.pool.query(
-      "SELECT id, title, status, kind, created_at, updated_at FROM conversations WHERE id = $1",
+      "SELECT id, title, status, kind, pinned, created_at, updated_at FROM conversations WHERE id = $1",
       [id],
     );
     return result.rows[0] ? mapConversation(result.rows[0]) : null;
@@ -37,17 +38,17 @@ export class PostgresConversationRepository implements ConversationRepository {
     const cursor = decodeConversationCursor(input.cursor);
     const result = cursor
       ? await this.pool.query(
-          `SELECT id, title, status, kind, created_at, updated_at
+          `SELECT id, title, status, kind, pinned, created_at, updated_at
            FROM conversations
            WHERE updated_at < $1 OR (updated_at = $1 AND id < $2)
-           ORDER BY updated_at DESC, id DESC
+           ORDER BY pinned DESC, updated_at DESC, id DESC
            LIMIT $3`,
           [cursor.updatedAt, cursor.id, limit],
         )
       : await this.pool.query(
-          `SELECT id, title, status, kind, created_at, updated_at
+          `SELECT id, title, status, kind, pinned, created_at, updated_at
            FROM conversations
-           ORDER BY updated_at DESC, id DESC
+           ORDER BY pinned DESC, updated_at DESC, id DESC
            LIMIT $1`,
           [limit],
         );
@@ -61,12 +62,59 @@ export class PostgresConversationRepository implements ConversationRepository {
     );
   }
 
-  async delete(id: string): Promise<boolean> {
+  async update(
+    id: string,
+    patch: UpdateConversationPatch,
+  ): Promise<ConversationRecord | null> {
+    const sets: string[] = [];
+    const values: (string | boolean)[] = [];
+    let paramIndex = 1;
+
+    if (patch.title !== undefined) {
+      sets.push(`title = $${paramIndex++}`);
+      values.push(patch.title);
+    }
+    if (patch.pinned !== undefined) {
+      sets.push(`pinned = $${paramIndex++}`);
+      values.push(patch.pinned);
+    }
+
+    if (sets.length === 0) return null;
+
+    sets.push(`updated_at = NOW()`);
+    values.push(id);
+
     const result = await this.pool.query(
-      "DELETE FROM conversations WHERE id = $1",
-      [id],
+      `UPDATE conversations
+       SET ${sets.join(", ")}
+       WHERE id = $${paramIndex}
+       RETURNING id, title, status, kind, pinned, created_at, updated_at`,
+      values,
     );
-    return (result.rowCount ?? 0) > 0;
+    return result.rows[0] ? mapConversation(result.rows[0]) : null;
+  }
+
+  async delete(id: string): Promise<boolean> {
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      // Clean up related data that doesn't have ON DELETE CASCADE
+      await client.query("DELETE FROM agent_traces WHERE conversation_id = $1", [id]);
+      await client.query("DELETE FROM events WHERE conversation_id = $1", [id]);
+      // messages has ON DELETE CASCADE, but delete explicitly for clarity
+      await client.query("DELETE FROM messages WHERE conversation_id = $1", [id]);
+      const result = await client.query(
+        "DELETE FROM conversations WHERE id = $1",
+        [id],
+      );
+      await client.query("COMMIT");
+      return (result.rowCount ?? 0) > 0;
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 }
 
@@ -97,6 +145,7 @@ function mapConversation(row: any): ConversationRecord {
     title: row.title ?? undefined,
     status: row.status,
     kind: row.kind ?? "chat",
+    pinned: row.pinned ?? false,
     createdAt: row.created_at.toISOString(),
     updatedAt: row.updated_at.toISOString(),
   };
