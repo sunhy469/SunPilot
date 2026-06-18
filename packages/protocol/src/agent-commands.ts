@@ -22,8 +22,10 @@ export const chatSendSchema = z.object({
         type: z.string(),
         sizeBytes: z.number().optional(),
         url: z.string().optional(),
+        /** Base64-encoded data URL as fallback when no public URL is available. */
+        dataUrl: z.string().optional(),
         storageKey: z.string().optional(),
-        provider: z.enum(["aliyun-oss", "s3", "minio"]).optional(),
+        provider: z.enum(["aliyun-oss", "s3", "minio", "local"]).optional(),
         checksum: z.string().optional(),
       }),
     )
@@ -93,8 +95,10 @@ export interface ChatSendParams {
     type: string;
     sizeBytes?: number;
     url?: string;
+    /** Base64-encoded data URL as fallback when no public URL is available. */
+    dataUrl?: string;
     storageKey?: string;
-    provider?: 'aliyun-oss' | 's3' | 'minio';
+    provider?: 'aliyun-oss' | 's3' | 'minio' | 'local';
     checksum?: string;
   }>;
 }

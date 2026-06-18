@@ -16,6 +16,7 @@ import {
   ReloadOutlined,
 } from "@ant-design/icons";
 import type { AttachmentRef } from "../../../features/chat/types";
+import { validateAttachmentsForSend } from "../../../features/chat/attachment-utils";
 import { useFileAttachments } from "../hooks/useFileAttachments";
 import { AttachmentPreview } from "./AttachmentPreview";
 import type { LocalSendState } from "../types";
@@ -121,7 +122,7 @@ export function ChatComposer({
 }) {
   const [internalValue, setInternalValue] = useState("");
   const [permission, setPermission] = useState("auto");
-  const [model, setModel] = useState("dp");
+  const [model, setModel] = useState("seed");
   // Track queued send when user clicks send while uploads are in progress
   const [queuedSend, setQueuedSend] = useState(false);
   const [uploadFailed, setUploadFailed] = useState(false);
@@ -211,12 +212,21 @@ export function ChatComposer({
     if (!queuedSend || uploading) return;
     // All uploads finished — fire the queued send
     setQueuedSend(false);
+
+    // §Phase 2b: Validate image attachments have usable refs before auto-send
+    const validation = validateAttachmentsForSend(files);
+    if (validation.missingImageRef) {
+      setUploadFailed(true);
+      onSendStateChange?.("failed");
+      return;
+    }
+
     const text = currentValue.trim();
     onSend(text || "请查看附件", toAttachmentRefs(), permission as "ask" | "auto" | "full", model as "dp" | "seed");
     clearFiles();
     setCurrentValue("");
     onSendStateChange?.("sending");
-  }, [uploading, queuedSend, currentValue, onSend, toAttachmentRefs, clearFiles, setCurrentValue, onSendStateChange, permission, model]);
+  }, [uploading, queuedSend, currentValue, onSend, toAttachmentRefs, clearFiles, setCurrentValue, onSendStateChange, permission, model, files]);
 
   // ── Send ──────────────────────────────────────────────────────────
 
@@ -233,6 +243,16 @@ export function ChatComposer({
     if (uploading) {
       setQueuedSend(true);
       onSendStateChange?.("queued_until_upload_done");
+      return;
+    }
+
+    // §Phase 2b: Send gate — validate image attachments have usable references.
+    // Block send when image files exist but lack both url and dataUrl.
+    // This prevents the "UI shows image but backend gets nothing" illusion.
+    const validation = validateAttachmentsForSend(files);
+    if (validation.missingImageRef) {
+      setUploadFailed(true);
+      onSendStateChange?.("failed");
       return;
     }
 

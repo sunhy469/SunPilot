@@ -19,6 +19,7 @@ import {
   listApprovalsQuerySchema,
   listAuditLogsQuerySchema,
   uploadPresignBodySchema,
+  updateConversationBodySchema,
 } from "./schemas.js";
 import { registerMemoryRoutes } from "./routes/memory.js";
 import { formatZodIssues, paginationCursor } from "./routes/shared.js";
@@ -222,6 +223,8 @@ export function registerSunPilotApiRoutes(
           createdAt: r.createdAt,
           attachments: (r.metadata as { attachments?: unknown })?.attachments,
           cards: (r.metadata as { richCards?: unknown })?.richCards,
+          /** §P0-3: Restore content-block parts from metadata for history replay. */
+          parts: (r.metadata as { parts?: unknown })?.parts,
         })),
       };
     },
@@ -241,6 +244,15 @@ export function registerSunPilotApiRoutes(
         conversationId: request.params.id,
         items: query.limit ? events.slice(0, query.limit) : events,
       };
+    },
+  );
+  app.patch<{ Params: { id: string } }>(
+    "/v1/conversations/:id",
+    async (request, reply) => {
+      const body = updateConversationBodySchema.parse(request.body ?? {});
+      const updated = await database.conversations.update(request.params.id, body);
+      if (!updated) return reply.code(404).send({ error: "not_found" });
+      return updated;
     },
   );
   app.delete<{ Params: { id: string } }>(

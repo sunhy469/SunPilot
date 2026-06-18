@@ -54,10 +54,12 @@ export class ExecutionOrchestrator implements ExecutionOrchestratorInterface {
         : never;
       plan?: import("../loop-types.js").AgentPlan;
       decision: ToolDecision & { type: "use_tool" };
+      /** Optional progress callback for content-block status updates (§P1-4). */
+      onProgress?: (progress: import("../loop-types.js").ToolExecutionProgress) => void;
     },
     signal: AbortSignal,
   ): Promise<AgentObservation> {
-    const { runId, context, decision } = input;
+    const { runId, context, decision, onProgress } = input;
     const toolCalls = decision.toolCalls;
     const results: ToolCallSummary[] = [];
     const allArtifacts: ArtifactRef[] = [];
@@ -72,12 +74,21 @@ export class ExecutionOrchestrator implements ExecutionOrchestratorInterface {
         // Serial execution
         for (const call of calls) {
           if (signal.aborted) break;
+          onProgress?.({
+            phase: "running",
+            message: `正在执行 ${call.name}`,
+          });
           const result = await this.executeWithRetry(
             runId,
             context.conversationId,
             call,
             signal,
           );
+          onProgress?.({
+            phase: "completed",
+            message: `完成: ${call.name}`,
+            percent: 100,
+          });
           results.push(result.summary);
           allArtifacts.push(...result.artifacts);
         }
@@ -86,6 +97,10 @@ export class ExecutionOrchestrator implements ExecutionOrchestratorInterface {
         const chunks = this.chunkArray(calls, maxConcurrent);
         for (const chunk of chunks) {
           if (signal.aborted) break;
+          onProgress?.({
+            phase: "running",
+            message: `正在并行执行 ${chunk.length} 个工具`,
+          });
           const chunkResults = await Promise.all(
             chunk.map((call) =>
               signal.aborted
@@ -98,6 +113,11 @@ export class ExecutionOrchestrator implements ExecutionOrchestratorInterface {
                   ),
             ),
           );
+          onProgress?.({
+            phase: "completed",
+            message: `完成 ${chunkResults.filter(Boolean).length} 个工具`,
+            percent: 100,
+          });
           for (const r of chunkResults) {
             if (!r) continue;
             results.push(r.summary);

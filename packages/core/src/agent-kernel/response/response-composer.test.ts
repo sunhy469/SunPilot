@@ -80,23 +80,12 @@ describe("ResponseComposer", () => {
       expect.objectContaining({ id: result.messageId, content: "hello there" }),
     ]);
     expect(events.map((event) => event.type)).toEqual([
-      "agent.response.started",
       "agent.model.started",
       "agent.model.delta",
-      "agent.response.delta",
       "agent.model.delta",
-      "agent.response.delta",
       "agent.model.completed",
     ]);
     expect(events[0]).toMatchObject({
-      type: "agent.response.started",
-      payload: expect.objectContaining({
-        runId: input.runId,
-        conversationId: input.conversationId,
-        messageId: result.messageId,
-      }),
-    });
-    expect(events[1]).toMatchObject({
       type: "agent.model.started",
       payload: expect.objectContaining({
         runId: input.runId,
@@ -112,14 +101,11 @@ describe("ResponseComposer", () => {
         outputTokens: expect.any(Number),
       }),
     });
-    const responseMessageIds = events
-      .filter(
-        (event) =>
-          event.type === "agent.response.started" ||
-          event.type === "agent.response.delta",
-      )
-      .map((event) => (event.payload as { messageId: string }).messageId);
-    expect(new Set(responseMessageIds)).toEqual(new Set([result.messageId]));
+    // §5.7: Legacy agent.response.* events removed — model events carry runId
+    const modelEventsForRun = events.filter(
+      (e) => e.type.startsWith("agent.model.") && e.runId === input.runId,
+    );
+    expect(modelEventsForRun.length).toBeGreaterThan(0);
   });
 
   test("records and emits model failures", async () => {

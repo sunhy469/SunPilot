@@ -43,6 +43,8 @@ export class RepositoryAgentConversationStore implements AgentConversationStore 
       content: r.content,
       createdAt: r.createdAt,
       attachments: r.metadata?.attachments as AgentMessage["attachments"],
+      /** §P0-3: Restore content-block parts from metadata. */
+      parts: (r.metadata as { parts?: AgentMessage["parts"] })?.parts,
     }));
   }
 }

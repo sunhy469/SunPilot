@@ -49,6 +49,12 @@ export const AGENT_EVENT_TYPES = [
   "agent.clarification.requested",
   // Error
   "agent.error",
+  // Message content-block events (§Phase 1 of streaming refactoring)
+  "agent.message.started",
+  "agent.message.part.started",
+  "agent.message.part.delta",
+  "agent.message.part.updated",
+  "agent.message.completed",
   // Safety (§P0-3)
   "agent.safety.injection_detected",
   "agent.safety.sandbox_denied",
@@ -311,6 +317,69 @@ export interface AgentErrorPayload {
   category?: string;
   retryable?: boolean;
   details?: Record<string, unknown>;
+}
+
+// ── Message content-block event payloads (§Phase 1) ────────────────
+
+export interface AgentMessageStartedPayload {
+  runId: string;
+  conversationId: string;
+  messageId: string;
+}
+
+export interface AgentMessagePartStartedPayload {
+  runId: string;
+  conversationId: string;
+  messageId: string;
+  part: {
+    id: string;
+    type: string;
+    content?: string;
+    label?: string;
+    status?: string;
+    toolCallId?: string;
+    skillId?: string;
+    name?: string;
+    runId?: string;
+    createdAt: string;
+    [key: string]: unknown;
+  };
+}
+
+export interface AgentMessagePartDeltaPayload {
+  runId: string;
+  conversationId: string;
+  messageId: string;
+  partId: string;
+  delta: string;
+}
+
+export interface AgentMessagePartUpdatedPayload {
+  runId: string;
+  conversationId: string;
+  messageId: string;
+  partId: string;
+  patch: {
+    status?: string;
+    label?: string;
+    content?: string;
+    completedAt?: string;
+    summary?: string;
+    metadata?: Record<string, unknown>;
+    [key: string]: unknown;
+  };
+}
+
+export interface AgentMessageCompletedPayload {
+  runId: string;
+  conversationId: string;
+  messageId: string;
+  content: string;
+  parts: Array<{
+    id: string;
+    type: string;
+    [key: string]: unknown;
+  }>;
 }
 
 // ── Safety event payloads (§P0-3) ───────────────────────────────────

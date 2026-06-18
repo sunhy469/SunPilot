@@ -92,19 +92,31 @@ export class JsonRpcRouter {
           },
           {
             onDelta: (delta) => {
+              const method = delta.type;
               ctx.notify({
                 jsonrpc: "2.0",
-                method: "agent.response.delta",
+                method,
                 params: {
                   eventId: `evt_${crypto.randomUUID()}`,
                   sequence: -1,
+                  runId: delta.runId,
                   conversationId: delta.conversationId,
                   createdAt: new Date().toISOString(),
-                  payload: {
-                    conversationId: delta.conversationId,
-                    messageId: delta.messageId,
-                    delta: delta.delta,
-                  },
+                  payload:
+                    method === "agent.message.part.delta"
+                      ? {
+                          runId: delta.runId,
+                          conversationId: delta.conversationId,
+                          messageId: delta.messageId,
+                          partId: delta.partId,
+                          delta: delta.delta,
+                        }
+                      : {
+                          runId: delta.runId,
+                          conversationId: delta.conversationId,
+                          messageId: delta.messageId,
+                          delta: delta.delta,
+                        },
                 },
               });
             },

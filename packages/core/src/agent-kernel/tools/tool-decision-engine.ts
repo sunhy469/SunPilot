@@ -5,6 +5,7 @@ import type {
   AgentObservation,
   ArtifactRef,
   ExecutionOrchestrator,
+  IAssistantMessageStream,
   PermissionPolicy,
   PlannedToolCall,
   RoutedIntent,
@@ -14,22 +15,45 @@ import type {
 } from "../loop-types.js";
 import { INTENT_SKILL_MAP, type SkillSummary } from "./tool-types.js";
 import type { ToolArgumentBuilder } from "./tool-argument-builder.js";
-import type { ToolRetriever, ToolRetrievalResult, ToolCallHistoryEntry } from "./tool-retriever.js";
+import type {
+  ToolRetriever,
+  ToolRetrievalResult,
+  ToolCallHistoryEntry,
+} from "./tool-retriever.js";
 import type { EmbeddingService } from "../context/embedding-service.js";
 import type { AgentEventBus } from "../agent-event-bus.js";
 import type { ModelRouter } from "../model-router.js";
+import { checkAnyOfUnsatisfied } from "./tool-schema-utils.js";
 import type {
   ChatMessage,
   ToolCall,
   ToolDefinition,
 } from "../../llm/llm.types.js";
 
+// ── Tool loop stop reason (§5.6 of duplicate-streaming bugfix) ──────────
+
+export type ToolLoopStopReason =
+  | "missing_required_arguments"
+  | "schema_validation_failed"
+  | "permission_denied"
+  | "all_tools_failed"
+  | "duplicate_tool_call_blocked"
+  | "max_iterations";
+
 // ── Decision metadata (§P1-4) ─────────────────────────────────────────────
 
 /** Audit metadata recorded on each PlannedToolCall for debugging tool selection. */
 export interface DecisionMetadata {
   /** Which layer made the final selection. */
-  decisionPath: "plan" | "intent_match" | "priority" | "deterministic_scorer" | "llm_semantic" | "scorer_fallback" | "intent_skill_map" | "no_tool";
+  decisionPath:
+    | "plan"
+    | "intent_match"
+    | "priority"
+    | "deterministic_scorer"
+    | "llm_semantic"
+    | "scorer_fallback"
+    | "intent_skill_map"
+    | "no_tool";
   /** Whether an LLM call was involved in the selection. */
   llmSelectionUsed: boolean;
   /** Top-K candidates from ToolRetriever with scores and reasons. */
@@ -89,6 +113,8 @@ export interface ToolDecisionEngineDeps {
   permissionPolicy: PermissionPolicy;
   /** Orchestrator that executes validated tool calls. */
   executionOrchestrator: ExecutionOrchestrator;
+  /** Optional — detects prompt injection in tool results before model context (§Step 1b audit). */
+  injectionDetector?: import("../safety/prompt-injection-detector.js").PromptInjectionDetector;
   /** Persist the final assistant message with metadata. */
   saveMessage: (msg: {
     id: string;
@@ -132,7 +158,8 @@ export class ToolDecisionEngine implements ToolDecisionEngineInterface {
     },
     signal: AbortSignal,
   ): Promise<ToolDecision> {
-    const { context, intent, plan, previousObservation, prioritySkills } = input;
+    const { context, intent, plan, previousObservation, prioritySkills } =
+      input;
 
     // ── Priority lane: reflection-suggested tools ──────────────────────
     // When the reflection engine suggests specific tools (e.g. search→detail
@@ -144,7 +171,9 @@ export class ToolDecisionEngine implements ToolDecisionEngineInterface {
 
       for (const ps of prioritySkills) {
         const skill = availableSkills.find(
-          (s) => s.id === ps.skillId || capabilityNameFromToolId(s.id) === ps.skillId,
+          (s) =>
+            s.id === ps.skillId ||
+            capabilityNameFromToolId(s.id) === ps.skillId,
         );
         if (!skill) continue;
 
@@ -189,9 +218,7 @@ export class ToolDecisionEngine implements ToolDecisionEngineInterface {
       const planToolCalls: PlannedToolCall[] = [];
       const planClarifications: string[] = [];
       for (const step of toolSteps) {
-        const skill = availableSkills.find(
-          (item) => item.id === step.skillId,
-        );
+        const skill = availableSkills.find((item) => item.id === step.skillId);
         if (!skill) continue;
         const riskLevel = maxRisk(
           step.riskLevel,
@@ -224,7 +251,8 @@ export class ToolDecisionEngine implements ToolDecisionEngineInterface {
           if (built.call) {
             built.call.riskLevel = maxRisk(built.call.riskLevel, riskLevel);
             built.call.requiresApproval =
-              built.call.riskLevel === "high" || built.call.riskLevel === "critical";
+              built.call.riskLevel === "high" ||
+              built.call.riskLevel === "critical";
             planToolCalls.push(built.call);
           } else if (built.clarification) {
             planClarifications.push(built.clarification);
@@ -291,7 +319,9 @@ export class ToolDecisionEngine implements ToolDecisionEngineInterface {
 
     if (shouldUseRetrieval) {
       let scored: ScoredSkill[];
-      let retrievalMetaForAudit: DecisionMetadata["retrievalMetadata"] | undefined;
+      let retrievalMetaForAudit:
+        | DecisionMetadata["retrievalMetadata"]
+        | undefined;
 
       // Layer 1.5: ToolRetriever multi-layer retrieval (§2 of architecture next steps)
       if (this.deps.toolRetriever) {
@@ -303,8 +333,7 @@ export class ToolDecisionEngine implements ToolDecisionEngineInterface {
             intent,
             availableSkills,
             embeddingService: this.deps.embeddingService,
-            recentHistory:
-              this.deps.recentHistory ?? recentHistory,
+            recentHistory: this.deps.recentHistory ?? recentHistory,
             permissionMode: this.deps.permissionMode,
           });
           scored = retrievalResult.tools.map((st) => ({
@@ -325,8 +354,14 @@ export class ToolDecisionEngine implements ToolDecisionEngineInterface {
             fallbackUsed: retrievalResult.fallbackUsed,
           };
 
-          if (scored.length === 0 || (retrievalResult.fallbackUsed && scored[0]!.score < 0.1)) {
-            scored = scoreSkills(context.currentMessage.content, availableSkills);
+          if (
+            scored.length === 0 ||
+            (retrievalResult.fallbackUsed && scored[0]!.score < 0.1)
+          ) {
+            scored = scoreSkills(
+              context.currentMessage.content,
+              availableSkills,
+            );
           }
         } catch (err) {
           console.warn(
@@ -388,11 +423,18 @@ export class ToolDecisionEngine implements ToolDecisionEngineInterface {
             .slice(0, 3)
             .map((s) => s.skill.name)
             .join(", ");
-          return attachTrace({
-            type: "ask_clarification",
-            question: `找到多个匹配技能（${candidates}），请问要使用哪个？`,
-            reason: `Multiple skills match with close scores (top: ${best.score.toFixed(2)}, runner-up: ${runnerUp.score.toFixed(2)})`,
-          }, { decisionPath: "deterministic_scorer", llmSelectionUsed: false, retrievalMetadata: retrievalMetaForAudit });
+          return attachTrace(
+            {
+              type: "ask_clarification",
+              question: `找到多个匹配技能（${candidates}），请问要使用哪个？`,
+              reason: `Multiple skills match with close scores (top: ${best.score.toFixed(2)}, runner-up: ${runnerUp.score.toFixed(2)})`,
+            },
+            {
+              decisionPath: "deterministic_scorer",
+              llmSelectionUsed: false,
+              retrievalMetadata: retrievalMetaForAudit,
+            },
+          );
         }
 
         // Layer 3: LLM semantic selection with structured output (§P1)
@@ -589,9 +631,7 @@ export class ToolDecisionEngine implements ToolDecisionEngineInterface {
       .filter((b) => b.clarification)
       .map((b) => b.clarification!);
 
-    const toolCalls = built
-      .filter((b) => b.call !== null)
-      .map((b) => b.call!);
+    const toolCalls = built.filter((b) => b.call !== null).map((b) => b.call!);
 
     // If ALL tools failed with missing params, ask clarification (§P0-1 fix)
     if (toolCalls.length === 0 && clarifications.length > 0) {
@@ -601,7 +641,8 @@ export class ToolDecisionEngine implements ToolDecisionEngineInterface {
         reason: `All ${skills.length} skill(s) require missing parameters: ${clarifications.join("; ")}`,
         decisionPath: decisionMeta?.decisionPath,
         retrievalTopK: decisionMeta?.retrievalMetadata?.topK,
-        retrievalCandidateCount: decisionMeta?.retrievalMetadata?.candidates?.length,
+        retrievalCandidateCount:
+          decisionMeta?.retrievalMetadata?.candidates?.length,
         retrievalFallback: decisionMeta?.retrievalMetadata?.fallbackUsed,
       };
     }
@@ -612,7 +653,8 @@ export class ToolDecisionEngine implements ToolDecisionEngineInterface {
       toolCalls,
       decisionPath: decisionMeta?.decisionPath,
       retrievalTopK: decisionMeta?.retrievalMetadata?.topK,
-      retrievalCandidateCount: decisionMeta?.retrievalMetadata?.candidates?.length,
+      retrievalCandidateCount:
+        decisionMeta?.retrievalMetadata?.candidates?.length,
       retrievalFallback: decisionMeta?.retrievalMetadata?.fallbackUsed,
     };
   }
@@ -647,7 +689,11 @@ export class ToolDecisionEngine implements ToolDecisionEngineInterface {
     // signal (category/description/bigram). This is the same as the
     // deterministic clear-winner threshold.
     const SINGLE_CANDIDATE_AUTO_THRESHOLD = 0.6;
-    if (candidates.length === 1 && bestScore !== undefined && bestScore >= SINGLE_CANDIDATE_AUTO_THRESHOLD) {
+    if (
+      candidates.length === 1 &&
+      bestScore !== undefined &&
+      bestScore >= SINGLE_CANDIDATE_AUTO_THRESHOLD
+    ) {
       return {
         decision: "select",
         skillId: candidates[0]!.id,
@@ -659,7 +705,12 @@ export class ToolDecisionEngine implements ToolDecisionEngineInterface {
     // Single candidate but weak score — still ask the LLM.
     // If no LLM available, return null so the caller falls through
     // to the scorer fallback (which checks MIN_TOOL_SCORE).
-    if (candidates.length === 1 && (!this.deps.llm || bestScore === undefined || bestScore < SINGLE_CANDIDATE_AUTO_THRESHOLD)) {
+    if (
+      candidates.length === 1 &&
+      (!this.deps.llm ||
+        bestScore === undefined ||
+        bestScore < SINGLE_CANDIDATE_AUTO_THRESHOLD)
+    ) {
       // Let the LLM evaluate this single candidate — it may return "none"
       // if it's a poor match.
     }
@@ -721,7 +772,11 @@ IMPORTANT: return ONLY the JSON object. No markdown code fences, no surrounding 
 
       // Validate decision field
       const decision = parsed.decision;
-      if (decision !== "select" && decision !== "none" && decision !== "clarify") {
+      if (
+        decision !== "select" &&
+        decision !== "none" &&
+        decision !== "clarify"
+      ) {
         return null; // Invalid — fall through to scorer
       }
 
@@ -758,7 +813,11 @@ IMPORTANT: return ONLY the JSON object. No markdown code fences, no surrounding 
       // JSON parse failed — try legacy plain-text format as fallback
       const trimmed = response.trim();
       if (trimmed === "none" || trimmed === '"none"') {
-        return { decision: "none", confidence: 0.8, reason: "LLM returned none" };
+        return {
+          decision: "none",
+          confidence: 0.8,
+          reason: "LLM returned none",
+        };
       }
       const valid = candidates.find((s) => s.id === trimmed);
       if (valid) {
@@ -789,13 +848,16 @@ IMPORTANT: return ONLY the JSON object. No markdown code fences, no surrounding 
     call: PlannedToolCall | null;
     clarification?: string;
   }> {
-    const { arguments: args, sources, missing } =
-      await this.buildToolArgumentsAsync(
-        context,
-        skill,
-        previousObservation,
-        signal,
-      );
+    const {
+      arguments: args,
+      sources,
+      missing,
+    } = await this.buildToolArgumentsAsync(
+      context,
+      skill,
+      previousObservation,
+      signal,
+    );
 
     // If required args are missing, trigger clarification
     if (missing.length > 0) {
@@ -919,6 +981,8 @@ IMPORTANT: return ONLY the JSON object. No markdown code fences, no surrounding 
         reason: string;
         argumentsHint?: Record<string, unknown>;
       }>;
+      /** Optional IAssistantMessageStream for content-block parts emission (§Phase 3). */
+      stream?: IAssistantMessageStream;
     },
     signal: AbortSignal,
   ): Promise<{
@@ -930,19 +994,14 @@ IMPORTANT: return ONLY the JSON object. No markdown code fences, no surrounding 
     const MAX_TOOL_ITERATIONS = 5;
     const { runId, conversationId, context, intent, plan } = input;
     const messageId = input.messageId ?? `msg_${crypto.randomUUID()}`;
+    const stream = input.stream;
     let fullContent = "";
     const allArtifacts: ArtifactRef[] = [];
     const allToolCallSummaries: ToolCallSummary[] = [];
+    // §5.9: Tool call signature dedup — prevent identical (skillId, args) calls
+    const seenToolCallSignatures = new Set<string>();
 
-    // Only emit agent.response.started if the caller didn't already.
-    // When messageId is provided, the caller (handleUseTool) has already emitted it.
-    if (!input.messageId) {
-      this.deps.eventBus.emit(
-        "agent.response.started",
-        { runId, conversationId, messageId },
-        { runId, conversationId },
-      );
-    }
+    // Legacy agent.response.* emits removed — use agent.message.* via stream instead
 
     try {
       // 1. Build initial messages from AgentContext
@@ -957,9 +1016,11 @@ IMPORTANT: return ONLY the JSON object. No markdown code fences, no surrounding 
 
       // 3. Get candidate tools from ToolRetriever
       const retrieval = await this.retrieveStreamingTools(
-        context, intent, allSkills,
+        context,
+        intent,
+        allSkills,
       );
-      const tools = this.buildStreamingToolDefinitions(retrieval);
+      const { tools, nameMap } = this.buildStreamingToolDefinitions(retrieval);
 
       // 4. Streaming loop: interleave text + tool calls
       let iteration = 0;
@@ -969,6 +1030,8 @@ IMPORTANT: return ONLY the JSON object. No markdown code fences, no surrounding 
         if (signal.aborted) break;
         iteration++;
 
+        // §Phase 2a: Text parts are created lazily on first delta.
+        // No pre-created empty text parts — streamLlmTurn handles it.
         const result = await this.streamLlmTurn(
           runId,
           conversationId,
@@ -977,27 +1040,103 @@ IMPORTANT: return ONLY the JSON object. No markdown code fences, no surrounding 
           tools,
           signal,
           input.modelId,
+          stream,
+          undefined, // lazy creation — no pre-allocated textPartId
         );
 
         fullContent += result.textContent;
+
+        // §Phase 2a: Deterministic preface — when the model goes
+        // tool-first with no narrative text, emit a short factual
+        // preface so the user immediately sees what's happening.
+        if (result.toolCalls.length > 0 && result.textContent.trim().length === 0 && stream) {
+          const toolNames = result.toolCalls.map((tc) => {
+            const skillId = nameMap.get(tc.function.name) ?? tc.function.name;
+            const skill = allSkills.find((s) => s.id === skillId);
+            return skill?.name ?? skillId;
+          });
+          const prefaceText = toolNames.length === 1
+            ? `我先调用「${toolNames[0]}」检查相关信息。`
+            : `我先调用${toolNames.map((n) => `「${n}」`).join("、")}检查相关信息。`;
+          const prefacePart = stream.startTextPart();
+          stream.appendText(prefacePart.id, prefaceText);
+          fullContent += prefaceText;
+          stream.completeTextPart(prefacePart.id);
+        }
+
+        // Complete the text part if one was created
+        if (stream && result.textPartId) {
+          stream.completeTextPart(result.textPartId);
+        }
 
         // If no tool calls, LLM is done — exit loop
         if (result.toolCalls.length === 0) {
           break;
         }
 
+        // §5.9: Tool call signature dedup — prevent identical calls in same run
+        let duplicateBlocked = false;
+        for (const tc of result.toolCalls) {
+          const skillId = nameMap.get(tc.function.name) ?? tc.function.name;
+          const signature = `${skillId}:${tc.function.arguments}`;
+          if (seenToolCallSignatures.has(signature)) {
+            if (stream) {
+              stream.addError({
+                code: "DUPLICATE_TOOL_CALL_BLOCKED",
+                message: "已阻止重复工具调用。",
+                recoverable: true,
+              });
+            }
+            duplicateBlocked = true;
+          }
+          seenToolCallSignatures.add(signature);
+        }
+        if (duplicateBlocked) break;
+
         // Execute tool calls
         const toolResults = await this.executeToolCalls(
           runId,
           conversationId,
           result.toolCalls,
+          nameMap,
           context,
           intent,
           allSkills,
           signal,
+          stream,
         );
 
         allArtifacts.push(...toolResults.artifacts);
+
+        // §5.6: Stop the tool loop immediately on deterministic errors.
+        // Missing required arguments, schema validation failures, and
+        // permission denials should NOT retry — they're structural, not
+        // transient. Otherwise the LLM keeps selecting the same broken tool.
+        if (toolResults.stop) {
+          if (stream) {
+            // Emit a clarifying error text part so the user sees an explanation
+            const errorText = stream.startTextPart();
+            stream.appendText(errorText.id, toolResults.stop.message);
+            stream.completeTextPart(errorText.id);
+          }
+          fullContent += toolResults.stop.message;
+          break;
+        }
+
+        // §Step 1b: Scan tool result summaries for prompt injection
+        // before they enter the model context (matching legacy path safety).
+        if (this.deps.injectionDetector) {
+          for (const tc of toolResults.summaries) {
+            if (tc.summary) {
+              const detection = this.deps.injectionDetector.detect(tc.summary);
+              if (detection.shouldBlock) {
+                tc.summary = `[BLOCKED] Content blocked due to potential prompt injection (${detection.matches.length} matches).`;
+                (tc as unknown as Record<string, unknown>).trust = "untrusted";
+                (tc as unknown as Record<string, unknown>).blocked = true;
+              }
+            }
+          }
+        }
         allToolCallSummaries.push(...toolResults.summaries);
 
         // Inject tool results into messages for next iteration
@@ -1021,8 +1160,12 @@ IMPORTANT: return ONLY the JSON object. No markdown code fences, no surrounding 
             undefined, // no tools — let LLM explain the failure
             signal,
             input.modelId,
+            stream,
           );
           fullContent += finalResult.textContent;
+          if (stream && finalResult.textPartId) {
+            stream.completeTextPart(finalResult.textPartId);
+          }
           break;
         }
       }
@@ -1030,35 +1173,36 @@ IMPORTANT: return ONLY the JSON object. No markdown code fences, no surrounding 
       // 5. Check for abort after loop — signal may have fired between
       //    streaming turns. The caller (handleUseTool) handles cancellation.
       if (signal.aborted) {
-        throw Object.assign(
-          new Error("Streaming aborted by user"),
-          { name: "AbortError" },
-        );
+        throw Object.assign(new Error("Streaming aborted by user"), {
+          name: "AbortError",
+        });
       }
 
       // 6. Build rich cards from artifacts
       const richCards = this.buildStreamingRichCards(allArtifacts);
 
-      // 7. Save final message with richCards in metadata
-      await this.deps.saveMessage({
-        id: messageId,
-        conversationId,
-        role: "assistant",
-        content: fullContent,
-        runId,
-        metadata: {
-          toolCallIds: allToolCallSummaries.map((tc) => tc.id),
-          artifactIds: allArtifacts.map((a) => a.id),
-          richCards,
-        },
-      });
+      // 7. Save/complete — stream handles it when present, else direct
+      if (stream) {
+        // Pass rich cards through the stream so stream.complete() persists
+        // them in message metadata and emits them in agent.message.completed.
+        stream.setRichCards(richCards);
+      } else {
+        await this.deps.saveMessage({
+          id: messageId,
+          conversationId,
+          role: "assistant",
+          content: fullContent,
+          runId,
+          metadata: {
+            toolCallIds: allToolCallSummaries.map((tc) => tc.id),
+            artifactIds: allArtifacts.map((a) => a.id),
+            richCards,
+          },
+        });
 
-      // 8. Emit completion event with richCards so frontend can render them
-      this.deps.eventBus.emit(
-        "agent.response.completed",
-        { runId, conversationId, messageId, cards: richCards },
-        { runId, conversationId },
-      );
+        // Legacy agent.response.completed removed —
+        // use agent.message.completed via stream instead
+      }
 
       return {
         messageId,
@@ -1076,7 +1220,14 @@ IMPORTANT: return ONLY the JSON object. No markdown code fences, no surrounding 
       }
 
       // Save partial content on non-abort errors
-      if (fullContent.length > 0) {
+      if (stream) {
+        // Stream handles error saving
+        stream.addError({
+          message: error instanceof Error ? error.message : String(error),
+          code: "AGENT_STREAMING_FAILED",
+          recoverable: false,
+        });
+      } else if (fullContent.length > 0) {
         try {
           await this.deps.saveMessage({
             id: messageId,
@@ -1113,7 +1264,11 @@ IMPORTANT: return ONLY the JSON object. No markdown code fences, no surrounding 
     // System prompt
     const systemParts: string[] = [
       context.system.persona,
-      "You are an AI assistant with access to tools. You can call tools to help answer the user's request.",
+      `You are an agent that works in visible, user-facing steps.
+Before using tools, briefly tell the user what you are checking or doing.
+After each tool result, summarize the relevant observation and decide the next action.
+Do not reveal hidden chain-of-thought. Keep progress concise and factual.
+Use the same language as the user.`,
       "When you need to use a tool, call it directly. When you have results, summarize them for the user.",
       "If you don't need any tools, just respond naturally.",
     ];
@@ -1175,10 +1330,20 @@ IMPORTANT: return ONLY the JSON object. No markdown code fences, no surrounding 
       });
     }
 
-    // Current user message
+    // Current user message — include attachment URLs so the LLM can reference them
+    const { content: userContent, attachments: userAttachments } = context.currentMessage;
+    const attachmentLines = userAttachments && userAttachments.length > 0
+      ? "\n\n[Attachments provided by user]:\n" +
+        userAttachments.map((a) => {
+          const ref = a.url ?? a.dataUrl
+            ? `: ${a.url || "(base64 dataUrl available)"}`
+            : "(no URL — image not yet uploaded)";
+          return `- ${a.name} (${a.type})${ref}`;
+        }).join("\n")
+      : "";
     messages.push({
       role: "user",
-      content: context.currentMessage.content,
+      content: userContent + attachmentLines,
     });
 
     return messages;
@@ -1226,36 +1391,39 @@ IMPORTANT: return ONLY the JSON object. No markdown code fences, no surrounding 
    * Convert scored tools into LLM ToolDefinitions.
    * Uses inputSchema from SkillSummary for the function parameters.
    */
-  private buildStreamingToolDefinitions(
-    retrieval: ToolRetrievalResult,
-  ): ToolDefinition[] {
+  private buildStreamingToolDefinitions(retrieval: ToolRetrievalResult): {
+    tools: ToolDefinition[];
+    nameMap: Map<string, string>;
+  } {
     // Limit to top 20 tools to avoid overwhelming the LLM
     const topTools = retrieval.tools.slice(0, 20);
+    const usedNames = new Set<string>();
+    const nameMap = new Map<string, string>();
 
-    return topTools.map((scored) => {
+    const tools = topTools.map((scored) => {
       const skill = scored.skill;
-      const parameters = skill.inputSchema &&
-        typeof skill.inputSchema === "object"
-        ? (skill.inputSchema as Record<string, unknown>)
-        : {
-            type: "object",
-            properties: {},
-            additionalProperties: true,
-          };
+      const functionName = toProviderToolName(skill.id, usedNames);
+      nameMap.set(functionName, skill.id);
+      // §Schema fix: Normalize anyOf/oneOf → top-level required for LLM compat.
+      // OpenAI function calling ignores anyOf/oneOf — the LLM needs a flat
+      // required[] to know which params are mandatory.
+      const parameters = normalizeSchemaForLLM(skill.inputSchema);
 
       return {
         type: "function" as const,
         function: {
-          name: skill.id,
+          name: functionName,
           description: `${skill.name}: ${skill.description}${
             scored.matchReasons && scored.matchReasons.length > 0
               ? ` (matched: ${scored.matchReasons.join(", ")})`
               : ""
-          }`,
+          }\nSunPilot skill id: ${skill.id}`,
           parameters,
         },
       };
     });
+
+    return { tools, nameMap };
   }
 
   /**
@@ -1270,12 +1438,19 @@ IMPORTANT: return ONLY the JSON object. No markdown code fences, no surrounding 
     tools: ToolDefinition[] | undefined,
     signal: AbortSignal,
     modelId?: "dp" | "seed",
+    stream?: IAssistantMessageStream,
+    textPartId?: string,
   ): Promise<{
     textContent: string;
     toolCalls: ToolCall[];
+    /** The text part ID that was used (lazily created on first delta). */
+    textPartId?: string;
   }> {
     let textContent = "";
     const toolCallAccumulator = new Map<number, ToolCallAccumulator>();
+    // Lazily-created text part ID — created on first text delta to avoid
+    // empty text parts when the model goes tool-first with no narrative.
+    let lazyTextPartId = textPartId;
 
     const modelCallId = `model_${crypto.randomUUID()}`;
 
@@ -1305,17 +1480,21 @@ IMPORTANT: return ONLY the JSON object. No markdown code fences, no surrounding 
       )) {
         // Emit text delta to frontend
         if (chunk.delta.length > 0) {
+          // §Phase 2a: Lazy text part creation — only create when the
+          // model actually produces text, avoiding empty text parts.
+          if (stream && !lazyTextPartId) {
+            const textPart = stream.startTextPart();
+            lazyTextPartId = textPart.id;
+          }
+
           textContent += chunk.delta;
-          this.deps.eventBus.emit(
-            "agent.response.delta",
-            {
-              runId,
-              conversationId,
-              messageId,
-              delta: chunk.delta,
-            },
-            { runId, conversationId },
-          );
+
+          // Route deltas through stream when available (§Phase 3)
+          // Legacy agent.response.delta removed — use agent.message.part.delta instead
+          if (stream && lazyTextPartId) {
+            stream.appendText(lazyTextPartId, chunk.delta);
+          }
+
           this.deps.eventBus.emit(
             "agent.model.delta",
             { runId, modelCallId, delta: chunk.delta },
@@ -1363,8 +1542,7 @@ IMPORTANT: return ONLY the JSON object. No markdown code fences, no surrounding 
           modelCallId,
           error: {
             code: "AGENT_MODEL_CALL_FAILED",
-            message:
-              error instanceof Error ? error.message : String(error),
+            message: error instanceof Error ? error.message : String(error),
           },
         },
         { runId, conversationId },
@@ -1387,7 +1565,7 @@ IMPORTANT: return ONLY the JSON object. No markdown code fences, no surrounding 
       }
     }
 
-    return { textContent, toolCalls };
+    return { textContent, toolCalls, textPartId: lazyTextPartId };
   }
 
   /**
@@ -1398,13 +1576,20 @@ IMPORTANT: return ONLY the JSON object. No markdown code fences, no surrounding 
     runId: string,
     conversationId: string,
     toolCalls: ToolCall[],
+    toolNameMap: Map<string, string>,
     context: AgentContext,
     intent: RoutedIntent,
     allSkills: SkillSummary[],
     signal: AbortSignal,
+    stream?: IAssistantMessageStream,
   ): Promise<{
     artifacts: ArtifactRef[];
     summaries: ToolCallSummary[];
+    /** When set, the tool loop must stop immediately (deterministic error). */
+    stop?: {
+      reason: ToolLoopStopReason;
+      message: string;
+    };
   }> {
     const artifacts: ArtifactRef[] = [];
     const summaries: ToolCallSummary[] = [];
@@ -1415,26 +1600,44 @@ IMPORTANT: return ONLY the JSON object. No markdown code fences, no surrounding 
       try {
         parsedArgs = JSON.parse(tc.function.arguments);
       } catch {
-        summaries.push({
+        const failSummary: ToolCallSummary = {
           id: tc.id,
           skillId: tc.function.name,
           name: tc.function.name,
           status: "failed",
           summary: `Failed to parse tool arguments: ${tc.function.arguments.slice(0, 200)}`,
-        });
+        };
+        summaries.push(failSummary);
+        if (stream) {
+          stream.addError({
+            message: failSummary.summary,
+            code: "TOOL_ARGUMENT_PARSE_FAILED",
+            recoverable: true,
+          });
+        }
         continue;
       }
 
+      const skillId = toolNameMap.get(tc.function.name) ?? tc.function.name;
+
       // Find the skill in full skill catalog
-      const skill = allSkills.find((s) => s.id === tc.function.name);
+      const skill = allSkills.find((s) => s.id === skillId);
       if (!skill) {
-        summaries.push({
+        const failSummary: ToolCallSummary = {
           id: tc.id,
-          skillId: tc.function.name,
-          name: tc.function.name,
+          skillId,
+          name: skillId,
           status: "failed",
-          summary: `Unknown tool: ${tc.function.name}. Available tools: ${allSkills.map((s) => s.id).join(", ")}`,
-        });
+          summary: `Unknown tool: ${skillId}. Available tools: ${allSkills.map((s) => s.id).join(", ")}`,
+        };
+        summaries.push(failSummary);
+        if (stream) {
+          stream.addError({
+            message: failSummary.summary,
+            code: "TOOL_UNKNOWN",
+            recoverable: true,
+          });
+        }
         continue;
       }
 
@@ -1451,8 +1654,39 @@ IMPORTANT: return ONLY the JSON object. No markdown code fences, no surrounding 
         { runId, conversationId },
       );
 
-      // Validate/fix arguments via ToolArgumentBuilder
-      let finalArgs = parsedArgs;
+      // Start status part via stream (§Phase 3)
+      let statusPartId: string | undefined;
+      if (stream) {
+        const statusPart = stream.startStatus({
+          label: `正在调用工具: ${skill.name}`,
+          toolCallId: tc.id,
+          metadata: { skillId: skill.id },
+        });
+        statusPartId = statusPart.id;
+      }
+
+      // Add tool_use part via stream (§P1-3: status lifecycle)
+      if (stream) {
+        stream.addToolUse({
+          toolCallId: tc.id,
+          skillId: skill.id,
+          name: skill.name,
+          inputPreview: Object.keys(parsedArgs).length > 0
+            ? summarizeForPreview(parsedArgs)
+            : undefined,
+        });
+        // Now that execution is starting, update status to running
+        stream.updateToolUse(tc.id, { status: "running" });
+      }
+
+      // ── Argument validation gate (§5.4) ──────────────────────────
+      // 1. canonicalize model args (normalize aliases)
+      // 2. merge deterministic args from context/attachments
+      // 3. validate against schema
+      // 4. repair once if possible
+      // 5. if still invalid: emit error part, skip execution
+      let finalArgs = canonicalizeArgs(parsedArgs);
+      let argumentSources: PlannedToolCall["argumentSources"] = [];
       if (this.deps.argumentBuilder && skill.inputSchema) {
         try {
           const built = await this.deps.argumentBuilder.build(
@@ -1464,9 +1698,89 @@ IMPORTANT: return ONLY the JSON object. No markdown code fences, no surrounding 
             },
             signal,
           );
-          finalArgs = built.arguments;
+          // Merge: deterministic args from context override model args
+          finalArgs = { ...finalArgs, ...built.arguments };
+          argumentSources = built.sources;
+
+          // §P0-fix: Check anyOf/oneOf disjunctions before missing-required check.
+          // The argument builder may report `missing: []` when a disjunction
+          // (e.g. imageUrl OR imageDataUrl) has no universally-required fields
+          // but ALL branches are unsatisfied. In that case, the tool must NOT
+          // be called — emit an error part instead.
+          const anyOfUnsatisfied = checkAnyOfUnsatisfied(finalArgs, skill.inputSchema);
+          const hasMissingArgs = built.missing.length > 0 || anyOfUnsatisfied;
+
+          if (hasMissingArgs) {
+            // Try repair once
+            try {
+              const validationErrors = built.missing.map(
+                (f) => `Missing required field: ${f}`,
+              );
+              const repaired = await this.deps.argumentBuilder.repair(
+                {
+                  skillId: skill.id,
+                  name: skill.name,
+                  currentArgs: finalArgs,
+                  schema: skill.inputSchema,
+                  validationErrors,
+                },
+                signal,
+              );
+              finalArgs = { ...finalArgs, ...repaired.arguments };
+
+              // Re-check after repair
+              const postRepairCheck = await this.deps.argumentBuilder.build(
+                { context, intent, skill, schema: skill.inputSchema },
+                signal,
+              );
+              const postAnyOfUnsatisfied = checkAnyOfUnsatisfied(
+                { ...finalArgs, ...repaired.arguments },
+                skill.inputSchema,
+              );
+              if (postRepairCheck.missing.length > 0 || postAnyOfUnsatisfied) {
+                // Still missing required args after repair — do not execute
+                const missingFields = postRepairCheck.missing.join(", ");
+                const failSummary: ToolCallSummary = {
+                  id: tc.id,
+                  skillId: skill.id,
+                  name: skill.name,
+                  status: "failed",
+                  summary: `Missing required arguments: ${missingFields}`,
+                };
+                summaries.push(failSummary);
+                if (stream) {
+                  if (statusPartId) {
+                    stream.updateStatus(statusPartId, {
+                      status: "failed",
+                      label: `失败: ${skill.name} (缺少参数)`,
+                    });
+                  }
+                  stream.updateToolUse(tc.id, { status: "failed" });
+                  stream.addError({
+                    message: `我还没有拿到可用于搜索的图片链接。请等待图片上传完成，或重新上传图片后我再继续搜索。`,
+                    code: "TOOL_ARGUMENT_MISSING",
+                    recoverable: true,
+                  });
+                }
+                // §5.6: Stop the tool loop immediately on missing required args.
+                // These are deterministic errors — retrying with the same context
+                // will always produce the same result.
+                return {
+                  artifacts,
+                  summaries,
+                  stop: {
+                    reason: "missing_required_arguments",
+                    message:
+                      "缺少可用图片引用，不能执行搜索。请上传图片后重试，或确认图片已上传完成。",
+                  },
+                };
+              }
+            } catch {
+              // Repair failed — fall through and try execution anyway
+            }
+          }
         } catch {
-          // Continue with original args if builder fails
+          // Continue with canonicalized args if builder fails
         }
       }
 
@@ -1485,6 +1799,7 @@ IMPORTANT: return ONLY the JSON object. No markdown code fences, no surrounding 
         riskHints: {
           defaultRisk: skillRisk,
         },
+        argumentSources,
       };
 
       // Check permissions
@@ -1501,25 +1816,60 @@ IMPORTANT: return ONLY the JSON object. No markdown code fences, no surrounding 
         });
 
         if (!permDecision.allowed) {
-          summaries.push({
+          const failSummary: ToolCallSummary = {
             id: tc.id,
             skillId: skill.id,
             name: skill.name,
             status: "failed",
             summary: `Permission denied: ${permDecision.reasons.join(", ")}`,
-          });
-          continue;
+          };
+          summaries.push(failSummary);
+          if (stream && statusPartId) {
+            stream.updateStatus(statusPartId, {
+              status: "failed",
+              label: `失败: ${skill.name} (权限不足)`,
+            });
+            // §P1-3: Update tool_use part status on permission denial
+            stream.updateToolUse(tc.id, { status: "failed" });
+          }
+          // §5.6: Stop the tool loop on permission denial — retrying won't help
+          return {
+            artifacts,
+            summaries,
+            stop: {
+              reason: "permission_denied",
+              message: `工具 ${skill.name} 缺少必要权限，无法执行。`,
+            },
+          };
         }
 
         if (permDecision.requiresApproval) {
-          summaries.push({
+          const failSummary: ToolCallSummary = {
             id: tc.id,
             skillId: skill.id,
             name: skill.name,
             status: "failed",
             summary: `Approval required for ${skill.name}`,
-          });
-          continue;
+          };
+          summaries.push(failSummary);
+          if (stream && statusPartId) {
+            stream.updateStatus(statusPartId, {
+              status: "failed",
+              label: `需要审批: ${skill.name}`,
+            });
+            // §P1-3: Update tool_use part status on approval required
+            stream.updateToolUse(tc.id, { status: "failed" });
+          }
+          // Approval-required tools should not be auto-executed —
+          // they need to go through the approval path. Stop here.
+          return {
+            artifacts,
+            summaries,
+            stop: {
+              reason: "permission_denied",
+              message: `工具 ${skill.name} 需要审批后才能执行。`,
+            },
+          };
         }
       }
 
@@ -1531,6 +1881,21 @@ IMPORTANT: return ONLY the JSON object. No markdown code fences, no surrounding 
       );
 
       try {
+        // §P1-4: Bridge tool progress to stream status part metadata
+        const onProgress =
+          stream && statusPartId
+            ? (progress: { phase: string; message: string; percent?: number }) => {
+                stream!.updateStatus(statusPartId!, {
+                  label: progress.message,
+                  metadata: {
+                    skillId: skill.id,
+                    phase: progress.phase as "queued" | "running" | "polling" | "completed",
+                    progress: progress.percent,
+                  },
+                });
+              }
+            : undefined;
+
         const observation = await this.deps.executionOrchestrator.execute(
           {
             runId,
@@ -1550,6 +1915,9 @@ IMPORTANT: return ONLY the JSON object. No markdown code fences, no surrounding 
               reason: `LLM called ${skill.name}`,
               toolCalls: [plannedCall],
             },
+            onProgress: onProgress as
+              | ((p: import("../loop-types.js").ToolExecutionProgress) => void)
+              | undefined,
           },
           signal,
         );
@@ -1569,6 +1937,28 @@ IMPORTANT: return ONLY the JSON object. No markdown code fences, no surrounding 
             },
             { runId, conversationId },
           );
+
+          // Update status part and add tool result via stream (§Phase 3)
+          if (stream && statusPartId) {
+            const ok = summary.status === "completed";
+            stream.updateStatus(statusPartId, {
+              status: ok ? "completed" : "failed",
+              label: ok
+                ? `完成: ${skill.name}`
+                : `失败: ${skill.name}`,
+            });
+            // §P1-3: Update tool_use part status
+            stream.updateToolUse(summary.id, {
+              status: ok ? "completed" : "failed",
+            });
+            stream.addToolResult({
+              toolCallId: summary.id,
+              skillId: summary.skillId,
+              summary: summary.summary,
+              artifactIds: observation.artifacts.map((a) => a.id),
+              trust: summary.status === "completed" ? "trusted" : "untrusted",
+            });
+          }
         }
 
         artifacts.push(...observation.artifacts);
@@ -1588,15 +1978,15 @@ IMPORTANT: return ONLY the JSON object. No markdown code fences, no surrounding 
           );
         }
       } catch (error) {
-        const errMsg =
-          error instanceof Error ? error.message : String(error);
-        summaries.push({
+        const errMsg = error instanceof Error ? error.message : String(error);
+        const failSummary: ToolCallSummary = {
           id: tc.id,
           skillId: skill.id,
           name: skill.name,
           status: "failed",
           summary: `Execution error: ${errMsg}`,
-        });
+        };
+        summaries.push(failSummary);
         this.deps.eventBus.emit(
           "agent.tool.failed",
           {
@@ -1607,6 +1997,19 @@ IMPORTANT: return ONLY the JSON object. No markdown code fences, no surrounding 
           },
           { runId },
         );
+        if (stream && statusPartId) {
+          stream.updateStatus(statusPartId, {
+            status: "failed",
+            label: `执行失败: ${skill.name}`,
+          });
+          // §P1-3: Update tool_use part status on execution error
+          stream.updateToolUse(tc.id, { status: "failed" });
+          stream.addError({
+            message: errMsg,
+            code: "AGENT_TOOL_EXECUTION_FAILED",
+            recoverable: true,
+          });
+        }
       }
     }
 
@@ -1672,6 +2075,19 @@ function capabilityNameFromToolId(toolId: string): string | undefined {
   return separator >= 0 ? toolId.slice(separator + 1) : undefined;
 }
 
+function toProviderToolName(skillId: string, usedNames: Set<string>): string {
+  const base = skillId.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 56);
+  const fallback = base.length > 0 ? base : "tool";
+  let candidate = fallback;
+  let suffix = 2;
+  while (usedNames.has(candidate)) {
+    candidate = `${fallback.slice(0, 52)}_${suffix}`;
+    suffix++;
+  }
+  usedNames.add(candidate);
+  return candidate;
+}
+
 function maxRisk(
   left: "low" | "medium" | "high" | "critical",
   right: "low" | "medium" | "high" | "critical",
@@ -1692,12 +2108,20 @@ function buildToolArgumentsHeuristic(
   const message = context.currentMessage.content.trim();
   const attachments = context.currentMessage.attachments ?? [];
   const urls = extractUrls(message);
+
+  // Find best image attachment: prefer URL, then dataUrl
   const imageAttachment = attachments.find(
     (attachment) =>
       Boolean(attachment.url) &&
       (attachment.type.startsWith("image/") ||
         /\.(png|jpe?g|webp|gif|bmp|avif)(\?|#|$)/i.test(attachment.url ?? "")),
+  ) ?? attachments.find(
+    (attachment) =>
+      Boolean(attachment.dataUrl) &&
+      (attachment.type.startsWith("image/") ||
+        /\.(png|jpe?g|webp|gif|bmp|avif)(\?|#|$)/i.test(attachment.name ?? "")),
   );
+
   const imageUrl =
     imageAttachment?.url ??
     urls.find((url) => /\.(png|jpe?g|webp|gif|bmp|avif)(\?|#|$)/i.test(url)) ??
@@ -1719,17 +2143,24 @@ function buildToolArgumentsHeuristic(
       name: attachment.name,
       type: attachment.type,
       url: attachment.url,
+      dataUrl: attachment.dataUrl,
       storageKey: attachment.storageKey,
       provider: attachment.provider,
     }));
   }
-  if (imageUrl) {
+  if (imageAttachment) {
+    fillImageArguments(args, imageAttachment);
+  } else if (imageUrl) {
     args.imageUrl = imageUrl;
     args.image_url = imageUrl;
   }
   if (urls.length > 0) {
     args.urls = urls;
     args.url = urls[0];
+  }
+  // §Attachment fix: fall back to image attachment URL when no URL in message text
+  if (!args.url && imageUrl) {
+    args.url = imageUrl;
   }
 
   return args;
@@ -1740,6 +2171,54 @@ function extractUrls(text: string): string[] {
     text.matchAll(/https?:\/\/[^\s)）"'<>]+/gi),
     (match) => match[0],
   );
+}
+
+/**
+ * Fill all image-related argument aliases from an AttachmentRef.
+ *
+ * Canonical fields: imageUrl (public URL), imageDataUrl (base64 fallback).
+ * Compat aliases: image_url, image_data_url.
+ *
+ * Only overwrites undefined fields — model-provided values take precedence
+ * when they are non-empty (the merge order { ...parsedArgs, ...builtArgs }
+ * in executeToolCalls already ensures deterministic values win, but this
+ * helper is also used in heuristic-only paths where no model args exist).
+ */
+function fillImageArguments(
+  args: Record<string, unknown>,
+  image: { url?: string; dataUrl?: string },
+): void {
+  if (image.url) {
+    args.imageUrl = image.url;
+    args.image_url = image.url;
+    // Also set url as convenience alias when no explicit URL in args
+    if (!args.url) args.url = image.url;
+  }
+  if (image.dataUrl) {
+    args.imageDataUrl = image.dataUrl;
+    args.image_data_url = image.dataUrl;
+  }
+}
+
+/**
+ * Canonicalize tool arguments — normalize alias fields to canonical names.
+ *
+ * LLMs may produce snake_case or camelCase variants. This normalizes known
+ * aliases so downstream validation sees a consistent shape.
+ */
+function canonicalizeArgs(args: Record<string, unknown>): Record<string, unknown> {
+  const normalized = { ...args };
+
+  // image_url → imageUrl (only if canonical field is absent)
+  if (normalized.image_url !== undefined && normalized.imageUrl === undefined) {
+    normalized.imageUrl = normalized.image_url;
+  }
+  if (normalized.image_data_url !== undefined && normalized.imageDataUrl === undefined) {
+    normalized.imageDataUrl = normalized.image_data_url;
+  }
+  // Keep aliases too — schema validation may reference either
+
+  return normalized;
 }
 
 // ── use_skill scoring ──────────────────────────────────────────────────
@@ -1803,9 +2282,9 @@ function scoreSkills(message: string, skills: SkillSummary[]): ScoredSkill[] {
     const nameBigrams = extractBigrams(skill.name);
     const nameOverlap = nameBigrams.filter((bg) => lower.includes(bg));
     if (nameOverlap.length >= 2) {
-      score = Math.max(score, 0.15);   // was 0.8 — now tiebreaker only
+      score = Math.max(score, 0.15); // was 0.8 — now tiebreaker only
     } else if (nameOverlap.length === 1) {
-      score = Math.max(score, 0.1);    // was 0.6 — now weak hint
+      score = Math.max(score, 0.1); // was 0.6 — now weak hint
     }
 
     // Description keyword overlap (handles English words and Chinese bigrams)
@@ -1818,9 +2297,9 @@ function scoreSkills(message: string, skills: SkillSummary[]): ScoredSkill[] {
 
     const totalDescMatches = matchedWords.length + matchedBigrams.length;
     if (totalDescMatches >= 3) {
-      score = Math.max(score, 0.2);    // was 0.5 — reduced
+      score = Math.max(score, 0.2); // was 0.5 — reduced
     } else if (totalDescMatches >= 1) {
-      score = Math.max(score, 0.1);    // was 0.3 — reduced
+      score = Math.max(score, 0.1); // was 0.3 — reduced
     }
 
     // Category match
@@ -1834,6 +2313,69 @@ function scoreSkills(message: string, skills: SkillSummary[]): ScoredSkill[] {
   // Sort by score descending
   scored.sort((a, b) => b.score - a.score);
   return scored;
+}
+
+/**
+ * §Schema fix: Normalize JSON Schema for LLM function calling compatibility.
+ *
+ * OpenAI function calling ignores anyOf/oneOf — the LLM only respects
+ * top-level `required`. This converts anyOf[{required:[...]}] into
+ * a flat `required: [...]` by picking the first branch's required fields.
+ *
+ * Also adds `additionalProperties: false` when missing, so the LLM
+ * doesn't hallucinate extra params.
+ */
+function normalizeSchemaForLLM(
+  schema: Record<string, unknown> | undefined,
+): Record<string, unknown> {
+  if (!schema || typeof schema !== "object") {
+    return { type: "object", properties: {}, additionalProperties: true };
+  }
+
+  const normalized = { ...schema };
+  const anyOf = normalized.anyOf;
+  const oneOf = normalized.oneOf;
+  const hasDisjunction =
+    (Array.isArray(anyOf) && anyOf.length > 0) ||
+    (Array.isArray(oneOf) && oneOf.length > 0);
+
+  // Remove anyOf/oneOf/allOf — LLM APIs don't understand them
+  delete normalized.anyOf;
+  delete normalized.oneOf;
+  delete normalized.allOf;
+
+  // If no top-level required but anyOf/oneOf exists, make all fields
+  // optional to avoid biasing the LLM toward any single branch.
+  if (
+    hasDisjunction &&
+    (!Array.isArray(normalized.required) || normalized.required.length === 0)
+  ) {
+    // Explicitly empty required — LLM is free to provide any combination.
+    // The deterministic argument builder + checkAnyOfUnsatisfied handle
+    // validation at execution time.
+    normalized.required = [];
+
+    // Append a disjunction hint to the description so the LLM knows at
+    // least one of the disjunctive fields should be provided.
+    const branches = (Array.isArray(anyOf) ? anyOf : []) as Array<Record<string, unknown>>;
+    const altBranches = (Array.isArray(oneOf) ? oneOf : []) as Array<Record<string, unknown>>;
+    const allBranches = [...branches, ...altBranches];
+    const branchFields = allBranches
+      .map((b) => (Array.isArray(b.required) ? b.required.join(" + ") : ""))
+      .filter(Boolean);
+    if (branchFields.length > 0) {
+      const hint = ` [至少提供其一: ${branchFields.join(" 或 ")}]`;
+      normalized.description =
+        (typeof normalized.description === "string" ? normalized.description : "") + hint;
+    }
+  }
+
+  // Ensure additionalProperties is set
+  if (normalized.additionalProperties === undefined) {
+    normalized.additionalProperties = false;
+  }
+
+  return normalized;
 }
 
 /**
@@ -1896,9 +2438,9 @@ function deriveRecentHistory(
         (tr.name?.includes(":")
           ? tr.name.slice(0, tr.name.lastIndexOf(":"))
           : undefined) ??
-        (tr.structured as Record<string, unknown> | undefined)?.skillId as
+        ((tr.structured as Record<string, unknown> | undefined)?.skillId as
           | string
-          | undefined;
+          | undefined);
       if (!resolvedSkillId) return null;
 
       // Map tool status to history status. Unknown statuses default to
@@ -1928,6 +2470,23 @@ function clampConfidence(value: unknown): number {
   return Math.max(0, Math.min(1, n));
 }
 
+/** Summarize tool arguments for inline preview display (truncates long values). */
+function summarizeForPreview(
+  args: Record<string, unknown>,
+): Record<string, unknown> {
+  const preview: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(args)) {
+    if (typeof value === "string" && value.length > 80) {
+      preview[key] = value.slice(0, 80) + "...";
+    } else if (Array.isArray(value) && value.length > 3) {
+      preview[key] = `[${value.length} items]`;
+    } else {
+      preview[key] = value;
+    }
+  }
+  return preview;
+}
+
 /** Attach trace metadata to a ToolDecision from DecisionMetadata (§P2). */
 function attachTrace(
   decision: ToolDecision,
@@ -1937,7 +2496,8 @@ function attachTrace(
     decision.decisionPath = meta.decisionPath;
     if (meta.retrievalMetadata) {
       decision.retrievalTopK = meta.retrievalMetadata.topK;
-      decision.retrievalCandidateCount = meta.retrievalMetadata.candidates?.length;
+      decision.retrievalCandidateCount =
+        meta.retrievalMetadata.candidates?.length;
       decision.retrievalFallback = meta.retrievalMetadata.fallbackUsed;
     }
   }

@@ -19,3 +19,20 @@ export function createConversation(request: Request, title = "New Chat") {
 export function getConversationMessages(request: Request, conversationId: string) {
   return request<{ conversationId: string; items: ChatMessage[] }>(endpoints.conversationMessages(conversationId));
 }
+
+export function updateConversation(
+  request: Request,
+  id: string,
+  patch: { title?: string; pinned?: boolean },
+) {
+  return request<Conversation>(endpoints.conversationById(id), {
+    method: "PATCH",
+    body: JSON.stringify(patch),
+  });
+}
+
+export function deleteConversation(request: Request, id: string) {
+  return request<{ ok: boolean }>(endpoints.conversationById(id), {
+    method: "DELETE",
+  });
+}

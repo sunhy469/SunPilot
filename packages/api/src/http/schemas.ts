@@ -90,3 +90,10 @@ export const uploadPresignBodySchema = z.object({
   contentType: z.string().default("application/octet-stream"),
   sizeBytes: z.number().positive().optional(),
 });
+
+export const updateConversationBodySchema = z.object({
+  title: z.string().min(1).max(200).optional(),
+  pinned: z.boolean().optional(),
+}).refine((d) => d.title !== undefined || d.pinned !== undefined, {
+  message: "At least one of title or pinned must be provided",
+});

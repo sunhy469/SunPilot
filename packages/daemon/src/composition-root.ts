@@ -73,7 +73,7 @@ import {
   createDefaultEmbeddingProvider,
   type OpenAICompatibleEmbeddingProvider,
 } from "@sunpilot/core";
-import type { LlmProvider } from "@sunpilot/core";
+import type { AttachmentRef, LlmProvider } from "@sunpilot/core";
 
 export function createAgentLoopService(deps: {
   database: DatabaseContext;
@@ -100,7 +100,7 @@ export function createAgentLoopService(deps: {
   // external stream hooks consume. This ensures all externally visible
   // events carry a real DB sequence (no sequence: -1 duplicates).
   //
-  // agent.response.delta is NOT persisted — it is a high-frequency transient
+  // agent.message.part.delta is NOT persisted — it is a high-frequency transient
   // streaming event whose content is already captured by the final saved
   // message. Skipping it prevents the async fire-and-forget persist from
   // delivering response tokens out of order to liveEventBus.
@@ -111,8 +111,8 @@ export function createAgentLoopService(deps: {
       liveEventBus.publish(event);
       return;
     }
-    if (event.type === "agent.response.delta") {
-      // Transient streaming event — skip persist, delivered via onDelta instead
+    if (event.type === "agent.message.part.delta") {
+      // Transient streaming event — skip persist, delivered via sync onDelta
       return;
     }
     const persisted = await eventSink.persist(event);
@@ -258,19 +258,16 @@ export function createAgentLoopService(deps: {
         await deps.database.messages.listByConversationId(conversationId);
       return messages.slice(0, limit ?? 30).map((m) => ({
         id: m.id,
-        role: m.role,
+        role: m.role as string,
         content: m.content,
         attachments: Array.isArray(m.metadata?.attachments)
-          ? (m.metadata.attachments as Array<{
-              id: string;
-              name: string;
-              type: string;
-              sizeBytes?: number;
-              url?: string;
-              storageKey?: string;
-            }>)
+          ? (m.metadata.attachments as AttachmentRef[])
           : undefined,
         createdAt: m.createdAt,
+        /** §P0-3: Restore content-block parts from metadata. */
+        parts: (m.metadata as { parts?: unknown })?.parts as
+          | import("@sunpilot/protocol").AssistantMessagePart[]
+          | undefined,
       }));
     },
     searchMemories: async (input) => {
@@ -386,6 +383,24 @@ export function createAgentLoopService(deps: {
   // Uses embedding service for semantic similarity scoring when available.
   const toolRetriever = new ToolRetriever();
 
+  // §Bugfix: Load JSON schema from file path when inputSchema is a string
+  const loadSchema = (
+    schema: string | Record<string, unknown> | undefined,
+    skillPath: string,
+  ): Record<string, unknown> | undefined => {
+    if (typeof schema === "object" && schema !== null) return schema as Record<string, unknown>;
+    if (typeof schema !== "string") return undefined;
+    try {
+      const fs = require("fs");
+      const path = require("path");
+      const filePath = path.join(skillPath, schema);
+      if (fs.existsSync(filePath)) {
+        return JSON.parse(fs.readFileSync(filePath, "utf-8"));
+      }
+    } catch { /* Best effort */ }
+    return undefined;
+  };
+
   // Shared helper — builds SkillSummary[] from skill registry (§refactor)
   const listSkillSummaries = async () => {
     const skills = deps.skillRegistry.list();
@@ -403,11 +418,7 @@ export function createAgentLoopService(deps: {
           maxTimeoutMs: 300_000,
           supportsAbort: true,
           idempotent: false,
-          inputSchema:
-            typeof capability.inputSchema === "object" &&
-            capability.inputSchema !== null
-              ? (capability.inputSchema as Record<string, unknown>)
-              : undefined,
+          inputSchema: loadSchema(capability.inputSchema, s.path),
           // Populate outputSchema from manifest when available (§P2)
           outputSchema:
             typeof capability.outputSchema === "object" &&
@@ -662,6 +673,25 @@ export function createAgentLoopService(deps: {
     planSnapshotRepo: deps.database.planSnapshots,
     // ── Tool call persistence for safety audits (§P0-3) ────────────
     toolCalls: deps.database.toolCalls,
+    // ── Content-block stream message persistence (§Codex flow) ──────
+    saveMessage: async (input) => {
+      try {
+        let embedding: number[] | undefined;
+        if (input.content.trim()) {
+          try {
+            embedding = await embeddingService.embed(input.content);
+          } catch { /* Best effort */ }
+        }
+        await deps.database.messages.create({
+          id: input.id,
+          conversationId: input.conversationId,
+          role: input.role as "system" | "user" | "assistant",
+          content: input.content,
+          metadata: input.metadata,
+          embedding,
+        });
+      } catch { /* Best effort */ }
+    },
   });
 
   // ── Agent Service ──────────────────────────────────────────────
@@ -728,7 +758,10 @@ export function createAgentLoopService(deps: {
             type: string;
             sizeBytes?: number;
             url?: string;
+            dataUrl?: string;
             storageKey?: string;
+            provider?: "aliyun-oss" | "s3" | "minio" | "local";
+            checksum?: string;
           }>;
         };
         return {
@@ -746,19 +779,16 @@ export function createAgentLoopService(deps: {
         return msgs.map((m) => ({
           id: m.id,
           conversationId: m.conversationId,
-          role: m.role,
+          role: m.role as import("@sunpilot/core").AgentMessageRole,
           content: m.content,
           attachments: Array.isArray(m.metadata?.attachments)
-            ? (m.metadata.attachments as Array<{
-                id: string;
-                name: string;
-                type: string;
-                sizeBytes?: number;
-                url?: string;
-                storageKey?: string;
-              }>)
+            ? (m.metadata.attachments as AttachmentRef[])
             : undefined,
           createdAt: m.createdAt,
+          /** §P0-3: Restore content-block parts from metadata. */
+          parts: (m.metadata as { parts?: unknown })?.parts as
+            | import("@sunpilot/protocol").AssistantMessagePart[]
+            | undefined,
         }));
       },
     },

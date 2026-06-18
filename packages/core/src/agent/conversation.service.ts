@@ -38,7 +38,9 @@ export class InMemoryAgentConversationStore implements AgentConversationStore {
       conversationId: input.conversationId,
       role: input.role,
       content: input.content,
-      createdAt: new Date().toISOString()
+      createdAt: new Date().toISOString(),
+      // §5.3: Preserve attachments for restore/resume paths
+      attachments: input.attachments,
     };
     this.messages.set(input.conversationId, [...(this.messages.get(input.conversationId) ?? []), message]);
     await this.touchConversation(input.conversationId);

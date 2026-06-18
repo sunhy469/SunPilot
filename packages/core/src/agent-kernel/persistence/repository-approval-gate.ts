@@ -63,7 +63,9 @@ export class RepositoryApprovalGate implements ApprovalGateInterface {
       arguments: Record<string, unknown>;
       permissions: Permission[];
       toolCallId?: string;
+      messageId?: string;
     };
+    messageId?: string;
   }> {
     const approval = await this.requirePendingApproval(approvalId);
     const decided = await this.db.approvals.decide(approvalId, "approved", {
@@ -90,6 +92,7 @@ export class RepositoryApprovalGate implements ApprovalGateInterface {
       title: approval.title,
       riskLevel: approval.risk,
       requestedAction,
+      messageId: requestedAction?.messageId,
     };
   }
 

@@ -111,29 +111,49 @@ class FakeWebSocket extends EventTarget {
       },
     });
     this.emit({
-      method: "agent.response.started",
+      method: "agent.message.started",
       params: {
         runId: "run_1",
         conversationId: "conv_1",
         messageId: assistant.id,
       },
     });
+    const textPartId = "part_text_1";
     this.emit({
-      method: "agent.response.delta",
+      method: "agent.message.part.started",
       params: {
         runId: "run_1",
         conversationId: "conv_1",
         messageId: assistant.id,
+        part: {
+          id: textPartId,
+          type: "text",
+          content: "",
+          status: "streaming",
+          source: "model",
+          createdAt: new Date().toISOString(),
+        },
+      },
+    });
+    this.emit({
+      method: "agent.message.part.delta",
+      params: {
+        runId: "run_1",
+        conversationId: "conv_1",
+        messageId: assistant.id,
+        partId: textPartId,
         delta: assistant.content,
       },
     });
     if (FakeWebSocket.holdCompletion) return;
     this.emit({
-      method: "agent.response.completed",
+      method: "agent.message.completed",
       params: {
         runId: "run_1",
         conversationId: "conv_1",
         messageId: assistant.id,
+        content: assistant.content,
+        parts: [],
       },
     });
     this.emit({
@@ -243,7 +263,7 @@ describe("Web ChatPage", () => {
   test("renders a clean welcome state without opening a socket", async () => {
     render(<App />);
 
-    await screen.findByText("你好，我是 SunPilot，有什么可以帮到您？");
+    await screen.findByText("你好，我是 SunPilot");
     expect(
       screen.queryByText("SunPilot daemon 暂时不可用"),
     ).not.toBeInTheDocument();
@@ -254,7 +274,7 @@ describe("Web ChatPage", () => {
   test("shows the plugin panel in the chat workspace", async () => {
     render(<App />);
 
-    await screen.findByText("你好，我是 SunPilot，有什么可以帮到您？");
+    await screen.findByText("你好，我是 SunPilot");
     await userEvent.click(screen.getByRole("button", { name: "appstore 插件" }));
 
     expect(
