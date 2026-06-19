@@ -1,5 +1,8 @@
 import { describe, expect, test } from "vitest";
-import type { ChatMessage, AssistantMessagePart } from "../../../features/conversations/types";
+import type {
+  ChatMessage,
+  AssistantMessagePart,
+} from "../../../features/conversations/types";
 
 // ── Re-implement the pure functions for unit testing ──
 // These are copied from useChat.ts and useConversations.ts since they are
@@ -34,10 +37,13 @@ function assistantMessageReducer(
       );
     }
 
-    const pendingPlaceholderIdx = findLastIndex(items, (m) =>
-      m.role === "assistant" &&
-      m.status === "pending" &&
-      (m.conversationId === "pending" || m.conversationId === (msgParams.conversationId || conversationId)),
+    const pendingPlaceholderIdx = findLastIndex(
+      items,
+      (m) =>
+        m.role === "assistant" &&
+        m.status === "pending" &&
+        (m.conversationId === "pending" ||
+          m.conversationId === (msgParams.conversationId || conversationId)),
     );
 
     if (pendingPlaceholderIdx >= 0) {
@@ -80,12 +86,16 @@ function assistantMessageReducer(
     return items.map((item) => {
       if (item.id !== partParams.messageId) return item;
       const parts = item.parts ?? [];
-      const existingIdx = partId != null
-        ? parts.findIndex((p) => p.id === partId)
-        : -1;
-      const nextParts = existingIdx >= 0
-        ? parts.map((p, i) => i === existingIdx ? { ...p, ...incomingPart } as AssistantMessagePart : p)
-        : [...parts, incomingPart as AssistantMessagePart];
+      const existingIdx =
+        partId != null ? parts.findIndex((p) => p.id === partId) : -1;
+      const nextParts =
+        existingIdx >= 0
+          ? parts.map((p, i) =>
+              i === existingIdx
+                ? ({ ...p, ...incomingPart } as AssistantMessagePart)
+                : p,
+            )
+          : [...parts, incomingPart as AssistantMessagePart];
       return { ...item, parts: nextParts };
     });
   }
@@ -165,14 +175,22 @@ function assistantMessageReducer(
       messageId: string;
       content: string;
       parts: Array<Record<string, unknown>>;
-      cards?: Array<{ type: string; title?: string; data: Record<string, unknown> }>;
+      cards?: Array<{
+        type: string;
+        title?: string;
+        data: Record<string, unknown>;
+      }>;
     };
+    const completedParts = normalizeCompletedAssistantParts(
+      completedParams.parts,
+    );
 
     const existing = items.find((m) => m.id === completedParams.messageId);
     if (
       existing &&
       existing.status === "completed" &&
-      existing.content === completedParams.content
+      existing.content === completedParams.content &&
+      !hasOpenAssistantParts(existing.parts)
     ) {
       return items;
     }
@@ -188,7 +206,7 @@ function assistantMessageReducer(
           ? {
               ...m,
               content: completedParams.content,
-              parts: completedParams.parts as unknown as ChatMessage["parts"],
+              parts: completedParts,
               status: "completed" as const,
               cards: (completedParams.cards as ChatMessage["cards"]) ?? m.cards,
             }
@@ -206,13 +224,65 @@ function assistantMessageReducer(
         createdAt: new Date().toISOString(),
         status: "completed" as const,
         activities: [],
-        parts: completedParams.parts as unknown as ChatMessage["parts"],
+        parts: completedParts,
         cards: completedParams.cards as ChatMessage["cards"],
       },
     ];
   }
 
   return items;
+}
+
+function hasOpenAssistantParts(parts?: ChatMessage["parts"]): boolean {
+  return (parts ?? []).some((part) => {
+    if (part.type === "status") return part.status === "running";
+    if (part.type === "tool_use")
+      return part.status === "pending" || part.status === "running";
+    if (part.type === "text") return part.status === "streaming";
+    return false;
+  });
+}
+
+function normalizeCompletedAssistantParts(
+  parts: Array<Record<string, unknown>>,
+): ChatMessage["parts"] {
+  const completedAt = new Date().toISOString();
+  return parts.map((part) => {
+    if (part.type === "status" && part.status === "running") {
+      const metadata =
+        part.metadata && typeof part.metadata === "object"
+          ? (part.metadata as Record<string, unknown>)
+          : {};
+      return {
+        ...part,
+        status: "completed",
+        completedAt:
+          typeof part.completedAt === "string" ? part.completedAt : completedAt,
+        metadata: {
+          ...metadata,
+          phase: "completed",
+        },
+      } as unknown as AssistantMessagePart;
+    }
+    if (
+      part.type === "tool_use" &&
+      (part.status === "pending" || part.status === "running")
+    ) {
+      return {
+        ...part,
+        status: "completed",
+      } as unknown as AssistantMessagePart;
+    }
+    if (part.type === "text" && part.status === "streaming") {
+      return {
+        ...part,
+        status: "completed",
+        completedAt:
+          typeof part.completedAt === "string" ? part.completedAt : completedAt,
+      } as unknown as AssistantMessagePart;
+    }
+    return part as unknown as AssistantMessagePart;
+  });
 }
 
 function mergeMessagesById(
@@ -269,7 +339,9 @@ function makeUserMessage(overrides: Partial<ChatMessage> = {}): ChatMessage {
   };
 }
 
-function makePendingAssistant(overrides: Partial<ChatMessage> = {}): ChatMessage {
+function makePendingAssistant(
+  overrides: Partial<ChatMessage> = {},
+): ChatMessage {
   return {
     id: "local_1",
     conversationId: "pending",
@@ -281,7 +353,9 @@ function makePendingAssistant(overrides: Partial<ChatMessage> = {}): ChatMessage
   };
 }
 
-function makeStreamingAssistant(overrides: Partial<ChatMessage> = {}): ChatMessage {
+function makeStreamingAssistant(
+  overrides: Partial<ChatMessage> = {},
+): ChatMessage {
   return {
     id: "msg_1",
     conversationId: "conv_1",
@@ -299,19 +373,20 @@ function makeStreamingAssistant(overrides: Partial<ChatMessage> = {}): ChatMessa
 
 describe("assistantMessageReducer", () => {
   test("agent.message.started binds to pending placeholder with conversationId=pending", () => {
-    const items: ChatMessage[] = [
-      makeUserMessage(),
-      makePendingAssistant(),
-    ];
+    const items: ChatMessage[] = [makeUserMessage(), makePendingAssistant()];
 
-    const result = assistantMessageReducer(items, {
-      method: "agent.message.started",
-      params: {
-        runId: "run_1",
-        conversationId: "conv_1",
-        messageId: "msg_real_1",
+    const result = assistantMessageReducer(
+      items,
+      {
+        method: "agent.message.started",
+        params: {
+          runId: "run_1",
+          conversationId: "conv_1",
+          messageId: "msg_real_1",
+        },
       },
-    }, "conv_1");
+      "conv_1",
+    );
 
     expect(result).toHaveLength(2);
     expect(result[1]!.id).toBe("msg_real_1");
@@ -325,14 +400,18 @@ describe("assistantMessageReducer", () => {
       makeStreamingAssistant({ id: "msg_real_1" }),
     ];
 
-    const result = assistantMessageReducer(items, {
-      method: "agent.message.started",
-      params: {
-        runId: "run_1",
-        conversationId: "conv_1",
-        messageId: "msg_real_1",
+    const result = assistantMessageReducer(
+      items,
+      {
+        method: "agent.message.started",
+        params: {
+          runId: "run_1",
+          conversationId: "conv_1",
+          messageId: "msg_real_1",
+        },
       },
-    }, "conv_1");
+      "conv_1",
+    );
 
     expect(result).toHaveLength(2);
     // Should update status, not add a new message
@@ -342,14 +421,18 @@ describe("assistantMessageReducer", () => {
   test("agent.message.started creates new assistant if no placeholder", () => {
     const items: ChatMessage[] = [makeUserMessage()];
 
-    const result = assistantMessageReducer(items, {
-      method: "agent.message.started",
-      params: {
-        runId: "run_1",
-        conversationId: "conv_1",
-        messageId: "msg_new",
+    const result = assistantMessageReducer(
+      items,
+      {
+        method: "agent.message.started",
+        params: {
+          runId: "run_1",
+          conversationId: "conv_1",
+          messageId: "msg_new",
+        },
       },
-    }, "conv_1");
+      "conv_1",
+    );
 
     expect(result).toHaveLength(2);
     expect(result[1]!.id).toBe("msg_new");
@@ -362,13 +445,22 @@ describe("assistantMessageReducer", () => {
       makeStreamingAssistant({ id: "msg_1", parts: [] }),
     ];
 
-    const result = assistantMessageReducer(items, {
-      method: "agent.message.part.started",
-      params: {
-        messageId: "msg_1",
-        part: { id: "part_1", type: "text", content: "", status: "streaming" },
+    const result = assistantMessageReducer(
+      items,
+      {
+        method: "agent.message.part.started",
+        params: {
+          messageId: "msg_1",
+          part: {
+            id: "part_1",
+            type: "text",
+            content: "",
+            status: "streaming",
+          },
+        },
       },
-    }, "conv_1");
+      "conv_1",
+    );
 
     expect(result[0]!.parts).toHaveLength(1);
     expect(result[0]!.parts![0]!.id).toBe("part_1");
@@ -378,17 +470,35 @@ describe("assistantMessageReducer", () => {
     const items: ChatMessage[] = [
       makeStreamingAssistant({
         id: "msg_1",
-        parts: [{ id: "part_1", type: "text", content: "hello", source: "model", status: "streaming", createdAt: "" }],
+        parts: [
+          {
+            id: "part_1",
+            type: "text",
+            content: "hello",
+            source: "model",
+            status: "streaming",
+            createdAt: "",
+          },
+        ],
       }),
     ];
 
-    const result = assistantMessageReducer(items, {
-      method: "agent.message.part.started",
-      params: {
-        messageId: "msg_1",
-        part: { id: "part_1", type: "text", content: "hello", status: "streaming" },
+    const result = assistantMessageReducer(
+      items,
+      {
+        method: "agent.message.part.started",
+        params: {
+          messageId: "msg_1",
+          part: {
+            id: "part_1",
+            type: "text",
+            content: "hello",
+            status: "streaming",
+          },
+        },
       },
-    }, "conv_1");
+      "conv_1",
+    );
 
     // Should NOT duplicate the part
     expect(result[0]!.parts).toHaveLength(1);
@@ -400,18 +510,38 @@ describe("assistantMessageReducer", () => {
       makeStreamingAssistant({
         id: "msg_1",
         content: "partial",
-        parts: [{ id: "part_1", type: "text", content: "partial", source: "model", status: "streaming", createdAt: "" }],
+        parts: [
+          {
+            id: "part_1",
+            type: "text",
+            content: "partial",
+            source: "model",
+            status: "streaming",
+            createdAt: "",
+          },
+        ],
       }),
     ];
 
-    const result = assistantMessageReducer(items, {
-      method: "agent.message.completed",
-      params: {
-        messageId: "msg_1",
-        content: "final complete content",
-        parts: [{ id: "part_1", type: "text", content: "final complete content", status: "completed" }],
+    const result = assistantMessageReducer(
+      items,
+      {
+        method: "agent.message.completed",
+        params: {
+          messageId: "msg_1",
+          content: "final complete content",
+          parts: [
+            {
+              id: "part_1",
+              type: "text",
+              content: "final complete content",
+              status: "completed",
+            },
+          ],
+        },
       },
-    }, "conv_1");
+      "conv_1",
+    );
 
     expect(result[0]!.content).toBe("final complete content");
     expect(result[0]!.status).toBe("completed");
@@ -426,31 +556,94 @@ describe("assistantMessageReducer", () => {
       }),
     ];
 
-    const result = assistantMessageReducer(items, {
-      method: "agent.message.completed",
-      params: {
-        messageId: "msg_1",
-        content: "done",
-        parts: [],
+    const result = assistantMessageReducer(
+      items,
+      {
+        method: "agent.message.completed",
+        params: {
+          messageId: "msg_1",
+          content: "done",
+          parts: [],
+        },
       },
-    }, "conv_1");
+      "conv_1",
+    );
 
     // Should return the same reference (no re-render)
     expect(result).toBe(items);
   });
 
+  test("agent.message.completed closes leftover running parts", () => {
+    const items: ChatMessage[] = [
+      makeStreamingAssistant({
+        id: "msg_1",
+        content: "final",
+        status: "completed",
+        parts: [
+          {
+            id: "status_1",
+            type: "status",
+            label: "正在整理结果...",
+            status: "running",
+            runId: "run_1",
+            createdAt: "",
+            metadata: { phase: "running" },
+          },
+          {
+            id: "text_1",
+            type: "text",
+            content: "final",
+            source: "model",
+            status: "streaming",
+            createdAt: "",
+          },
+        ],
+      }),
+    ];
+
+    const result = assistantMessageReducer(
+      items,
+      {
+        method: "agent.message.completed",
+        params: {
+          messageId: "msg_1",
+          content: "final",
+          parts: items[0]!.parts as unknown as Array<Record<string, unknown>>,
+        },
+      },
+      "conv_1",
+    );
+
+    expect(result).not.toBe(items);
+    expect(
+      result[0]!.parts?.find((part) => part.id === "status_1"),
+    ).toMatchObject({
+      status: "completed",
+      metadata: { phase: "completed" },
+    });
+    expect(
+      result[0]!.parts?.find((part) => part.id === "text_1"),
+    ).toMatchObject({
+      status: "completed",
+    });
+  });
+
   test("agent.message.completed creates message if not found", () => {
     const items: ChatMessage[] = [makeUserMessage()];
 
-    const result = assistantMessageReducer(items, {
-      method: "agent.message.completed",
-      params: {
-        messageId: "msg_late",
-        conversationId: "conv_1",
-        content: "late arrival",
-        parts: [],
+    const result = assistantMessageReducer(
+      items,
+      {
+        method: "agent.message.completed",
+        params: {
+          messageId: "msg_late",
+          conversationId: "conv_1",
+          content: "late arrival",
+          parts: [],
+        },
       },
-    }, "conv_1");
+      "conv_1",
+    );
 
     expect(result).toHaveLength(2);
     expect(result[1]!.id).toBe("msg_late");
@@ -463,21 +656,48 @@ describe("assistantMessageReducer", () => {
     const items: ChatMessage[] = [
       makeStreamingAssistant({
         id: "msg_1",
-        parts: [{ id: "part_1", type: "text", content: "hel", source: "model", status: "streaming", createdAt: "" }],
+        parts: [
+          {
+            id: "part_1",
+            type: "text",
+            content: "hel",
+            source: "model",
+            status: "streaming",
+            createdAt: "",
+          },
+        ],
       }),
     ];
 
     // First delta with index 0
-    const r1 = assistantMessageReducer(items, {
-      method: "agent.message.part.delta",
-      params: { messageId: "msg_1", partId: "part_1", delta: "lo", deltaIndex: 0 },
-    }, "conv_1");
+    const r1 = assistantMessageReducer(
+      items,
+      {
+        method: "agent.message.part.delta",
+        params: {
+          messageId: "msg_1",
+          partId: "part_1",
+          delta: "lo",
+          deltaIndex: 0,
+        },
+      },
+      "conv_1",
+    );
 
     // Duplicate delta with same index 0 should be skipped
-    const r2 = assistantMessageReducer(r1, {
-      method: "agent.message.part.delta",
-      params: { messageId: "msg_1", partId: "part_1", delta: "lo", deltaIndex: 0 },
-    }, "conv_1");
+    const r2 = assistantMessageReducer(
+      r1,
+      {
+        method: "agent.message.part.delta",
+        params: {
+          messageId: "msg_1",
+          partId: "part_1",
+          delta: "lo",
+          deltaIndex: 0,
+        },
+      },
+      "conv_1",
+    );
 
     // Should be the same reference (no change)
     expect(r2).toBe(r1);
@@ -489,21 +709,48 @@ describe("assistantMessageReducer", () => {
     const items: ChatMessage[] = [
       makeStreamingAssistant({
         id: "msg_1",
-        parts: [{ id: "part_1", type: "text", content: "", source: "model", status: "streaming", createdAt: "" }],
+        parts: [
+          {
+            id: "part_1",
+            type: "text",
+            content: "",
+            source: "model",
+            status: "streaming",
+            createdAt: "",
+          },
+        ],
       }),
     ];
 
     // Delta with index 0
-    const r1 = assistantMessageReducer(items, {
-      method: "agent.message.part.delta",
-      params: { messageId: "msg_1", partId: "part_1", delta: "a", deltaIndex: 0 },
-    }, "conv_1");
+    const r1 = assistantMessageReducer(
+      items,
+      {
+        method: "agent.message.part.delta",
+        params: {
+          messageId: "msg_1",
+          partId: "part_1",
+          delta: "a",
+          deltaIndex: 0,
+        },
+      },
+      "conv_1",
+    );
 
     // Delta with index 1 (should be accepted)
-    const r2 = assistantMessageReducer(r1, {
-      method: "agent.message.part.delta",
-      params: { messageId: "msg_1", partId: "part_1", delta: "b", deltaIndex: 1 },
-    }, "conv_1");
+    const r2 = assistantMessageReducer(
+      r1,
+      {
+        method: "agent.message.part.delta",
+        params: {
+          messageId: "msg_1",
+          partId: "part_1",
+          delta: "b",
+          deltaIndex: 1,
+        },
+      },
+      "conv_1",
+    );
 
     const textPart = r2[0]!.parts!.find((p) => p.type === "text");
     expect(textPart!.content).toBe("ab");
@@ -540,10 +787,21 @@ describe("mergeMessagesById", () => {
 
   test("server completed message overrides local with same ID", () => {
     const local: ChatMessage[] = [
-      makeStreamingAssistant({ id: "msg_1", content: "partial", status: "streaming" }),
+      makeStreamingAssistant({
+        id: "msg_1",
+        content: "partial",
+        status: "streaming",
+      }),
     ];
     const server: ChatMessage[] = [
-      { id: "msg_1", conversationId: "conv_1", role: "assistant", content: "final", createdAt: "", status: "completed" },
+      {
+        id: "msg_1",
+        conversationId: "conv_1",
+        role: "assistant",
+        content: "final",
+        createdAt: "",
+        status: "completed",
+      },
     ];
 
     const result = mergeMessagesById(local, server);
@@ -556,7 +814,14 @@ describe("mergeMessagesById", () => {
     const local: ChatMessage[] = [makeUserMessage()];
     const server: ChatMessage[] = [
       makeUserMessage(),
-      { id: "msg_old", conversationId: "conv_1", role: "assistant", content: "old reply", createdAt: "", status: "completed" },
+      {
+        id: "msg_old",
+        conversationId: "conv_1",
+        role: "assistant",
+        content: "old reply",
+        createdAt: "",
+        status: "completed",
+      },
     ];
 
     const result = mergeMessagesById(local, server);
@@ -581,11 +846,25 @@ describe("mergeMessagesById", () => {
     // server also returns the same message from history
     const local: ChatMessage[] = [
       makeUserMessage({ id: "user_1" }),
-      { id: "msg_1", conversationId: "conv_1", role: "assistant", content: "hello", createdAt: "", status: "completed" },
+      {
+        id: "msg_1",
+        conversationId: "conv_1",
+        role: "assistant",
+        content: "hello",
+        createdAt: "",
+        status: "completed",
+      },
     ];
     const server: ChatMessage[] = [
       makeUserMessage({ id: "user_1" }),
-      { id: "msg_1", conversationId: "conv_1", role: "assistant", content: "hello", createdAt: "", status: "completed" },
+      {
+        id: "msg_1",
+        conversationId: "conv_1",
+        role: "assistant",
+        content: "hello",
+        createdAt: "",
+        status: "completed",
+      },
     ];
 
     const result = mergeMessagesById(local, server);

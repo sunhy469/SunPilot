@@ -1,6 +1,7 @@
 import type { SkillSummary } from "./tool-types.js";
 import type { RoutedIntent } from "../loop-types.js";
 import type { EmbeddingService } from "../context/embedding-service.js";
+import type { SkillEmbeddingCache } from "./skill-embedding-cache.js";
 
 // ── Retrieval Types ──────────────────────────────────────────────────────
 
@@ -13,6 +14,8 @@ export interface ToolRetrievalInput {
   availableSkills: SkillSummary[];
   /** Embedding service for semantic similarity (optional). */
   embeddingService?: EmbeddingService;
+  /** §P1-2: Shared skill embedding cache (optional). */
+  skillEmbeddingCache?: SkillEmbeddingCache;
   /** Recent tool call history for success/failure weighting. */
   recentHistory?: ToolCallHistoryEntry[];
   /** Current run's permission mode. */
@@ -131,7 +134,7 @@ export class ToolRetriever {
    * Retrieve and score tools based on the current context.
    */
   async retrieve(input: ToolRetrievalInput): Promise<ToolRetrievalResult> {
-    const { query, intent, availableSkills, embeddingService, recentHistory, permissionMode } = input;
+    const { query, intent, availableSkills, embeddingService, skillEmbeddingCache, recentHistory, permissionMode } = input;
 
     if (availableSkills.length === 0) {
       return {
@@ -229,6 +232,8 @@ export class ToolRetriever {
     // degraded to fallback. The door check (hasRealProvider) covers
     // pre-existing degradation; the post-query check catches provider
     // failure DURING the query embed call (mid-call degradation).
+    // §P1-2: Batch-parallelize skill embedding calls to avoid sequential
+    // await-per-skill latency. Uses same concurrency limit as IntentRouter.
     if (embeddingService && embeddingService.hasRealProvider) {
       try {
         const queryEmbedding = await embeddingService.embed(query);
@@ -240,18 +245,37 @@ export class ToolRetriever {
         if (!embeddingService.hasRealProvider) {
           // Degraded mid-call — skip embedding scoring
         } else {
-          for (const entry of scored) {
-            // Embed rich text: name + description + category. Consistent
-            // with IntentRouter and pre-warm to maximize cache hits.
-            const skillText = `${entry.skill.name} — ${entry.skill.description} — category: ${entry.skill.category}`;
-            const descEmbedding = await embeddingService
-              .embed(skillText)
-              .catch(() => undefined);
-            if (descEmbedding && embeddingService.hasRealProvider) {
-              const similarity = cosineSimilarity(
-                queryEmbedding,
-                descEmbedding,
-              );
+          // §P1-2: Batch-parallelize with shared cache — process in groups of 8.
+          // Uses SkillEmbeddingCache when available to avoid duplicate API calls
+          // with IntentRouter. Was sequential await per skill.
+          const MAX_CONCURRENCY = 8;
+          const embeddings: Array<{ index: number; embedding: number[] | undefined }> = [];
+          for (let i = 0; i < scored.length; i += MAX_CONCURRENCY) {
+            const batch = scored.slice(i, i + MAX_CONCURRENCY);
+            const batchResults = await Promise.allSettled(
+              batch.map(async (entry, bi) => {
+                const skill = entry.skill;
+                const descEmbedding = skillEmbeddingCache
+                  ? (await skillEmbeddingCache.getEmbedding(skill).catch(() => undefined))
+                    ?? await embeddingService!.embed(`${skill.name} — ${skill.description} — category: ${skill.category}`).catch(() => undefined)
+                  : await embeddingService!.embed(`${skill.name} — ${skill.description} — category: ${skill.category}`).catch(() => undefined);
+                return { index: i + bi, embedding: descEmbedding };
+              }),
+            );
+            for (const br of batchResults) {
+              if (br.status === "fulfilled") {
+                embeddings.push(br.value);
+              }
+            }
+          }
+
+          // Apply similarity scores from batch results
+          if (embeddingService.hasRealProvider) {
+            for (const { index, embedding: descEmbedding } of embeddings) {
+              if (!descEmbedding) continue;
+              const entry = scored[index];
+              if (!entry) continue;
+              const similarity = cosineSimilarity(queryEmbedding, descEmbedding);
               // 0.5 weight — embedding is the PRIMARY scoring signal;
               // keyword/bigram are tiebreakers only.
               entry.score += similarity * 0.5;

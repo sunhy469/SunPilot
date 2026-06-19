@@ -1,6 +1,6 @@
 import { describe, expect, test } from "vitest";
-import type { AgentContext, AgentPlan, RoutedIntent } from "../loop-types.js";
-import { ToolDecisionEngine } from "./tool-decision-engine.js";
+import type { AgentContext, AgentPlan, RoutedIntent, ToolCallSummary } from "../loop-types.js";
+import { ToolDecisionEngine, projectToolResultForModel } from "./tool-decision-engine.js";
 
 const context: AgentContext = {
   runId: "run_tools",
@@ -367,5 +367,126 @@ describe("ToolDecisionEngine", () => {
       // ask_clarification or no_tool are also acceptable outcomes
       expect(["ask_clarification", "no_tool"]).toContain(decision.type);
     }
+  });
+});
+
+// ── Golden tests: ToolResultProjection (§P1-3) ────────────────────────
+
+describe("ToolResultProjection", () => {
+  test("script content preserved — model sees full script, not just terse summary", () => {
+    const summary: ToolCallSummary = {
+      id: "tc_script",
+      skillId: "content:video.script",
+      name: "Generate Video Script",
+      status: "completed",
+      summary: "已完成生成短视频脚本",  // terse — what the old code injected
+      content: "镜头1: 产品特写，展示24小时保温功能。镜头2: 食品级材质特写...",
+      structured: {
+        script: "镜头1: 产品特写，展示24小时保温功能。镜头2: 食品级材质特写...",
+        duration: "30s",
+        scenes: 5,
+      },
+      metadata: {
+        projectionHints: { outputIsFinal: true },
+      },
+    };
+
+    const projection = projectToolResultForModel(summary);
+
+    // Model observation MUST contain the actual script content, not just the terse summary
+    expect(projection.modelObservation).toContain("镜头1: 产品特写");
+    expect(projection.modelObservation).toContain("24小时保温");
+    expect(projection.modelObservation).toContain("食品级材质");
+    // Should NOT be just the terse summary alone
+    expect(projection.modelObservation).not.toBe("已完成生成短视频脚本");
+    // Should be marked as final answer candidate
+    expect(projection.isFinalAnswer).toBe(true);
+  });
+
+  test("fallback to summary when no content or structured fields", () => {
+    const summary: ToolCallSummary = {
+      id: "tc_simple",
+      skillId: "shell.execute",
+      name: "Run Command",
+      status: "completed",
+      summary: "Command executed successfully.",
+    };
+
+    const projection = projectToolResultForModel(summary);
+
+    expect(projection.modelObservation).toBe("Command executed successfully.");
+    expect(projection.isFinalAnswer).toBe(false);
+  });
+
+  test("structured fields extracted when no content field", () => {
+    const summary: ToolCallSummary = {
+      id: "tc_search",
+      skillId: "jaderoad:product.source.search1688",
+      name: "Search 1688",
+      status: "completed",
+      summary: "找到 50 个结果。",
+      structured: {
+        totalResults: 50,
+        candidates: [{ title: "保温杯 A" }, { title: "保温杯 B" }],
+      },
+    };
+
+    const projection = projectToolResultForModel(summary);
+
+    // Should include structured data, not just terse summary
+    expect(projection.modelObservation).toContain("[totalResults: 50]");
+    expect(projection.modelObservation).toContain("[candidates: 2 items]");
+  });
+
+  test("failed tool prefixes status in model observation", () => {
+    const summary: ToolCallSummary = {
+      id: "tc_fail",
+      skillId: "shell.execute",
+      name: "Run Command",
+      status: "failed",
+      summary: "Permission denied.",
+    };
+
+    const projection = projectToolResultForModel(summary);
+
+    expect(projection.modelObservation).toContain("[FAILED]");
+    expect(projection.modelObservation).toContain("Permission denied.");
+    expect(projection.isFinalAnswer).toBe(false);
+  });
+
+  test("outputIsFinal requires completed status", () => {
+    const summary: ToolCallSummary = {
+      id: "tc_final_failed",
+      skillId: "content:video.script",
+      name: "Generate Video Script",
+      status: "failed",
+      summary: "Generation failed.",
+      metadata: {
+        projectionHints: { outputIsFinal: true },
+      },
+    };
+
+    const projection = projectToolResultForModel(summary);
+
+    // Even with outputIsFinal=true, failed tools are NOT final answers
+    expect(projection.isFinalAnswer).toBe(false);
+  });
+
+  test("long observations truncated to prevent context bloat", () => {
+    const longScript = "A".repeat(10000);
+    const summary: ToolCallSummary = {
+      id: "tc_long",
+      skillId: "content:video.script",
+      name: "Generate Video Script",
+      status: "completed",
+      summary: "Done.",
+      content: longScript,
+    };
+
+    const projection = projectToolResultForModel(summary);
+
+    // Should be truncated at 8000 chars
+    expect(projection.modelObservation.length).toBeLessThanOrEqual(8100); // 8000 + truncation message
+    expect(projection.modelObservation).toContain("[truncated");
   });
 });

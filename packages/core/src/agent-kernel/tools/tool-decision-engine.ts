@@ -109,6 +109,10 @@ export interface ToolDecisionEngineDeps {
   toolRetriever?: ToolRetriever;
   /** Optional embedding service for semantic similarity scoring. */
   embeddingService?: EmbeddingService;
+  /** §P1-2: Shared skill embedding cache — pre-warmed at startup.
+   *  When provided, passed through to ToolRetriever to avoid duplicate
+   *  embedding API calls between IntentRouter and ToolRetriever. */
+  skillEmbeddingCache?: import("./skill-embedding-cache.js").SkillEmbeddingCache;
   /** Recent tool call history for success/failure weighting. */
   recentHistory?: ToolCallHistoryEntry[];
   /** Current permission mode for safety-aware scoring. */
@@ -343,6 +347,7 @@ export class ToolDecisionEngine implements ToolDecisionEngineInterface {
             intent,
             availableSkills,
             embeddingService: this.deps.embeddingService,
+            skillEmbeddingCache: this.deps.skillEmbeddingCache,
             recentHistory: this.deps.recentHistory ?? recentHistory,
             permissionMode: this.deps.permissionMode,
           });
@@ -1002,6 +1007,13 @@ IMPORTANT: return ONLY the JSON object. No markdown code fences, no surrounding 
     content: string;
     artifacts: ArtifactRef[];
     toolCalls: ToolCallSummary[];
+    /** §P0-7: Phase timing metrics for trace observability (milliseconds). */
+    timing: {
+      toolRetrievalMs: number;
+      totalToolExecutionMs: number;
+      firstRoundFirstTokenMs: number;
+      finalRoundFirstTokenMs: number;
+    };
   }> {
     const MAX_TOOL_ITERATIONS = 5;
     const { runId, conversationId, context, intent, plan } = input;
@@ -1017,28 +1029,37 @@ IMPORTANT: return ONLY the JSON object. No markdown code fences, no surrounding 
 
     try {
       // 1. Build initial messages from AgentContext
+      // §P1-4: First tool round uses slim mode — skip memories to reduce
+      // prompt size. Full context is only needed for the final answer.
       const messages = this.buildStreamingMessages(
         context,
         plan,
         input.prioritySkills,
+        { slim: true },
       );
 
       // 2. Load full skill catalog
       const allSkills = await this.deps.listSkills();
 
-      // 3. Get candidate tools from ToolRetriever
+      // 3. Get candidate tools from ToolRetriever (§P0-3: track timing)
+      const retrievalStart = Date.now();
       const retrieval = await this.retrieveStreamingTools(
         context,
         intent,
         allSkills,
         input.permissionMode,
       );
+      const toolRetrievalMs = Date.now() - retrievalStart;
       const { tools, nameMap } = this.buildStreamingToolDefinitions(retrieval);
 
       // 4. Streaming loop: interleave text + tool calls
       let iteration = 0;
       let currentMessages = messages;
       let summarizeStatusId: string | undefined;
+      // §P0-3: Aggregate timing across tool execution rounds
+      let totalToolExecutionMs = 0;
+      let firstRoundFirstTokenMs = 0;
+      let finalRoundFirstTokenMs = 0;
 
       while (iteration < MAX_TOOL_ITERATIONS) {
         if (signal.aborted) break;
@@ -1046,6 +1067,7 @@ IMPORTANT: return ONLY the JSON object. No markdown code fences, no surrounding 
 
         // §Phase 2a: Text parts are created lazily on first delta.
         // No pre-created empty text parts — streamLlmTurn handles it.
+        // §P0-1: First-round text with tools is "progress" (thinking).
         const result = await this.streamLlmTurn(
           runId,
           conversationId,
@@ -1056,23 +1078,34 @@ IMPORTANT: return ONLY the JSON object. No markdown code fences, no surrounding 
           input.modelId,
           stream,
           undefined, // lazy creation — no pre-allocated textPartId
+          "progress",
         );
+
+        // §P0-3: Capture first-round first-token timing for trace
+        if (iteration === 1) {
+          firstRoundFirstTokenMs = result.firstTokenMs;
+        }
 
         fullContent += result.textContent;
 
         // §Phase 2a: Deterministic preface — when the model goes
         // tool-first with no narrative text, emit a short factual
         // preface so the user immediately sees what's happening.
-        if (result.toolCalls.length > 0 && result.textContent.trim().length === 0 && stream) {
+        if (
+          result.toolCalls.length > 0 &&
+          result.textContent.trim().length === 0 &&
+          stream
+        ) {
           const toolNames = result.toolCalls.map((tc) => {
             const skillId = nameMap.get(tc.function.name) ?? tc.function.name;
             const skill = allSkills.find((s) => s.id === skillId);
             return skill?.name ?? skillId;
           });
-          const prefaceText = toolNames.length === 1
-            ? `我先调用「${toolNames[0]}」检查相关信息。`
-            : `我先调用${toolNames.map((n) => `「${n}」`).join("、")}检查相关信息。`;
-          const prefacePart = stream.startTextPart();
+          const prefaceText =
+            toolNames.length === 1
+              ? `我先调用「${toolNames[0]}」检查相关信息。`
+              : `我先调用${toolNames.map((n) => `「${n}」`).join("、")}检查相关信息。`;
+          const prefacePart = stream.startTextPart("progress");
           stream.appendText(prefacePart.id, prefaceText);
           fullContent += prefaceText;
           stream.completeTextPart(prefacePart.id);
@@ -1093,6 +1126,16 @@ IMPORTANT: return ONLY the JSON object. No markdown code fences, no surrounding 
 
         // If no tool calls, LLM is done — exit loop
         if (result.toolCalls.length === 0) {
+          // §P0-3: This is the final answer round — capture first-token timing
+          if (finalRoundFirstTokenMs === 0) {
+            finalRoundFirstTokenMs = result.firstTokenMs;
+          }
+          // §P1-3: When the LLM decides NOT to call tools, this text is
+          // the final answer — promote from "progress" to "final" so
+          // frontend renders it in the product area instead of thinking.
+          if (stream && result.textPartId) {
+            stream.updateTextPartRole(result.textPartId, "final");
+          }
           break;
         }
 
@@ -1115,7 +1158,8 @@ IMPORTANT: return ONLY the JSON object. No markdown code fences, no surrounding 
         }
         if (duplicateBlocked) break;
 
-        // Execute tool calls
+        // Execute tool calls (§P0-3: track execution timing)
+        const toolExecStart = Date.now();
         const toolResults = await this.executeToolCalls(
           runId,
           conversationId,
@@ -1129,6 +1173,9 @@ IMPORTANT: return ONLY the JSON object. No markdown code fences, no surrounding 
           input.permissionMode,
         );
 
+        // §P0-3: Track cumulative tool execution time
+        totalToolExecutionMs += Date.now() - toolExecStart;
+
         allArtifacts.push(...toolResults.artifacts);
 
         // §5.6: Stop the tool loop immediately on deterministic errors.
@@ -1138,7 +1185,7 @@ IMPORTANT: return ONLY the JSON object. No markdown code fences, no surrounding 
         if (toolResults.stop) {
           if (stream) {
             // Emit a clarifying error text part so the user sees an explanation
-            const errorText = stream.startTextPart();
+            const errorText = stream.startTextPart("final");
             stream.appendText(errorText.id, toolResults.stop.message);
             stream.completeTextPart(errorText.id);
           }
@@ -1162,6 +1209,31 @@ IMPORTANT: return ONLY the JSON object. No markdown code fences, no surrounding 
         }
         allToolCallSummaries.push(...toolResults.summaries);
 
+        // §P1-4: Direct final — when a completed tool is projected as final
+        // answer, emit its modelObservation directly and skip the second LLM.
+        const completedTools = toolResults.summaries.filter(
+          (s) => s.status === "completed",
+        );
+        const finalProjections = completedTools
+          .map((s) => projectToolResultForModel(s))
+          .filter((p) => p.isFinalAnswer);
+
+        if (finalProjections.length > 0 && stream) {
+          for (const projection of finalProjections) {
+            const finalPart = stream.startTextPart("final");
+            stream.appendText(finalPart.id, projection.modelObservation);
+            stream.completeTextPart(finalPart.id);
+            fullContent += projection.modelObservation;
+          }
+          if (summarizeStatusId) {
+            stream.updateStatus(summarizeStatusId, {
+              status: "completed",
+              label: "已完成",
+            });
+          }
+          break;
+        }
+
         // Inject tool results into messages for next iteration
         currentMessages = this.injectStreamingToolResults(
           currentMessages,
@@ -1184,6 +1256,7 @@ IMPORTANT: return ONLY the JSON object. No markdown code fences, no surrounding 
           (s) => s.status !== "completed",
         );
         if (allFailed && iteration >= 2) {
+          // §P0-1: Final explanation after tool failures is "final" answer.
           const finalResult = await this.streamLlmTurn(
             runId,
             conversationId,
@@ -1193,7 +1266,11 @@ IMPORTANT: return ONLY the JSON object. No markdown code fences, no surrounding 
             signal,
             input.modelId,
             stream,
+            undefined, // lazy text part
+            "final",
           );
+          // §P0-3: Capture final-round first-token timing
+          finalRoundFirstTokenMs = finalResult.firstTokenMs;
           fullContent += finalResult.textContent;
           if (stream && finalResult.textPartId) {
             stream.completeTextPart(finalResult.textPartId);
@@ -1204,11 +1281,14 @@ IMPORTANT: return ONLY the JSON object. No markdown code fences, no surrounding 
 
       // ── Deterministic fallback: if tools ran but LLM produced no text content ──
       if (allArtifacts.length > 0 && stream && !stream.hasTextContent()) {
-        const toolNames = [...new Set(allArtifacts.map(a => a.name).filter(Boolean))];
-        const fallbackText = toolNames.length > 0
-          ? `已完成${toolNames.join("、")}的搜索，正在整理结果。你可以让我筛选、排序或展示更多详情。`
-          : "工具执行已完成，正在整理结果。";
-        const fallbackPart = stream.startTextPart();
+        const toolNames = [
+          ...new Set(allArtifacts.map((a) => a.name).filter(Boolean)),
+        ];
+        const fallbackText =
+          toolNames.length > 0
+            ? `已完成${toolNames.join("、")}的搜索，正在整理结果。你可以让我筛选、排序或展示更多详情。`
+            : "工具执行已完成，正在整理结果。";
+        const fallbackPart = stream.startTextPart("final");
         stream.appendText(fallbackPart.id, fallbackText);
         fullContent += fallbackText;
         stream.completeTextPart(fallbackPart.id);
@@ -1224,6 +1304,22 @@ IMPORTANT: return ONLY the JSON object. No markdown code fences, no surrounding 
 
       // 6. Build rich cards from artifacts
       const richCards = this.buildStreamingRichCards(allArtifacts);
+
+      // §P0-3: Log phase timing for trace observability
+      // (Timing data is included in span metrics via agent-loop-engine)
+      if (
+        typeof process !== "undefined" &&
+        process.env?.SUNPILOT_DEBUG_TIMING === "1"
+      ) {
+        console.debug("[ToolDecisionEngine] streaming timing:", {
+          runId,
+          toolRetrievalMs,
+          totalToolExecutionMs,
+          firstRoundFirstTokenMs,
+          finalRoundFirstTokenMs,
+          toolIterations: iteration,
+        });
+      }
 
       // 7. Save/complete — stream handles it when present, else direct
       if (stream) {
@@ -1253,6 +1349,12 @@ IMPORTANT: return ONLY the JSON object. No markdown code fences, no surrounding 
         content: fullContent,
         artifacts: allArtifacts,
         toolCalls: allToolCallSummaries,
+        timing: {
+          toolRetrievalMs,
+          totalToolExecutionMs,
+          firstRoundFirstTokenMs,
+          finalRoundFirstTokenMs,
+        },
       };
     } catch (error) {
       // Re-throw AbortError so caller can handle cancellation
@@ -1294,6 +1396,15 @@ IMPORTANT: return ONLY the JSON object. No markdown code fences, no surrounding 
    * Build the messages array from AgentContext for the LLM call.
    * Includes system prompt with tool hints from plan and priority skills.
    */
+  /**
+   * Build the message list for the LLM call.
+   *
+   * §P1-4: Accepts a `slim` flag for first-round tool calls. In slim mode,
+   * memories and artifact context are omitted to reduce prompt size and
+   * speed up tool selection. The full context (memories, artifacts) is
+   * only included in the final answer round when the model needs all
+   * available information.
+   */
   private buildStreamingMessages(
     context: AgentContext,
     plan?: AgentPlan,
@@ -1302,8 +1413,10 @@ IMPORTANT: return ONLY the JSON object. No markdown code fences, no surrounding 
       reason: string;
       argumentsHint?: Record<string, unknown>;
     }>,
+    opts?: { slim?: boolean },
   ): ChatMessage[] {
     const messages: ChatMessage[] = [];
+    const slim = opts?.slim ?? false;
 
     // System prompt
     const systemParts: string[] = [
@@ -1315,6 +1428,11 @@ Do not reveal hidden chain-of-thought. Keep progress concise and factual.
 Use the same language as the user.`,
       "When you need to use a tool, call it directly. When you have results, summarize them for the user.",
       "If you don't need any tools, just respond naturally.",
+      // §P1-3: Script/content preservation — when a tool result contains
+      // generated content (script, markdown, text, etc.), you MUST preserve
+      // it verbatim. You may add a brief introduction or formatting but MUST
+      // NOT rewrite, rephrase, or regenerate the tool's output content.
+      "CRITICAL: When a tool result contains final generated content (scripts, documents, search results, etc.), keep the content exactly as provided by the tool. You may add a short introduction, but do NOT rewrite, rephrase, or replace the tool's output with your own version.",
       MARKDOWN_RESPONSE_POLICY,
     ];
 
@@ -1355,8 +1473,9 @@ Use the same language as the user.`,
 
     messages.push({ role: "system", content: systemParts.join("\n") });
 
-    // Memories
-    if (context.memories.length > 0) {
+    // §P1-4: Memories — skip in slim (first tool round) mode.
+    // Full memories are only needed for the final answer phase.
+    if (!slim && context.memories.length > 0) {
       const memoryLines = context.memories.map(
         (m) =>
           `[${m.type}] ${m.title}: ${m.content} (confidence: ${m.confidence})`,
@@ -1367,7 +1486,7 @@ Use the same language as the user.`,
       });
     }
 
-    // Conversation history
+    // Conversation history (always included — contains essential context)
     for (const msg of context.messages) {
       messages.push({
         role: msg.role as ChatMessage["role"],
@@ -1376,16 +1495,21 @@ Use the same language as the user.`,
     }
 
     // Current user message — include attachment URLs so the LLM can reference them
-    const { content: userContent, attachments: userAttachments } = context.currentMessage;
-    const attachmentLines = userAttachments && userAttachments.length > 0
-      ? "\n\n[Attachments provided by user]:\n" +
-        userAttachments.map((a) => {
-          const ref = a.url ?? a.dataUrl
-            ? `: ${a.url || "(base64 dataUrl available)"}`
-            : "(no URL — image not yet uploaded)";
-          return `- ${a.name} (${a.type})${ref}`;
-        }).join("\n")
-      : "";
+    const { content: userContent, attachments: userAttachments } =
+      context.currentMessage;
+    const attachmentLines =
+      userAttachments && userAttachments.length > 0
+        ? "\n\n[Attachments provided by user]:\n" +
+          userAttachments
+            .map((a) => {
+              const ref =
+                (a.url ?? a.dataUrl)
+                  ? `: ${a.url || "(base64 dataUrl available)"}`
+                  : "(no URL — image not yet uploaded)";
+              return `- ${a.name} (${a.type})${ref}`;
+            })
+            .join("\n")
+        : "";
     messages.push({
       role: "user",
       content: userContent + attachmentLines,
@@ -1409,6 +1533,8 @@ Use the same language as the user.`,
         query: context.currentMessage.content,
         intent,
         availableSkills: allSkills,
+        embeddingService: this.deps.embeddingService,
+        skillEmbeddingCache: this.deps.skillEmbeddingCache,
         permissionMode: permissionMode ?? "auto",
       });
 
@@ -1429,10 +1555,10 @@ Use the same language as the user.`,
     const nonCategoryMatched = enabledSkills.filter(
       (s) => s.category.toLowerCase() !== intent.type.toLowerCase(),
     );
-    const fallbackSkills = [
-      ...categoryMatched,
-      ...nonCategoryMatched,
-    ].slice(0, maxFallbackSkills);
+    const fallbackSkills = [...categoryMatched, ...nonCategoryMatched].slice(
+      0,
+      maxFallbackSkills,
+    );
     return {
       tools: fallbackSkills.map((skill) => ({
         skill,
@@ -1498,17 +1624,25 @@ Use the same language as the user.`,
     modelId?: "dp" | "seed",
     stream?: IAssistantMessageStream,
     textPartId?: string,
+    /** §P0-1: Semantic role for the text part created by this turn.
+     *  "progress" = pre-tool thinking, "final" = post-tool answer. */
+    textPartRole?: "progress" | "final",
   ): Promise<{
     textContent: string;
     toolCalls: ToolCall[];
     /** The text part ID that was used (lazily created on first delta). */
     textPartId?: string;
+    /** §P0-3: Milliseconds to first text token from stream start. */
+    firstTokenMs: number;
   }> {
     let textContent = "";
     const toolCallAccumulator = new Map<number, ToolCallAccumulator>();
     // Lazily-created text part ID — created on first text delta to avoid
     // empty text parts when the model goes tool-first with no narrative.
     let lazyTextPartId = textPartId;
+    // §P0-3: First-token timing for observability
+    let firstTokenMs = 0;
+    const streamStartTime = Date.now();
 
     const modelCallId = `model_${crypto.randomUUID()}`;
 
@@ -1538,10 +1672,16 @@ Use the same language as the user.`,
       )) {
         // Emit text delta to frontend
         if (chunk.delta.length > 0) {
+          // §P0-3: Capture first-token latency on first text delta
+          if (firstTokenMs === 0) {
+            firstTokenMs = Date.now() - streamStartTime;
+          }
+
           // §Phase 2a: Lazy text part creation — only create when the
           // model actually produces text, avoiding empty text parts.
+          // §P0-1: Pass textPartRole so frontend can classify stably.
           if (stream && !lazyTextPartId) {
-            const textPart = stream.startTextPart();
+            const textPart = stream.startTextPart(textPartRole);
             lazyTextPartId = textPart.id;
           }
 
@@ -1562,6 +1702,10 @@ Use the same language as the user.`,
 
         // Accumulate tool call deltas
         if (chunk.toolCalls) {
+          // §P0-3: Treat first tool-call delta as first model output.
+          if (firstTokenMs === 0) {
+            firstTokenMs = Date.now() - streamStartTime;
+          }
           for (const tcDelta of chunk.toolCalls) {
             let acc = toolCallAccumulator.get(tcDelta.index);
             if (!acc) {
@@ -1623,7 +1767,7 @@ Use the same language as the user.`,
       }
     }
 
-    return { textContent, toolCalls, textPartId: lazyTextPartId };
+    return { textContent, toolCalls, textPartId: lazyTextPartId, firstTokenMs };
   }
 
   /**
@@ -1730,9 +1874,10 @@ Use the same language as the user.`,
           toolCallId: tc.id,
           skillId: skill.id,
           name: skill.name,
-          inputPreview: Object.keys(parsedArgs).length > 0
-            ? summarizeForPreview(parsedArgs)
-            : undefined,
+          inputPreview:
+            Object.keys(parsedArgs).length > 0
+              ? summarizeForPreview(parsedArgs)
+              : undefined,
         });
         // Now that execution is starting, update status to running
         stream.updateToolUse(tc.id, { status: "running" });
@@ -1766,7 +1911,10 @@ Use the same language as the user.`,
           // (e.g. imageUrl OR imageDataUrl) has no universally-required fields
           // but ALL branches are unsatisfied. In that case, the tool must NOT
           // be called — emit an error part instead.
-          const anyOfUnsatisfied = checkAnyOfUnsatisfied(finalArgs, skill.inputSchema);
+          const anyOfUnsatisfied = checkAnyOfUnsatisfied(
+            finalArgs,
+            skill.inputSchema,
+          );
           const hasMissingArgs = built.missing.length > 0 || anyOfUnsatisfied;
 
           if (hasMissingArgs) {
@@ -1943,12 +2091,20 @@ Use the same language as the user.`,
         // §P1-4: Bridge tool progress to stream status part metadata
         const onProgress =
           stream && statusPartId
-            ? (progress: { phase: string; message: string; percent?: number }) => {
+            ? (progress: {
+                phase: string;
+                message: string;
+                percent?: number;
+              }) => {
                 stream!.updateStatus(statusPartId!, {
                   label: progress.message,
                   metadata: {
                     skillId: skill.id,
-                    phase: progress.phase as "queued" | "running" | "polling" | "completed",
+                    phase: progress.phase as
+                      | "queued"
+                      | "running"
+                      | "polling"
+                      | "completed",
                     progress: progress.percent,
                   },
                 });
@@ -2002,9 +2158,7 @@ Use the same language as the user.`,
             const ok = summary.status === "completed";
             stream.updateStatus(statusPartId, {
               status: ok ? "completed" : "failed",
-              label: ok
-                ? `完成: ${skill.name}`
-                : `失败: ${skill.name}`,
+              label: ok ? `完成: ${skill.name}` : `失败: ${skill.name}`,
             });
             // §P1-3: Update tool_use part status
             stream.updateToolUse(summary.id, {
@@ -2094,13 +2248,13 @@ Use the same language as the user.`,
     });
 
     // Add tool result messages
+    // §P0-2 + §P1-3: Use dedicated ToolResultProjection to build the richest
+    // available model observation from the full tool output.
     for (const summary of results.summaries) {
+      const projection = projectToolResultForModel(summary);
       updated.push({
         role: "tool",
-        content:
-          summary.status === "completed"
-            ? summary.summary
-            : `[${summary.status.toUpperCase()}] ${summary.summary}`,
+        content: projection.modelObservation,
         tool_call_id: summary.id,
       } satisfies ChatMessage);
     }
@@ -2120,7 +2274,9 @@ Use the same language as the user.`,
       artifacts.map((a) => ({
         type: a.type,
         name: a.name,
-        url: (a as unknown as Record<string, unknown>).url as string | undefined,
+        url: (a as unknown as Record<string, unknown>).url as
+          | string
+          | undefined,
       })),
     );
     return builder.build();
@@ -2131,6 +2287,108 @@ Use the same language as the user.`,
 function capabilityNameFromToolId(toolId: string): string | undefined {
   const separator = toolId.indexOf(":");
   return separator >= 0 ? toolId.slice(separator + 1) : undefined;
+}
+
+/**
+ * §P1-3: ToolResultProjection — projects a ToolCallSummary into three facets:
+ *  - displaySummary: what the user sees in the thinking section (terse)
+ *  - modelObservation: what the next LLM round receives (full content)
+ *  - isFinalAnswer: whether this result can serve as the final answer directly
+ *
+ * Priority for modelObservation:
+ *  1. Explicit modelObservation (pre-computed by executor)
+ *  2. Full content field (actual tool output text)
+ *  3. Structured output fields (script, markdown, content, etc.)
+ *  4. Summary as fallback
+ */
+export function projectToolResultForModel(summary: ToolCallSummary): {
+  displaySummary: string;
+  modelObservation: string;
+  isFinalAnswer: boolean;
+} {
+  const statusPrefix =
+    summary.status === "completed" ? "" : `[${summary.status.toUpperCase()}] `;
+  const displaySummary = summary.summary;
+
+  // Check if this result can be the final answer
+  const hints = summary.metadata?.projectionHints as
+    | { outputIsFinal?: boolean }
+    | undefined;
+  const isFinalAnswer =
+    hints?.outputIsFinal === true && summary.status === "completed";
+
+  // Build the richest model observation available
+  let modelObservation: string;
+  if (summary.modelObservation) {
+    modelObservation = statusPrefix + summary.modelObservation;
+  } else if (summary.content) {
+    modelObservation = statusPrefix + summary.content;
+  } else if (summary.structured && Object.keys(summary.structured).length > 0) {
+    const outputFields = extractOutputFields(summary.structured);
+    modelObservation = statusPrefix + outputFields;
+  } else {
+    modelObservation = statusPrefix + summary.summary;
+  }
+
+  // Truncate very long observations to prevent context bloat
+  const MAX_OBSERVATION_CHARS = 8000;
+  if (modelObservation.length > MAX_OBSERVATION_CHARS) {
+    modelObservation =
+      modelObservation.slice(0, MAX_OBSERVATION_CHARS) +
+      `…[truncated ${modelObservation.length - MAX_OBSERVATION_CHARS} chars]`;
+  }
+
+  return { displaySummary, modelObservation, isFinalAnswer };
+}
+
+/**
+ * §P0-2: Extract content-bearing fields from structured tool output
+ * for use as model observation. Prevents the model from seeing only a
+ * terse summary like "已完成生成短视频脚本" when the actual script is in
+ * structured.script or structured.content.
+ */
+function extractOutputFields(structured: Record<string, unknown>): string {
+  // Priority order for output content fields
+  const outputKeys = [
+    "script",
+    "markdown",
+    "content",
+    "finalText",
+    "text",
+    "body",
+    "html",
+    "message",
+    "output",
+    "result",
+    "response",
+  ];
+  const parts: string[] = [];
+
+  for (const key of outputKeys) {
+    const val = structured[key];
+    if (typeof val === "string" && val.length > 0) {
+      parts.push(`[${key}]\n${val}`);
+    }
+  }
+
+  // Also include candidates/results arrays as structured data
+  if (
+    Array.isArray(structured.candidates) &&
+    structured.candidates.length > 0
+  ) {
+    parts.push(`[candidates: ${structured.candidates.length} items]`);
+  }
+  if (Array.isArray(structured.results) && structured.results.length > 0) {
+    parts.push(`[results: ${structured.results.length} items]`);
+  }
+  if (typeof structured.totalResults === "number") {
+    parts.push(`[totalResults: ${structured.totalResults}]`);
+  }
+  if (typeof structured.summary === "string" && parts.length === 0) {
+    parts.push(structured.summary);
+  }
+
+  return parts.length > 0 ? parts.join("\n\n") : JSON.stringify(structured);
 }
 
 function toProviderToolName(skillId: string, usedNames: Set<string>): string {
@@ -2168,17 +2426,23 @@ function buildToolArgumentsHeuristic(
   const urls = extractUrls(message);
 
   // Find best image attachment: prefer URL, then dataUrl
-  const imageAttachment = attachments.find(
-    (attachment) =>
-      Boolean(attachment.url) &&
-      (attachment.type.startsWith("image/") ||
-        /\.(png|jpe?g|webp|gif|bmp|avif)(\?|#|$)/i.test(attachment.url ?? "")),
-  ) ?? attachments.find(
-    (attachment) =>
-      Boolean(attachment.dataUrl) &&
-      (attachment.type.startsWith("image/") ||
-        /\.(png|jpe?g|webp|gif|bmp|avif)(\?|#|$)/i.test(attachment.name ?? "")),
-  );
+  const imageAttachment =
+    attachments.find(
+      (attachment) =>
+        Boolean(attachment.url) &&
+        (attachment.type.startsWith("image/") ||
+          /\.(png|jpe?g|webp|gif|bmp|avif)(\?|#|$)/i.test(
+            attachment.url ?? "",
+          )),
+    ) ??
+    attachments.find(
+      (attachment) =>
+        Boolean(attachment.dataUrl) &&
+        (attachment.type.startsWith("image/") ||
+          /\.(png|jpe?g|webp|gif|bmp|avif)(\?|#|$)/i.test(
+            attachment.name ?? "",
+          )),
+    );
 
   const imageUrl =
     imageAttachment?.url ??
@@ -2264,14 +2528,19 @@ function fillImageArguments(
  * LLMs may produce snake_case or camelCase variants. This normalizes known
  * aliases so downstream validation sees a consistent shape.
  */
-function canonicalizeArgs(args: Record<string, unknown>): Record<string, unknown> {
+function canonicalizeArgs(
+  args: Record<string, unknown>,
+): Record<string, unknown> {
   const normalized = { ...args };
 
   // image_url → imageUrl (only if canonical field is absent)
   if (normalized.image_url !== undefined && normalized.imageUrl === undefined) {
     normalized.imageUrl = normalized.image_url;
   }
-  if (normalized.image_data_url !== undefined && normalized.imageDataUrl === undefined) {
+  if (
+    normalized.image_data_url !== undefined &&
+    normalized.imageDataUrl === undefined
+  ) {
     normalized.imageDataUrl = normalized.image_data_url;
   }
   // Keep aliases too — schema validation may reference either
@@ -2415,8 +2684,12 @@ function normalizeSchemaForLLM(
 
     // Append a disjunction hint to the description so the LLM knows at
     // least one of the disjunctive fields should be provided.
-    const branches = (Array.isArray(anyOf) ? anyOf : []) as Array<Record<string, unknown>>;
-    const altBranches = (Array.isArray(oneOf) ? oneOf : []) as Array<Record<string, unknown>>;
+    const branches = (Array.isArray(anyOf) ? anyOf : []) as Array<
+      Record<string, unknown>
+    >;
+    const altBranches = (Array.isArray(oneOf) ? oneOf : []) as Array<
+      Record<string, unknown>
+    >;
     const allBranches = [...branches, ...altBranches];
     const branchFields = allBranches
       .map((b) => (Array.isArray(b.required) ? b.required.join(" + ") : ""))
@@ -2424,7 +2697,9 @@ function normalizeSchemaForLLM(
     if (branchFields.length > 0) {
       const hint = ` [至少提供其一: ${branchFields.join(" 或 ")}]`;
       normalized.description =
-        (typeof normalized.description === "string" ? normalized.description : "") + hint;
+        (typeof normalized.description === "string"
+          ? normalized.description
+          : "") + hint;
     }
   }
 

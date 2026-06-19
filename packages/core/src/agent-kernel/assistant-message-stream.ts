@@ -27,7 +27,11 @@ export class AssistantMessageStream implements IAssistantMessageStream {
   private readonly parts: AssistantMessagePart[] = [];
   private started = false;
   private completed = false;
-  private richCards: Array<{ type: string; title?: string; data: Record<string, unknown> }> = [];
+  private richCards: Array<{
+    type: string;
+    title?: string;
+    data: Record<string, unknown>;
+  }> = [];
   private deltaIndexByPartId = new Map<string, number>();
 
   constructor(
@@ -90,8 +94,10 @@ export class AssistantMessageStream implements IAssistantMessageStream {
 
   // ── Text parts ─────────────────────────────────────────────────────
 
-  /** Start a new text part. Returns the created part. */
-  startTextPart(): AssistantTextPart {
+  /** Start a new text part. Returns the created part.
+   *  @param semanticRole "progress" for pre-tool thinking text,
+   *                      "final" for post-tool final answer (§P0-1). */
+  startTextPart(semanticRole?: "progress" | "final"): AssistantTextPart {
     this.ensureStarted();
     const part: AssistantTextPart = {
       id: `part_text_${crypto.randomUUID()}`,
@@ -99,6 +105,7 @@ export class AssistantMessageStream implements IAssistantMessageStream {
       content: "",
       source: "model",
       status: "streaming",
+      semanticRole,
       createdAt: new Date().toISOString(),
     };
     this.parts.push(part);
@@ -115,6 +122,7 @@ export class AssistantMessageStream implements IAssistantMessageStream {
           content: "",
           status: "streaming",
           source: "model",
+          semanticRole: part.semanticRole,
           createdAt: part.createdAt,
         },
       },
@@ -152,7 +160,6 @@ export class AssistantMessageStream implements IAssistantMessageStream {
         conversationId: this.params.conversationId,
       },
     );
-
   }
 
   /** Mark a text part as completed. */
@@ -173,6 +180,33 @@ export class AssistantMessageStream implements IAssistantMessageStream {
         patch: {
           status: "completed",
           completedAt: part.completedAt,
+        },
+      },
+      {
+        runId: this.params.runId,
+        conversationId: this.params.conversationId,
+      },
+    );
+  }
+
+  /** §P0-1/P1-3: Update a text part's semanticRole after creation.
+   *  Used when the LLM round was initially "progress" but the model
+   *  decided not to call tools (making it the final answer). */
+  updateTextPartRole(partId: string, semanticRole: "progress" | "final"): void {
+    const part = this.findPart<AssistantTextPart>(partId, "text");
+    if (!part) return;
+
+    part.semanticRole = semanticRole;
+
+    this.params.eventBus.emit(
+      "agent.message.part.updated",
+      {
+        runId: this.params.runId,
+        conversationId: this.params.conversationId,
+        messageId: this.params.messageId,
+        partId,
+        patch: {
+          semanticRole: part.semanticRole,
         },
       },
       {
@@ -406,7 +440,7 @@ export class AssistantMessageStream implements IAssistantMessageStream {
    * Does NOT complete the stream.
    */
   getPartsSnapshot(): AssistantMessagePart[] {
-    return this.parts.map((p) => ({ ...p } as AssistantMessagePart));
+    return this.parts.map((p) => ({ ...p }) as AssistantMessagePart);
   }
 
   /**
@@ -414,7 +448,13 @@ export class AssistantMessageStream implements IAssistantMessageStream {
    * These are persisted in message metadata and emitted in
    * agent.message.completed so the frontend can show artifact cards.
    */
-  setRichCards(cards: Array<{ type: string; title?: string; data: Record<string, unknown> }>): void {
+  setRichCards(
+    cards: Array<{
+      type: string;
+      title?: string;
+      data: Record<string, unknown>;
+    }>,
+  ): void {
     this.richCards = cards;
   }
 
@@ -482,6 +522,7 @@ export class AssistantMessageStream implements IAssistantMessageStream {
     }
     this.completed = true;
     this.ensureStarted();
+    this.completeOpenParts();
 
     const content = this.mergeContent();
     const toolCallIds = this.collectIds("tool_use", "toolCallId");
@@ -518,7 +559,9 @@ export class AssistantMessageStream implements IAssistantMessageStream {
         conversationId: this.params.conversationId,
         messageId: this.params.messageId,
         content,
-        parts: this.parts.map((p) => ({ ...p } as unknown as Record<string, unknown>)),
+        parts: this.parts.map(
+          (p) => ({ ...p }) as unknown as Record<string, unknown>,
+        ),
         cards: this.richCards.length > 0 ? this.richCards : undefined,
       },
       {
@@ -527,7 +570,11 @@ export class AssistantMessageStream implements IAssistantMessageStream {
       },
     );
 
-    return { messageId: this.params.messageId, content, parts: [...this.parts] };
+    return {
+      messageId: this.params.messageId,
+      content,
+      parts: [...this.parts],
+    };
   }
 
   // ── Private helpers ────────────────────────────────────────────────
@@ -542,22 +589,65 @@ export class AssistantMessageStream implements IAssistantMessageStream {
     partId: string,
     type: AssistantMessagePart["type"],
   ): T | undefined {
-    return this.parts.find(
-      (p) => p.id === partId && p.type === type,
-    ) as T | undefined;
+    return this.parts.find((p) => p.id === partId && p.type === type) as
+      | T
+      | undefined;
   }
 
   /** Check if any text part has non-empty content */
   hasTextContent(): boolean {
-    return this.parts.some((p) => p.type === "text" && (p as AssistantTextPart).content.length > 0);
+    return this.parts.some(
+      (p) => p.type === "text" && (p as AssistantTextPart).content.length > 0,
+    );
   }
 
-  /** Merge all text parts into a single content string. */
+  /**
+   * Final completion is authoritative. Any transient UI part left open by a
+   * timeout/status branch must be closed before the message is persisted.
+   */
+  private completeOpenParts(): void {
+    const completedAt = new Date().toISOString();
+    for (const part of this.parts) {
+      if (part.type === "status" && part.status === "running") {
+        part.status = "completed";
+        part.completedAt = part.completedAt ?? completedAt;
+        part.metadata = {
+          ...part.metadata,
+          phase: "completed",
+        };
+      } else if (
+        part.type === "tool_use" &&
+        (part.status === "pending" || part.status === "running")
+      ) {
+        part.status = "completed";
+      } else if (part.type === "text" && part.status === "streaming") {
+        part.status = "completed";
+        part.completedAt = part.completedAt ?? completedAt;
+      }
+    }
+  }
+
+  /** Merge text parts into a single content string.
+   *  §P0-1: When any text part has semanticRole, only "final" text parts
+   *  contribute to the merged content. Falls back to all text parts for
+   *  backward compatibility with legacy messages. */
   private mergeContent(): string {
-    return this.parts
-      .filter((p): p is AssistantTextPart => p.type === "text")
-      .map((p) => p.content)
-      .join("\n");
+    const textParts = this.parts.filter(
+      (p): p is AssistantTextPart => p.type === "text",
+    );
+    if (textParts.length === 0) return "";
+
+    // When semanticRole is present, only include "final" text
+    const hasSemanticRoles = textParts.some((p) => p.semanticRole);
+    if (hasSemanticRoles) {
+      return textParts
+        .filter((p) => p.semanticRole === "final")
+        .map((p) => p.content)
+        .join("\n");
+    }
+
+    // Legacy fallback: merge all text parts
+    return textParts.map((p) => p.content).join("\n");
   }
 
   /** Collect unique IDs from parts of a given type. */

@@ -34,6 +34,11 @@ export interface AssistantTextPart {
   content: string;
   source: "model";
   status: "streaming" | "completed";
+  /** Stable semantic role for frontend rendering (§P0-1).
+   *  - "progress": pre-tool text (thinking/reasoning) — shown in thinking section
+   *  - "final": post-tool final answer — shown in main product area
+   *  When absent, the frontend falls back to the legacy last-text-part rule. */
+  semanticRole?: "progress" | "final";
   createdAt: string;
   completedAt?: string;
 }

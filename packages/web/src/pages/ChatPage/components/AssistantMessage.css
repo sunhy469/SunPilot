@@ -17,27 +17,38 @@
 /* ── AI status indicator ─────────────────────────────────── */
 
 .assistant-status {
-  padding: 4px 0 8px;
+  border-radius: 8px;
+  padding: 6px 12px;
+  background: rgba(37, 99, 235, 0.04);
+  transition: all 0.2s ease;
 }
 
 .assistant-status__icon {
-  font-size: 14px;
+  font-size: 13px;
   color: var(--sp-blue);
-  animation: pulse 1.5s ease-in-out infinite;
+  transition: color 0.2s ease;
+}
+
+.assistant-loading-icon {
+  transform-origin: center;
+  animation: sunpilot-loading-spin 0.9s linear infinite;
 }
 
 .assistant-status__text {
   font-size: 13px;
-  color: var(--sp-muted);
+  color: var(--sp-ink, #1e293b);
+  opacity: 0.7;
 }
 
-@keyframes pulse {
-  0%,
-  100% {
-    opacity: 1;
-  }
-  50% {
-    opacity: 0.5;
+.assistant-status--inline {
+  margin-top: 8px;
+  background: transparent;
+  padding: 2px 0;
+}
+
+@keyframes sunpilot-loading-spin {
+  to {
+    transform: rotate(360deg);
   }
 }
 
@@ -45,6 +56,8 @@
   font-size: 15px;
   line-height: 1.75;
   color: var(--sp-ink);
+  word-break: break-word;
+  overflow-wrap: break-word;
 }
 
 /* ── Markdown content ──────────────────────────────────────── */
@@ -62,6 +75,9 @@
   margin-top: 12px;
   padding-top: 10px;
   border-top: 1px solid var(--sp-border-soft);
+  border-radius: 8px;
+  padding: 8px 12px;
+  background: rgba(0, 0, 0, 0.015);
 }
 
 .assistant-activity {
@@ -70,6 +86,8 @@
   gap: 8px;
   align-items: start;
   color: var(--sp-muted);
+  padding: 2px 0;
+  border-radius: 4px;
 }
 
 .assistant-activity__icon {
@@ -81,10 +99,11 @@
   margin-top: 2px;
   font-size: 12px;
   color: var(--sp-blue);
+  transition: color 0.15s ease;
 }
 
 .assistant-activity--running .assistant-activity__icon {
-  animation: pulse 1.5s ease-in-out infinite;
+  animation: sunpilot-loading-spin 0.9s linear infinite;
 }
 
 .assistant-activity--completed .assistant-activity__icon {
@@ -118,9 +137,10 @@
 /* ── Action row (copy / like / dislike / time) ────────────── */
 
 .assistant-actions {
-  margin-top: 12px;
-  padding-top: 8px;
+  margin-top: 8px;
+  padding: 8px 4px;
   border-top: 1px solid rgba(148, 163, 184, 0.18);
+  border-radius: 6px;
 }
 
 .assistant-actions .ant-btn-text {
@@ -151,7 +171,7 @@
   }
 }
 
-/* ── Content-block parts (§Phase 4) ────────────────────────── */
+/* ── Content-block parts ────────────────────────────────────── */
 
 .assistant-parts {
   display: flex;
@@ -165,9 +185,11 @@
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 3px 0;
+  padding: 4px 8px;
   font-size: 13px;
   line-height: 1.5;
+  border-radius: 6px;
+  transition: background 0.15s ease;
 }
 
 .assistant-status-block__icon {
@@ -175,13 +197,26 @@
   flex-shrink: 0;
 }
 
+.assistant-status-block--running {
+  background: rgba(37, 99, 235, 0.04);
+}
+
 .assistant-status-block--running .assistant-status-block__icon {
   color: var(--sp-blue);
-  animation: pulse 1.5s ease-in-out infinite;
+  animation: sunpilot-loading-spin 0.9s linear infinite;
+  transform-origin: center;
+}
+
+.assistant-status-block--completed {
+  background: rgba(22, 163, 74, 0.04);
 }
 
 .assistant-status-block--completed .assistant-status-block__icon {
   color: #16a34a;
+}
+
+.assistant-status-block--failed {
+  background: rgba(220, 38, 38, 0.04);
 }
 
 .assistant-status-block--failed .assistant-status-block__icon {
@@ -199,37 +234,38 @@
   margin-left: auto;
 }
 
-/* Completed status collapses to a compact gray row (§Frontend gap) */
-
-.assistant-status-block--collapsed {
-  opacity: 0.6;
-  transition: opacity 0.15s ease;
+.assistant-status-block--clickable {
+  cursor: pointer;
 }
 
-.assistant-status-block--collapsed:hover {
-  opacity: 0.85;
+.assistant-status-block--default-cursor {
+  cursor: default;
 }
 
-.assistant-status-block__collapsed-label {
-  font-size: 12px;
-  color: var(--sp-muted);
-  user-select: none;
-}
-
-/* Tool use (collapsed by default) */
+/* Tool use (with status-aware styles) */
 
 .assistant-tool-use {
-  padding: 2px 0;
+  padding: 4px 8px;
+  border-radius: 6px;
+  transition: background 0.15s ease;
 }
 
 .assistant-tool-use__header {
   font-size: 13px;
   user-select: none;
+  border-radius: 4px;
+  padding: 2px 4px;
+  transition: background 0.15s ease;
+}
+
+.assistant-tool-use__header:hover {
+  background: rgba(0, 0, 0, 0.03);
 }
 
 .assistant-tool-use__icon {
-  font-size: 12px;
-  color: var(--sp-muted);
+  font-size: 13px;
+  color: var(--sp-blue);
+  transition: color 0.15s ease;
 }
 
 .assistant-tool-use__name {
@@ -262,20 +298,57 @@
   white-space: nowrap;
 }
 
+/* Tool use status variants */
+
+.assistant-tool-use--running {
+  background: rgba(37, 99, 235, 0.04);
+}
+
+.assistant-tool-use--running .assistant-tool-use__icon {
+  color: var(--sp-blue);
+  animation: sunpilot-loading-spin 0.9s linear infinite;
+  transform-origin: center;
+}
+
+.assistant-tool-use--completed {
+  background: rgba(22, 163, 74, 0.04);
+}
+
+.assistant-tool-use--completed .assistant-tool-use__icon {
+  color: #16a34a;
+}
+
+.assistant-tool-use--failed {
+  background: rgba(220, 38, 38, 0.04);
+}
+
+.assistant-tool-use--failed .assistant-tool-use__icon {
+  color: #dc2626;
+}
+
 /* Tool result (collapsed by default) */
 
 .assistant-tool-result {
-  padding: 2px 0;
+  padding: 4px 8px;
+  border-radius: 6px;
+  transition: background 0.15s ease;
 }
 
 .assistant-tool-result__header {
   font-size: 13px;
   user-select: none;
+  border-radius: 4px;
+  padding: 2px 4px;
+  transition: background 0.15s ease;
+}
+
+.assistant-tool-result__header:hover {
+  background: rgba(0, 0, 0, 0.03);
 }
 
 .assistant-tool-result__icon {
-  font-size: 12px;
-  color: #16a34a;
+  font-size: 13px;
+  color: var(--sp-blue);
   flex-shrink: 0;
 }
 
@@ -296,24 +369,108 @@
   border: 1px solid rgba(148, 163, 184, 0.18);
 }
 
-/* Error block */
+/* Error alert */
 
-.assistant-error-block {
-  display: flex;
-  align-items: flex-start;
-  gap: 6px;
-  padding: 4px 0;
-  font-size: 13px;
+.assistant-error-alert {
+  margin: 4px 0;
+  border-radius: 6px;
 }
 
-.assistant-error-block__icon {
+/* ── Stopped state Tag ──────────────────────────────────────── */
+
+.assistant-status__tag--stopped {
+  margin: 4px 0 8px;
+}
+
+.assistant-status__tag--stopped .ant-tag {
   font-size: 12px;
-  color: #dc2626;
-  flex-shrink: 0;
-  margin-top: 2px;
+  padding: 2px 8px;
+  border-radius: 4px;
 }
 
-.assistant-error-block__message {
+/* ── Thinking process section (collapsible) ─────────────────── */
+
+.thinking-section {
+  border-radius: 8px;
+  padding: 6px 8px;
+  background: rgba(0, 0, 0, 0.015);
+  border: 1px solid rgba(148, 163, 184, 0.12);
+  transition: all 0.2s ease;
+}
+
+.thinking-section--collapsed {
+  cursor: pointer;
+  background: transparent;
+  border-color: transparent;
+  padding: 2px 8px;
+  border-radius: 4px;
+}
+
+.thinking-section--collapsed:hover {
+  background: rgba(0, 0, 0, 0.02);
+}
+
+.thinking-section__arrow {
+  font-size: 10px;
+  color: var(--sp-muted);
+  transition: color 0.15s ease;
+}
+
+.thinking-section__icon {
   font-size: 13px;
-  line-height: 1.45;
+  color: #16a34a;
+}
+
+.thinking-section__summary {
+  font-size: 12px;
+  color: var(--sp-muted);
+  user-select: none;
+}
+
+.thinking-section__header {
+  cursor: pointer;
+  user-select: none;
+  border-radius: 4px;
+  padding: 2px 4px;
+  transition: background 0.15s ease;
+}
+
+.thinking-section__header:hover {
+  background: rgba(0, 0, 0, 0.03);
+}
+
+.thinking-section__title {
+  font-size: 12px;
+  color: var(--sp-muted);
+  font-weight: 500;
+}
+
+/* §Dynamic title: Active thinking icon (lightning bolt during streaming) */
+.thinking-section__active-icon {
+  font-size: 13px;
+  color: var(--sp-blue);
+}
+
+/* §Dynamic title: Compact typing dots inside thinking section header */
+.thinking-section__header .typing-dots {
+  margin-left: 2px;
+}
+
+.thinking-section__content {
+  margin-top: 4px;
+  padding-top: 4px;
+  border-top: 1px solid rgba(148, 163, 184, 0.1);
+}
+
+/* ── Thinking text block (lightweight style inside ThinkingProcessSection) ── */
+
+.thinking-text-block {
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--sp-muted);
+  opacity: 0.85;
+}
+
+.thinking-text-block .markdown-body {
+  font-size: 13px;
 }

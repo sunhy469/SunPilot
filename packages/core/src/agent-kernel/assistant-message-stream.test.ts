@@ -54,7 +54,9 @@ describe("AssistantMessageStream", () => {
       (c: unknown[]) => c[0] === "agent.message.started",
     ).length;
     stream.start();
-    const newCount = (eventBus.emit as ReturnType<typeof vi.fn>).mock.calls.filter(
+    const newCount = (
+      eventBus.emit as ReturnType<typeof vi.fn>
+    ).mock.calls.filter(
       (c: unknown[]) => c[0] === "agent.message.started",
     ).length;
     expect(newCount).toBe(count);
@@ -97,9 +99,9 @@ describe("AssistantMessageStream", () => {
   it("appendText never emits legacy agent.response.delta", () => {
     const part = stream.startTextPart();
     stream.appendText(part.id, "test");
-    const legacyCalls = (eventBus.emit as ReturnType<typeof vi.fn>).mock.calls.filter(
-      (c: unknown[]) => c[0] === "agent.response.delta",
-    );
+    const legacyCalls = (
+      eventBus.emit as ReturnType<typeof vi.fn>
+    ).mock.calls.filter((c: unknown[]) => c[0] === "agent.response.delta");
     expect(legacyCalls.length).toBe(0);
   });
 
@@ -267,6 +269,46 @@ describe("AssistantMessageStream", () => {
     expect(result.content).not.toContain("Found results");
   });
 
+  it("complete marks still-open transient parts as completed", async () => {
+    const status = stream.startStatus({
+      label: "正在整理结果...",
+    });
+    const toolUse = stream.addToolUse({
+      toolCallId: "tc-1",
+      skillId: "search",
+      name: "搜索资源",
+    });
+    const text = stream.startTextPart();
+    stream.appendText(text.id, "Done");
+
+    const result = await stream.complete();
+    const completedStatus = result.parts.find((part) => part.id === status.id);
+    const completedToolUse = result.parts.find(
+      (part) => part.id === toolUse.id,
+    );
+    const completedText = result.parts.find((part) => part.id === text.id);
+
+    expect(completedStatus).toMatchObject({
+      type: "status",
+      status: "completed",
+      metadata: expect.objectContaining({ phase: "completed" }),
+    });
+    expect(completedToolUse).toMatchObject({
+      type: "tool_use",
+      status: "completed",
+    });
+    expect(completedText).toMatchObject({ type: "text", status: "completed" });
+    expect(saveMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        metadata: expect.objectContaining({
+          parts: expect.arrayContaining([
+            expect.objectContaining({ id: status.id, status: "completed" }),
+          ]),
+        }),
+      }),
+    );
+  });
+
   it("complete saves message with parts in metadata", async () => {
     const text = stream.startTextPart();
     stream.appendText(text.id, "Response text");
@@ -345,7 +387,10 @@ describe("AssistantMessageStream", () => {
     });
 
     // 3. Tool completes
-    stream.updateStatus(status.id, { status: "completed", label: "完成: 搜索代码" });
+    stream.updateStatus(status.id, {
+      status: "completed",
+      label: "完成: 搜索代码",
+    });
     stream.updateToolUse("tc-1", { status: "completed" });
     stream.addToolResult({
       toolCallId: "tc-1",

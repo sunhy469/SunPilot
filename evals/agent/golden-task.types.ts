@@ -40,7 +40,8 @@ export type GoldenTaskCategory =
   | "safety"
   | "memory"
   | "context"
-  | "reflection";
+  | "reflection"
+  | "streaming";
 
 export interface GoldenTaskMessage {
   role: "user" | "assistant" | "tool";
