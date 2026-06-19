@@ -7,7 +7,7 @@ import {
 import type { FetchLike } from "./llm.types.js";
 
 interface EmbeddingResponse {
-  data?: Array<{ embedding?: number[] }>;
+  data?: Array<{ embedding?: number[]; index?: number }>;
   model?: string;
 }
 
@@ -113,6 +113,8 @@ export class OpenAICompatibleEmbeddingProvider implements EmbeddingProvider {
 
     const json = (await response.json()) as EmbeddingResponse;
     const data = json.data ?? [];
+    // Sort by index to ensure order matches input (OpenAI API doesn't guarantee order)
+    data.sort((a, b) => (a.index ?? 0) - (b.index ?? 0));
     return data.map((item) => item.embedding ?? []);
   }
 }

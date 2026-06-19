@@ -42,7 +42,7 @@ export interface AssistantStatusPart {
   completedAt?: string;
   metadata?: {
     skillId?: string;
-    phase?: "queued" | "running" | "polling" | "completed";
+    phase?: "queued" | "running" | "polling" | "completed" | "summarizing";
     progress?: number;
   };
 }

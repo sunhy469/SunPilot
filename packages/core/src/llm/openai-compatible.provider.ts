@@ -121,7 +121,12 @@ export class OpenAICompatibleChatProvider implements LlmProvider {
 
     for await (const data of parseOpenAIStream(response.body)) {
       if (data === "[DONE]") return;
-      const raw: unknown = JSON.parse(data);
+      let raw: unknown;
+      try {
+        raw = JSON.parse(data);
+      } catch {
+        continue; // Skip corrupted SSE events
+      }
       const chunk = raw as OpenAIChatStreamChunk;
       for (const choice of chunk.choices ?? []) {
         const textDelta = choice.delta?.content;

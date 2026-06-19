@@ -36,3 +36,9 @@ export function deleteConversation(request: Request, id: string) {
     method: "DELETE",
   });
 }
+
+export function touchConversation(request: Request, id: string) {
+  return request<Conversation>(`${endpoints.conversationById(id)}/touch`, {
+    method: "POST",
+  });
+}

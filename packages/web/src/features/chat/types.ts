@@ -108,30 +108,6 @@ export type AgentUiEvent = AgentSocketEnvelopeMetadata &
         };
       }
     | {
-        method: "agent.response.started";
-        params: { runId: string; messageId: string; conversationId?: string };
-      }
-    | {
-        method: "agent.response.delta";
-        params: {
-          runId: string;
-          conversationId: string;
-          messageId: string;
-          delta: string;
-        };
-      }
-    | {
-        method: "agent.response.completed";
-        params: {
-          runId: string;
-          conversationId: string;
-          messageId: string;
-          status?: string;
-          toolCalls?: number;
-          artifacts?: number;
-        };
-      }
-    | {
         method: "agent.clarification.requested";
         params: {
           runId: string;

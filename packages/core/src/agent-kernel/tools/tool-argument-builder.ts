@@ -123,13 +123,25 @@ export class DefaultToolArgumentBuilder implements ToolArgumentBuilder {
     const attachments = input.context.currentMessage.attachments ?? [];
 
     // Collect historical attachments from context messages
+    // Prioritize recent image attachments for multi-turn image tasks (e.g., 1688 search)
     const historicalAttachments: AttachmentRef[] = [];
+    const continuationKeywords = /继续|展示|筛选|排序|这个|刚才|那张|上面|top|详情|具体|更多/i;
+    const isContinuation = continuationKeywords.test(message);
+
     for (const msg of input.context.messages) {
       const msgAttachments = msg.metadata?.attachments as
         | AttachmentRef[]
         | undefined;
       if (msgAttachments && msgAttachments.length > 0) {
-        historicalAttachments.push(...msgAttachments);
+        // For continuation messages, only include image attachments from recent history
+        if (isContinuation) {
+          const imageAttachments = msgAttachments.filter(
+            (a) => a.type.startsWith("image/") || /\.(png|jpe?g|webp|gif|bmp|avif)(\?|#|$)/i.test(a.url ?? a.name ?? ""),
+          );
+          historicalAttachments.push(...imageAttachments);
+        } else {
+          historicalAttachments.push(...msgAttachments);
+        }
       }
     }
     const allAttachments = [...attachments, ...historicalAttachments];

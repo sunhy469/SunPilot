@@ -203,7 +203,6 @@ describe("AgentLoopEngine content-block stream — no_tool", () => {
           }
           return { messageId: "msg-from-composer", content: text };
         }),
-        composeFromObservation: vi.fn(),
         composeClarification: vi.fn(),
       },
       runStateManager: {
@@ -353,7 +352,6 @@ describe("AgentLoopEngine content-block stream — low-risk tool", () => {
       },
       responseComposer: {
         composeDirect: vi.fn(),
-        composeFromObservation: vi.fn(),
         composeClarification: vi.fn(),
       },
       runStateManager: {
@@ -451,7 +449,6 @@ describe("AgentLoopEngine — history parts recovery", () => {
           }
           return { messageId: "x", content: "Response text" };
         }),
-        composeFromObservation: vi.fn(),
         composeClarification: vi.fn(),
       },
       runStateManager: {
@@ -526,7 +523,6 @@ describe("AgentLoopEngine — approval parts continuity", () => {
       reflectionEngine: { reflect: vi.fn() },
       responseComposer: {
         composeDirect: vi.fn(),
-        composeFromObservation: vi.fn(),
         composeClarification: vi.fn(),
       },
       runStateManager: {
@@ -601,7 +597,6 @@ describe("AgentLoopEngine — approval parts continuity", () => {
       reflectionEngine: { reflect: vi.fn() },
       responseComposer: {
         composeDirect: vi.fn(),
-        composeFromObservation: vi.fn(),
         composeClarification: vi.fn(),
       },
       runStateManager: {
@@ -691,7 +686,6 @@ describe("AgentLoopEngine — streaming path (no narrative fallback)", () => {
       reflectionEngine: { reflect: vi.fn() },
       responseComposer: {
         composeDirect: vi.fn(),
-        composeFromObservation: vi.fn(),
         composeClarification: vi.fn(),
       },
       runStateManager: {
@@ -752,7 +746,6 @@ describe("AgentLoopEngine — high-risk tools in content-block loop", () => {
       reflectionEngine: { reflect: vi.fn() },
       responseComposer: {
         composeDirect: vi.fn(),
-        composeFromObservation: vi.fn(),
         composeClarification: vi.fn(),
       },
       runStateManager: {

@@ -28,6 +28,7 @@ export class AssistantMessageStream implements IAssistantMessageStream {
   private started = false;
   private completed = false;
   private richCards: Array<{ type: string; title?: string; data: Record<string, unknown> }> = [];
+  private deltaIndexByPartId = new Map<string, number>();
 
   constructor(
     private readonly params: {
@@ -133,6 +134,9 @@ export class AssistantMessageStream implements IAssistantMessageStream {
 
     part.content += delta;
 
+    const deltaIndex = (this.deltaIndexByPartId.get(partId) ?? -1) + 1;
+    this.deltaIndexByPartId.set(partId, deltaIndex);
+
     this.params.eventBus.emit(
       "agent.message.part.delta",
       {
@@ -141,6 +145,7 @@ export class AssistantMessageStream implements IAssistantMessageStream {
         messageId: this.params.messageId,
         partId,
         delta,
+        deltaIndex,
       },
       {
         runId: this.params.runId,
@@ -540,6 +545,11 @@ export class AssistantMessageStream implements IAssistantMessageStream {
     return this.parts.find(
       (p) => p.id === partId && p.type === type,
     ) as T | undefined;
+  }
+
+  /** Check if any text part has non-empty content */
+  hasTextContent(): boolean {
+    return this.parts.some((p) => p.type === "text" && (p as AssistantTextPart).content.length > 0);
   }
 
   /** Merge all text parts into a single content string. */

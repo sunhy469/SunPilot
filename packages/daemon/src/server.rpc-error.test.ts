@@ -90,20 +90,20 @@ describe("Agent WebSocket protocol helpers", () => {
         sequence: 7,
         runId: "run_1",
         conversationId: "conv_1",
-        type: "agent.response.delta",
-        payload: { delta: "hello" },
+        type: "agent.message.part.delta",
+        payload: { delta: "hello", messageId: "msg_1", partId: "part_1" },
         createdAt: "2026-06-06T00:00:00.000Z",
       }),
     ).toEqual({
       jsonrpc: "2.0",
-      method: "agent.response.delta",
+      method: "agent.message.part.delta",
       params: {
         eventId: "evt_1",
         sequence: 7,
         runId: "run_1",
         conversationId: "conv_1",
         createdAt: "2026-06-06T00:00:00.000Z",
-        payload: { delta: "hello" },
+        payload: { delta: "hello", messageId: "msg_1", partId: "part_1" },
       },
     });
   });
