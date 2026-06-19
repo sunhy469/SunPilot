@@ -92,25 +92,22 @@ function assertUsableImageAttachments(input: {
     storageKey?: string;
   }>;
 }): void {
-  const asksImageSearch =
-    /1688|货源|同款|搜图|图片|相机|商品/i.test(input.message);
-
-  if (!asksImageSearch) return;
+  const imageKeywords = /1688|货源|同款|搜图|图片|相机|商品/i;
+  if (!imageKeywords.test(input.message)) return;
 
   const imageAttachments = (input.attachments ?? []).filter(isImageAttachment);
-  if (imageAttachments.length === 0) {
-    throw Object.assign(
-      new Error("搜索 1688 货源需要上传商品图片，请先上传图片后再试。"),
-      { code: "IMAGE_ATTACHMENT_REQUIRED", category: "input_validation", retryable: false },
-    );
-  }
 
-  const usable = imageAttachments.some(
-    (a) => Boolean(a.url || a.dataUrl || a.storageKey),
+  // If current request has image attachments, validate they have usable references.
+  // If current request has NO image attachments, don't reject — the Agent Loop's
+  // ToolArgumentBuilder will resolve historical image attachments from conversation context.
+  if (imageAttachments.length === 0) return;
+
+  const hasUsableRef = imageAttachments.some(
+    (a) => a.url || a.dataUrl || a.storageKey,
   );
-  if (!usable) {
+  if (!hasUsableRef) {
     throw Object.assign(
-      new Error("图片尚未上传完成，缺少可用的图片链接。请等待上传完成后再试。"),
+      new Error("上传的图片缺少可用引用，请重新上传后再试。"),
       { code: "IMAGE_ATTACHMENT_REF_MISSING", category: "input_validation", retryable: false },
     );
   }

@@ -24,6 +24,26 @@ export function MessageList({
   const isStreaming = status === "streaming";
   const scrollRef = useAutoScroll([messages, status], isStreaming);
 
+  // Find the active assistant: the last assistant message with pending/streaming status.
+  // This ensures sendState/toolName/isStreaming are passed to the correct message
+  // even if a server user message was temporarily inserted after the assistant placeholder.
+  const activeAssistantIdx = (() => {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const msg = messages[i]!;
+      if (
+        msg.role === "assistant" &&
+        (msg.status === "pending" || msg.status === "streaming")
+      ) {
+        return i;
+      }
+    }
+    // Fallback: last assistant message if no active one
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (messages[i]!.role === "assistant") return i;
+    }
+    return -1;
+  })();
+
   if (messages.length === 0) {
     return null;
   }
@@ -32,11 +52,7 @@ export function MessageList({
     <div className="message-list" ref={scrollRef}>
       <div className="message-inner">
         {messages.map((message, idx) => {
-          const isLast = idx === messages.length - 1;
-          const isLastAssistant =
-            message.role === "assistant" &&
-            isLast &&
-            isStreaming;
+          const isActiveAssistant = idx === activeAssistantIdx;
 
           if (message.role === "user") {
             return <MemoUserMessage key={message.id} message={message} />;
@@ -47,10 +63,10 @@ export function MessageList({
               <MemoAssistantMessage
                 key={message.id}
                 message={message}
-                isStreaming={isLastAssistant}
+                isStreaming={isActiveAssistant && isStreaming}
                 cards={message.cards}
-                sendState={isLast ? sendState : undefined}
-                toolName={isLast ? (toolName ?? undefined) : undefined}
+                sendState={isActiveAssistant ? sendState : undefined}
+                toolName={isActiveAssistant ? (toolName ?? undefined) : undefined}
               />
             );
           }

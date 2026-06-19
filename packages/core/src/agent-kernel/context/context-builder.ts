@@ -135,6 +135,7 @@ export class ContextBuilder implements ContextBuilderInterface {
     input: AgentLoopInput,
     signal: AbortSignal,
   ): Promise<AgentContext> {
+    const t0 = Date.now();
     const chunks: ContextChunk[] = [];
     let availableSkills: AgentContext["availableSkills"] = [];
 
@@ -460,8 +461,10 @@ export class ContextBuilder implements ContextBuilderInterface {
     } catch {
       // Conversation store not available — skip history
     }
+    console.debug(`[ContextBuilder] history_fetch_ms=${Date.now() - t0}`);
 
     // ── Memories ──────────────────────────────────────────────────
+    const tMemory = Date.now();
     if (this.deps.searchMemories) {
       try {
         // Generate query embedding once for reuse
@@ -492,7 +495,7 @@ export class ContextBuilder implements ContextBuilderInterface {
         let vectorMemories: Awaited<ReturnType<typeof this.deps.searchMemories>> = [];
         if (queryEmbedding) {
           try {
-            vectorMemories = await this.deps.searchMemories({
+            const vectorPromise = this.deps.searchMemories({
               query: "",
               runId: input.runId,
               conversationId: input.conversationId,
@@ -500,6 +503,12 @@ export class ContextBuilder implements ContextBuilderInterface {
               limit: 5,
               embedding: queryEmbedding,
             });
+            vectorMemories = await Promise.race([
+              vectorPromise,
+              new Promise<typeof vectorMemories>((resolve) =>
+                setTimeout(() => resolve([]), 2000),
+              ),
+            ]);
           } catch {
             // Pure vector recall unavailable — use hybrid results only
           }
@@ -552,6 +561,7 @@ export class ContextBuilder implements ContextBuilderInterface {
         // Memory store not available
       }
     }
+    console.debug(`[ContextBuilder] memory_search_ms=${Date.now() - tMemory}`);
 
     // ── Artifacts ─────────────────────────────────────────────────
     if (this.deps.listArtifacts) {
@@ -613,6 +623,7 @@ export class ContextBuilder implements ContextBuilderInterface {
     }
 
     // ── Skill catalog summary ─────────────────────────────────────
+    const tSkills = Date.now();
     if (this.deps.listSkills) {
       try {
         const skills = await this.deps.listSkills();
@@ -651,6 +662,7 @@ export class ContextBuilder implements ContextBuilderInterface {
         });
       }
     }
+    console.debug(`[ContextBuilder] skill_catalog_ms=${Date.now() - tSkills}`);
 
     // ── Run state ─────────────────────────────────────────────────
     chunks.push({
@@ -682,48 +694,53 @@ export class ContextBuilder implements ContextBuilderInterface {
       switch (chunk.source) {
         case "tool_result": {
           if (chunk.content.length > MAX_TOOL_RESULT_CHARS) {
-            // Keep summary/status line + first N chars of output
+            const originalLength = chunk.content.length;
             const truncated = chunk.content.slice(0, MAX_TOOL_RESULT_CHARS);
             chunk.content =
               truncated +
-              `…[truncated ${chunk.content.length - MAX_TOOL_RESULT_CHARS} chars]`;
+              `…[truncated ${originalLength - MAX_TOOL_RESULT_CHARS} chars]`;
             chunk.tokenEstimate = estimateTokens(chunk.content);
             chunk.metadata.truncated = true;
-            chunk.metadata.originalLength = chunk.content.length;
+            chunk.metadata.originalLength = originalLength;
           }
           break;
         }
         case "artifact": {
           if (chunk.content.length > MAX_ARTIFACT_CHARS) {
+            const originalLength = chunk.content.length;
             const truncated = chunk.content.slice(0, MAX_ARTIFACT_CHARS);
             chunk.content =
               truncated +
-              `…[truncated ${chunk.content.length - MAX_ARTIFACT_CHARS} chars]`;
+              `…[truncated ${originalLength - MAX_ARTIFACT_CHARS} chars]`;
             chunk.tokenEstimate = estimateTokens(chunk.content);
             chunk.metadata.truncated = true;
+            chunk.metadata.originalLength = originalLength;
           }
           break;
         }
         case "memory": {
           if (chunk.content.length > MAX_MEMORY_CHARS) {
-            // Preserve type prefix + title + first N chars of body
+            const originalLength = chunk.content.length;
             const truncated = chunk.content.slice(0, MAX_MEMORY_CHARS);
             chunk.content =
               truncated +
-              `…[truncated ${chunk.content.length - MAX_MEMORY_CHARS} chars]`;
+              `…[truncated ${originalLength - MAX_MEMORY_CHARS} chars]`;
             chunk.tokenEstimate = estimateTokens(chunk.content);
             chunk.metadata.truncated = true;
+            chunk.metadata.originalLength = originalLength;
           }
           break;
         }
         case "conversation_history": {
           if (chunk.content.length > MAX_HISTORY_MSG_CHARS) {
+            const originalLength = chunk.content.length;
             const truncated = chunk.content.slice(0, MAX_HISTORY_MSG_CHARS);
             chunk.content =
               truncated +
-              `…[truncated ${chunk.content.length - MAX_HISTORY_MSG_CHARS} chars]`;
+              `…[truncated ${originalLength - MAX_HISTORY_MSG_CHARS} chars]`;
             chunk.tokenEstimate = estimateTokens(chunk.content);
             chunk.metadata.truncated = true;
+            chunk.metadata.originalLength = originalLength;
           }
           break;
         }
@@ -771,6 +788,8 @@ export class ContextBuilder implements ContextBuilderInterface {
     const safetyChunks = budget.included.filter(
       (c) => c.source === "safety_policy",
     );
+
+    console.debug(`[ContextBuilder] total_build_ms=${Date.now() - t0}`);
 
     return {
       runId: input.runId,

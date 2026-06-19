@@ -318,9 +318,8 @@ export function ChatComposer({
 
   // Status label for the current phase — displayed below the input
   const statusLabel: string | undefined = (() => {
-    if (isQueued) return "附件上传完成后将自动发送...";
     switch (sendState) {
-      case "uploading": return uploadProgress ? `上传中 ${uploadProgress}%...` : "上传中...";
+      case "uploading": return undefined;
       case "sending": return "发送中...";
       case "failed": return "发送失败，请重试";
       default: return undefined;
@@ -355,21 +354,6 @@ export function ChatComposer({
         onKeyDown={handleKeyDown}
       />
 
-      {/* ── Upload indicator ────────────────────────────────── */}
-      {uploading && (
-        <div className="chat-composer__upload-status">
-          <LoadingOutlined style={{ marginRight: 6 }} />
-          {isQueued ? (
-            <Text type="secondary" style={{ fontSize: 12 }}>
-              附件上传完成后将自动发送
-            </Text>
-          ) : (
-            <Text type="secondary" style={{ fontSize: 12 }}>
-              上传中...
-            </Text>
-          )}
-        </div>
-      )}
       {uploadFailed && (
         <div className="chat-composer__upload-status">
           <Text type="danger" style={{ fontSize: 12 }}>

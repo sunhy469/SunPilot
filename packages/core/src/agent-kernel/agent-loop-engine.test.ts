@@ -125,9 +125,6 @@ describe("AgentLoopEngine approvals", () => {
         async composeDirect() {
           throw new Error("response should not be composed");
         },
-        async composeFromObservation() {
-          throw new Error("response should not be composed");
-        },
         async composeClarification() {
           throw new Error("clarification should not be composed");
         },
@@ -223,9 +220,6 @@ describe("AgentLoopEngine clarification", () => {
       responseComposer: {
         async composeDirect() {
           throw new Error("direct response should not be composed");
-        },
-        async composeFromObservation() {
-          throw new Error("observation response should not be composed");
         },
         async composeClarification(input) {
           clarificationCalls.push(input);
@@ -350,7 +344,6 @@ describe("AgentLoopEngine tool loop", () => {
       },
       responseComposer: {
         async composeDirect() { throw new Error("direct should not be called"); },
-        async composeFromObservation() { return { messageId: "msg_done", content: "完成" }; },
         async composeClarification() { throw new Error("clarification should not be called"); },
       },
       runStateManager,
@@ -449,9 +442,6 @@ describe("AgentLoopEngine memory writing", () => {
             for (const c of "记住了。") streamOpts.stream.appendText(streamOpts.textPartId, c);
           }
           return { messageId: "msg_assistant", content: "记住了。" };
-        },
-        async composeFromObservation() {
-          throw new Error("observation response should not be composed");
         },
         async composeClarification() {
           throw new Error("clarification should not be composed");

@@ -39,13 +39,15 @@ function getAiStatus(
   toolName?: string,
 ): { icon: React.ReactNode; text: string } | null {
   switch (sendState) {
+    case "sending":
+      return { icon: <LoadingOutlined />, text: "正在连接 SunPilot..." };
     case "accepted":
-      return { icon: <LoadingOutlined />, text: "正在分析需求..." };
+      return { icon: <LoadingOutlined />, text: "已接收，正在创建运行..." };
     case "running":
       if (toolName) {
         return { icon: <ToolOutlined />, text: `正在调用工具: ${toolName}` };
       }
-      return { icon: <LoadingOutlined />, text: "正在分析结果..." };
+      return { icon: <LoadingOutlined />, text: "正在准备上下文..." };
     case "streaming":
       if (toolName) {
         return { icon: <ToolOutlined />, text: `正在调用工具: ${toolName}` };
@@ -404,6 +406,32 @@ export function AssistantMessage({
               </Flex>
             )}
           </>
+        )}
+
+        {/* ── Pending/streaming empty state with parts but no text yet ── */}
+        {hasParts && !hasContent && (isPending || (isStreaming && !msg.parts?.some(p => p.type === "text" && (p as AssistantTextPart).content))) && (
+          <Flex align="center" gap={8} className="assistant-status">
+            <span className="assistant-status__icon">
+              {isPending ? <LoadingOutlined /> : <ThunderboltOutlined />}
+            </span>
+            <Text type="secondary" className="assistant-status__text">
+              {isPending ? "正在准备上下文..." : "正在生成回答..."}
+            </Text>
+            <TypingDots />
+          </Flex>
+        )}
+
+        {/* ── Tool result completed but no text yet — "summarizing results" ── */}
+        {hasParts && !hasContent && isStreaming && msg.parts?.some(p => p.type === "tool_result") && !msg.parts?.some(p => p.type === "text" && (p as AssistantTextPart).content) && (
+          <Flex align="center" gap={8} className="assistant-status">
+            <span className="assistant-status__icon">
+              <LoadingOutlined />
+            </span>
+            <Text type="secondary" className="assistant-status__text">
+              正在整理结果...
+            </Text>
+            <TypingDots />
+          </Flex>
         )}
 
         {/* ── Rich cards (video, image, etc.) ─────────────────── */}

@@ -50,6 +50,7 @@ export function ChatPage() {
           onNewChat={() => {
             setActivePanel("chat");
             conversations.newChat();
+            chat.preconnect();
           }}
           onSelect={(id) => {
             setActivePanel("chat");
@@ -143,7 +144,7 @@ export function ChatPage() {
                   )}
                   <ChatComposer
                     placeholder="向 SunPilot 继续提问..."
-                    disabled={false}
+                    disabled={chat.pending}
                     streaming={chat.chatViewState === "streaming"}
                     sendState={chat.sendState}
                     onSendStateChange={chat.setSendState}

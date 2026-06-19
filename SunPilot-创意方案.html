@@ -1,0 +1,1121 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SunPilot 日照领航 — 本地业务流智能体</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@400;700;900&family=Noto+Sans+SC:wght@300;400;500;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --sun-50: #fffbeb;
+    --sun-100: #fef3c7;
+    --sun-200: #fde68a;
+    --sun-300: #fcd34d;
+    --sun-400: #fbbf24;
+    --sun-500: #f59e0b;
+    --sun-600: #d97706;
+    --sun-700: #b45309;
+    --sun-800: #92400e;
+    --sun-900: #78350f;
+    --ink-900: #1c1917;
+    --ink-800: #292524;
+    --ink-700: #44403c;
+    --ink-600: #57534e;
+    --ink-500: #78716c;
+    --ink-400: #a8a29e;
+    --ink-300: #d6d3d1;
+    --ink-200: #e7e5e4;
+    --ink-100: #f5f5f4;
+    --ink-50: #fafaf9;
+    --radius: 16px;
+    --radius-sm: 10px;
+    --shadow-lg: 0 25px 50px -12px rgba(120, 53, 15, 0.15);
+    --shadow-md: 0 10px 30px -8px rgba(120, 53, 15, 0.1);
+    --shadow-sm: 0 4px 12px -2px rgba(120, 53, 15, 0.08);
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  html {
+    scroll-behavior: smooth;
+    font-size: 16px;
+  }
+
+  body {
+    font-family: 'Noto Sans SC', sans-serif;
+    color: var(--ink-800);
+    background: var(--ink-50);
+    line-height: 1.75;
+    overflow-x: hidden;
+  }
+
+  /* ── Grain overlay ────────────────────────────── */
+  body::before {
+    content: '';
+    position: fixed;
+    inset: 0;
+    opacity: 0.025;
+    pointer-events: none;
+    z-index: 9999;
+    background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  }
+
+  /* ── Hero ─────────────────────────────────────── */
+  .hero {
+    position: relative;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 80px 24px;
+    overflow: hidden;
+    background: linear-gradient(165deg, #78350f 0%, #92400e 25%, #b45309 50%, #d97706 75%, #f59e0b 100%);
+  }
+
+  .hero::before {
+    content: '';
+    position: absolute;
+    top: -30%;
+    right: -20%;
+    width: 80vw;
+    height: 80vw;
+    border-radius: 50%;
+    background: radial-gradient(circle, rgba(251,191,36,0.35) 0%, transparent 70%);
+    animation: pulse-glow 6s ease-in-out infinite;
+  }
+
+  .hero::after {
+    content: '';
+    position: absolute;
+    bottom: -20%;
+    left: -15%;
+    width: 60vw;
+    height: 60vw;
+    border-radius: 50%;
+    background: radial-gradient(circle, rgba(254,243,199,0.15) 0%, transparent 60%);
+    animation: pulse-glow 8s ease-in-out infinite reverse;
+  }
+
+  @keyframes pulse-glow {
+    0%, 100% { transform: scale(1); opacity: 1; }
+    50% { transform: scale(1.08); opacity: 0.7; }
+  }
+
+  .hero-badge {
+    position: relative;
+    z-index: 2;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 20px;
+    background: rgba(255,255,255,0.15);
+    backdrop-filter: blur(12px);
+    border: 1px solid rgba(255,255,255,0.25);
+    border-radius: 100px;
+    color: var(--sun-100);
+    font-size: 0.85rem;
+    font-weight: 500;
+    letter-spacing: 0.05em;
+    margin-bottom: 40px;
+    animation: fade-down 0.8s ease-out;
+  }
+
+  .hero-badge .dot {
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    background: var(--sun-300);
+    animation: blink 2s ease-in-out infinite;
+  }
+
+  @keyframes blink {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.3; }
+  }
+
+  .hero-title {
+    position: relative;
+    z-index: 2;
+    font-family: 'Noto Serif SC', serif;
+    font-size: clamp(3rem, 8vw, 6.5rem);
+    font-weight: 900;
+    color: #fff;
+    text-align: center;
+    line-height: 1.15;
+    letter-spacing: -0.02em;
+    margin-bottom: 12px;
+    animation: fade-down 0.8s ease-out 0.1s both;
+  }
+
+  .hero-title .accent {
+    display: block;
+    font-size: 0.35em;
+    font-weight: 400;
+    font-family: 'Noto Sans SC', sans-serif;
+    letter-spacing: 0.25em;
+    color: var(--sun-200);
+    margin-top: 8px;
+  }
+
+  .hero-subtitle {
+    position: relative;
+    z-index: 2;
+    max-width: 680px;
+    text-align: center;
+    font-size: clamp(1rem, 2.2vw, 1.25rem);
+    color: var(--sun-100);
+    line-height: 1.8;
+    margin-bottom: 48px;
+    animation: fade-down 0.8s ease-out 0.2s both;
+  }
+
+  .hero-cta {
+    position: relative;
+    z-index: 2;
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    padding: 16px 36px;
+    background: #fff;
+    color: var(--sun-800);
+    font-size: 1.05rem;
+    font-weight: 700;
+    border: none;
+    border-radius: 100px;
+    cursor: pointer;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.15);
+    transition: all 0.3s ease;
+    text-decoration: none;
+    animation: fade-down 0.8s ease-out 0.3s both;
+  }
+
+  .hero-cta:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 12px 40px rgba(0,0,0,0.2);
+  }
+
+  .hero-cta svg {
+    width: 20px; height: 20px;
+    transition: transform 0.3s ease;
+  }
+
+  .hero-cta:hover svg { transform: translateX(4px); }
+
+  .scroll-hint {
+    position: absolute;
+    bottom: 32px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 2;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    color: rgba(255,255,255,0.5);
+    font-size: 0.75rem;
+    letter-spacing: 0.15em;
+    animation: fade-down 0.8s ease-out 0.5s both;
+  }
+
+  .scroll-hint .line {
+    width: 1px;
+    height: 40px;
+    background: linear-gradient(to bottom, rgba(255,255,255,0.5), transparent);
+    animation: scroll-line 2s ease-in-out infinite;
+  }
+
+  @keyframes scroll-line {
+    0% { transform: scaleY(0); transform-origin: top; }
+    50% { transform: scaleY(1); transform-origin: top; }
+    50.1% { transform: scaleY(1); transform-origin: bottom; }
+    100% { transform: scaleY(0); transform-origin: bottom; }
+  }
+
+  @keyframes fade-down {
+    from { opacity: 0; transform: translateY(-20px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+
+  /* ── Section base ─────────────────────────────── */
+  .section {
+    padding: 100px 24px;
+    max-width: 1120px;
+    margin: 0 auto;
+  }
+
+  .section-label {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 0.8rem;
+    font-weight: 700;
+    letter-spacing: 0.15em;
+    text-transform: uppercase;
+    color: var(--sun-600);
+    margin-bottom: 16px;
+  }
+
+  .section-label::before {
+    content: '';
+    width: 24px;
+    height: 2px;
+    background: var(--sun-500);
+    border-radius: 2px;
+  }
+
+  .section-title {
+    font-family: 'Noto Serif SC', serif;
+    font-size: clamp(1.8rem, 4vw, 2.8rem);
+    font-weight: 900;
+    color: var(--ink-900);
+    line-height: 1.3;
+    margin-bottom: 20px;
+  }
+
+  .section-desc {
+    font-size: 1.05rem;
+    color: var(--ink-600);
+    max-width: 640px;
+    line-height: 1.8;
+    margin-bottom: 48px;
+  }
+
+  /* ── Problem ──────────────────────────────────── */
+  .problem-section {
+    background: var(--ink-900);
+    color: var(--ink-100);
+  }
+
+  .problem-section .section-label { color: var(--sun-400); }
+  .problem-section .section-title { color: #fff; }
+  .problem-section .section-desc { color: var(--ink-400); }
+
+  .pain-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+    gap: 24px;
+  }
+
+  .pain-card {
+    padding: 36px;
+    background: rgba(255,255,255,0.04);
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: var(--radius);
+    transition: all 0.35s ease;
+  }
+
+  .pain-card:hover {
+    background: rgba(255,255,255,0.07);
+    border-color: rgba(251,191,36,0.25);
+    transform: translateY(-4px);
+  }
+
+  .pain-icon {
+    width: 52px; height: 52px;
+    border-radius: 14px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1.5rem;
+    margin-bottom: 20px;
+    background: linear-gradient(135deg, rgba(251,191,36,0.15), rgba(217,119,6,0.15));
+    border: 1px solid rgba(251,191,36,0.2);
+  }
+
+  .pain-card h3 {
+    font-size: 1.15rem;
+    font-weight: 700;
+    color: #fff;
+    margin-bottom: 10px;
+  }
+
+  .pain-card p {
+    font-size: 0.92rem;
+    color: var(--ink-400);
+    line-height: 1.7;
+  }
+
+  /* ── Solution ─────────────────────────────────── */
+  .solution-visual {
+    position: relative;
+    background: #fff;
+    border-radius: var(--radius);
+    padding: 48px;
+    box-shadow: var(--shadow-lg);
+    margin-bottom: 48px;
+    overflow: hidden;
+  }
+
+  .solution-visual::before {
+    content: '';
+    position: absolute;
+    top: 0; left: 0; right: 0;
+    height: 4px;
+    background: linear-gradient(90deg, var(--sun-400), var(--sun-600));
+  }
+
+  .arch-diagram {
+    display: flex;
+    flex-direction: column;
+    gap: 24px;
+    align-items: center;
+  }
+
+  .arch-layer {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    width: 100%;
+    max-width: 720px;
+  }
+
+  .arch-layer-label {
+    width: 100px;
+    flex-shrink: 0;
+    text-align: right;
+    font-size: 0.8rem;
+    font-weight: 700;
+    color: var(--sun-700);
+    letter-spacing: 0.05em;
+  }
+
+  .arch-nodes {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    flex: 1;
+  }
+
+  .arch-node {
+    padding: 8px 16px;
+    background: var(--sun-50);
+    border: 1px solid var(--sun-200);
+    border-radius: 8px;
+    font-size: 0.82rem;
+    font-weight: 500;
+    color: var(--sun-800);
+    transition: all 0.25s ease;
+    cursor: default;
+  }
+
+  .arch-node:hover {
+    background: var(--sun-100);
+    border-color: var(--sun-400);
+    transform: scale(1.05);
+  }
+
+  .arch-node.core {
+    background: var(--sun-500);
+    color: #fff;
+    border-color: var(--sun-600);
+    font-weight: 700;
+  }
+
+  .arch-arrow {
+    width: 2px;
+    height: 20px;
+    background: var(--sun-300);
+    margin: 0 auto;
+    position: relative;
+  }
+
+  .arch-arrow::after {
+    content: '';
+    position: absolute;
+    bottom: -4px;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 0; height: 0;
+    border-left: 5px solid transparent;
+    border-right: 5px solid transparent;
+    border-top: 6px solid var(--sun-300);
+  }
+
+  /* ── Features ─────────────────────────────────── */
+  .feature-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+    gap: 28px;
+  }
+
+  .feature-card {
+    background: #fff;
+    border-radius: var(--radius);
+    padding: 36px;
+    box-shadow: var(--shadow-sm);
+    border: 1px solid var(--ink-200);
+    transition: all 0.35s ease;
+    position: relative;
+    overflow: hidden;
+  }
+
+  .feature-card::after {
+    content: '';
+    position: absolute;
+    top: 0; left: 0;
+    width: 100%; height: 3px;
+    background: linear-gradient(90deg, var(--sun-400), var(--sun-500));
+    transform: scaleX(0);
+    transform-origin: left;
+    transition: transform 0.4s ease;
+  }
+
+  .feature-card:hover {
+    box-shadow: var(--shadow-md);
+    transform: translateY(-4px);
+    border-color: var(--sun-200);
+  }
+
+  .feature-card:hover::after { transform: scaleX(1); }
+
+  .feature-num {
+    font-family: 'Noto Serif SC', serif;
+    font-size: 3rem;
+    font-weight: 900;
+    color: var(--sun-200);
+    line-height: 1;
+    margin-bottom: 16px;
+  }
+
+  .feature-card h3 {
+    font-size: 1.2rem;
+    font-weight: 700;
+    color: var(--ink-900);
+    margin-bottom: 10px;
+  }
+
+  .feature-card p {
+    font-size: 0.92rem;
+    color: var(--ink-600);
+    line-height: 1.7;
+  }
+
+  .feature-tag {
+    display: inline-block;
+    margin-top: 14px;
+    padding: 4px 12px;
+    background: var(--sun-50);
+    color: var(--sun-700);
+    font-size: 0.75rem;
+    font-weight: 600;
+    border-radius: 100px;
+    border: 1px solid var(--sun-200);
+  }
+
+  /* ── Users ────────────────────────────────────── */
+  .user-section {
+    background: linear-gradient(170deg, var(--sun-50) 0%, #fff 100%);
+  }
+
+  .user-scenarios {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: 24px;
+  }
+
+  .scenario-card {
+    background: #fff;
+    border-radius: var(--radius);
+    overflow: hidden;
+    box-shadow: var(--shadow-sm);
+    border: 1px solid var(--ink-200);
+    transition: all 0.35s ease;
+  }
+
+  .scenario-card:hover {
+    transform: translateY(-4px);
+    box-shadow: var(--shadow-md);
+  }
+
+  .scenario-img {
+    width: 100%;
+    height: 180px;
+    object-fit: cover;
+    display: block;
+  }
+
+  .scenario-body {
+    padding: 24px;
+  }
+
+  .scenario-body h3 {
+    font-size: 1.1rem;
+    font-weight: 700;
+    color: var(--ink-900);
+    margin-bottom: 8px;
+  }
+
+  .scenario-body p {
+    font-size: 0.9rem;
+    color: var(--ink-600);
+    line-height: 1.7;
+  }
+
+  .scenario-user {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    margin-top: 12px;
+    padding: 4px 12px;
+    background: var(--sun-50);
+    border-radius: 100px;
+    font-size: 0.78rem;
+    font-weight: 600;
+    color: var(--sun-700);
+  }
+
+  /* ── Value ────────────────────────────────────── */
+  .value-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+    gap: 28px;
+  }
+
+  .value-card {
+    padding: 40px;
+    border-radius: var(--radius);
+    position: relative;
+    overflow: hidden;
+  }
+
+  .value-card:nth-child(1) {
+    background: linear-gradient(135deg, var(--sun-800), var(--sun-700));
+    color: var(--sun-100);
+  }
+
+  .value-card:nth-child(2) {
+    background: linear-gradient(135deg, var(--ink-800), var(--ink-700));
+    color: var(--ink-100);
+  }
+
+  .value-card:nth-child(3) {
+    background: linear-gradient(135deg, #065f46, #047857);
+    color: #d1fae5;
+  }
+
+  .value-card .value-icon {
+    font-size: 2rem;
+    margin-bottom: 20px;
+  }
+
+  .value-card h3 {
+    font-family: 'Noto Serif SC', serif;
+    font-size: 1.4rem;
+    font-weight: 700;
+    margin-bottom: 12px;
+  }
+
+  .value-card p {
+    font-size: 0.92rem;
+    line-height: 1.8;
+    opacity: 0.85;
+  }
+
+  .value-card .value-metric {
+    margin-top: 24px;
+    padding-top: 20px;
+    border-top: 1px solid rgba(255,255,255,0.15);
+  }
+
+  .value-metric-num {
+    font-family: 'Noto Serif SC', serif;
+    font-size: 2.2rem;
+    font-weight: 900;
+    line-height: 1;
+  }
+
+  .value-metric-label {
+    font-size: 0.8rem;
+    opacity: 0.7;
+    margin-top: 4px;
+  }
+
+  /* ── Tech ─────────────────────────────────────── */
+  .tech-stack {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    margin-top: 32px;
+  }
+
+  .tech-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 20px;
+    background: #fff;
+    border: 1px solid var(--ink-200);
+    border-radius: 10px;
+    font-size: 0.88rem;
+    font-weight: 500;
+    color: var(--ink-700);
+    transition: all 0.25s ease;
+  }
+
+  .tech-item:hover {
+    border-color: var(--sun-400);
+    background: var(--sun-50);
+    color: var(--sun-800);
+  }
+
+  .tech-dot {
+    width: 8px; height: 8px;
+    border-radius: 50%;
+  }
+
+  /* ── Flow ─────────────────────────────────────── */
+  .flow-container {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0;
+    flex-wrap: wrap;
+    padding: 40px 0;
+  }
+
+  .flow-step {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 12px;
+    padding: 24px;
+    min-width: 140px;
+    text-align: center;
+  }
+
+  .flow-circle {
+    width: 64px; height: 64px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1.5rem;
+    background: var(--sun-50);
+    border: 2px solid var(--sun-300);
+    transition: all 0.3s ease;
+  }
+
+  .flow-step:hover .flow-circle {
+    background: var(--sun-500);
+    border-color: var(--sun-600);
+    transform: scale(1.1);
+  }
+
+  .flow-step h4 {
+    font-size: 0.9rem;
+    font-weight: 700;
+    color: var(--ink-800);
+  }
+
+  .flow-step p {
+    font-size: 0.78rem;
+    color: var(--ink-500);
+  }
+
+  .flow-arrow {
+    font-size: 1.5rem;
+    color: var(--sun-400);
+    padding: 0 4px;
+  }
+
+  /* ── Footer ───────────────────────────────────── */
+  .footer {
+    text-align: center;
+    padding: 60px 24px;
+    background: var(--ink-900);
+    color: var(--ink-400);
+  }
+
+  .footer-logo {
+    font-family: 'Noto Serif SC', serif;
+    font-size: 1.5rem;
+    font-weight: 900;
+    color: var(--sun-400);
+    margin-bottom: 12px;
+  }
+
+  .footer p {
+    font-size: 0.85rem;
+    line-height: 1.8;
+  }
+
+  .footer .tag {
+    display: inline-block;
+    margin-top: 16px;
+    padding: 6px 16px;
+    border: 1px solid var(--ink-700);
+    border-radius: 100px;
+    font-size: 0.78rem;
+    color: var(--ink-400);
+  }
+
+  /* ── Responsive ───────────────────────────────── */
+  @media (max-width: 768px) {
+    .section { padding: 64px 20px; }
+    .arch-layer { flex-direction: column; align-items: flex-start; }
+    .arch-layer-label { text-align: left; width: auto; }
+    .flow-container { flex-direction: column; }
+    .flow-arrow { transform: rotate(90deg); }
+    .solution-visual { padding: 28px 20px; }
+  }
+
+  /* ── Scroll animations ────────────────────────── */
+  .reveal {
+    opacity: 0;
+    transform: translateY(30px);
+    transition: opacity 0.7s ease, transform 0.7s ease;
+  }
+
+  .reveal.visible {
+    opacity: 1;
+    transform: translateY(0);
+  }
+</style>
+</head>
+<body>
+
+<!-- ═══════════════════════════════════════════════ -->
+<!-- HERO                                            -->
+<!-- ═══════════════════════════════════════════════ -->
+<section class="hero">
+  <div class="hero-badge"><span class="dot"></span> 学习工作赛道</div>
+  <h1 class="hero-title">
+    SunPilot
+    <span class="accent">S U N P I L O T · 本 地 智 能 体 助 手</span>
+  </h1>
+  <p class="hero-subtitle">
+    数据持久化在本地、LLM 推理按需调用云端的 AI 智能体系统——也可对接自部署模型实现全离线运行。可扩展技能生态、多模型路由、记忆与反思闭环，让 AI 成为你的业务领航员。
+  </p>
+  <a href="#problem" class="hero-cta">
+    了解创意方案
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="m12 5 7 7-7 7"/></svg>
+  </a>
+  <div class="scroll-hint">
+    <span>SCROLL</span>
+    <div class="line"></div>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════ -->
+<!-- PROBLEM                                         -->
+<!-- ═══════════════════════════════════════════════ -->
+<section id="problem" class="problem-section">
+  <div class="section" style="max-width:1120px;margin:0 auto;">
+    <div class="section-label">痛点洞察</div>
+    <h2 class="section-title" style="color:#fff;">没有 SunPilot 之前，<br>业务人员遇到了什么问题？</h2>
+    <p class="section-desc" style="color:var(--ink-400);">现有 AI 助手要么牺牲隐私上云，要么功能单一无法扩展，无法满足"安全 + 强大 + 可定制"的三重需求。</p>
+
+    <div class="pain-grid">
+      <div class="pain-card reveal">
+        <div class="pain-icon">🔒</div>
+        <h3>隐私焦虑</h3>
+        <p>主流 AI 助手将业务数据、工作文档、内部流程全部上传云端处理。企业敏感数据、客户信息面临泄露风险，业务人员无法合规使用。</p>
+      </div>
+      <div class="pain-card reveal">
+        <div class="pain-icon">🧩</div>
+        <h3>功能固化</h3>
+        <p>ChatGPT、文心一言等以对话为核心，无法处理本地业务数据、自动生成报表、编排多步骤工作流程等真实办公任务，"聊"完还得挨个手动操作。</p>
+      </div>
+      <div class="pain-card reveal">
+        <div class="pain-icon">🤖</div>
+        <h3>模型锁定</h3>
+        <p>每个 AI 平台绑定单一模型，无法按业务场景灵活切换。轻量数据查询和深度分析报告需要用不同工具，效率低下。</p>
+      </div>
+      <div class="pain-card reveal">
+        <div class="pain-icon">🧠</div>
+        <h3>记忆断裂</h3>
+        <p>现有助手缺乏持久记忆和上下文理解，每次对话从零开始，无法积累业务偏好、客户历史、工作习惯，业务连续性被打断。</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════ -->
+<!-- SOLUTION                                        -->
+<!-- ═══════════════════════════════════════════════ -->
+<section id="solution" class="section">
+  <div class="section-label">创意方案</div>
+  <h2 class="section-title">本地优先的智能体系统，<br>业务数据自己掌控，能力不设边界</h2>
+  <p class="section-desc">SunPilot 是一个面向业务流的本地 AI Agent 系统：所有数据存储在本地 PostgreSQL，LLM 仅在需要推理时调用，技能可像插件一样热插拔扩展，自动编排多步骤业务工作流。</p>
+
+  <div class="solution-visual reveal">
+    <div class="arch-diagram">
+      <div class="arch-layer">
+        <div class="arch-layer-label">交互层</div>
+        <div class="arch-nodes">
+          <div class="arch-node">Web UI</div>
+          <div class="arch-node">WebSocket 实时通信</div>
+          <div class="arch-node">JSON-RPC 协议</div>
+        </div>
+      </div>
+      <div class="arch-arrow"></div>
+      <div class="arch-layer">
+        <div class="arch-layer-label">引擎层</div>
+        <div class="arch-nodes">
+          <div class="arch-node core">Agent Loop Engine</div>
+          <div class="arch-node">意图路由</div>
+          <div class="arch-node">规划器</div>
+          <div class="arch-node">反思引擎</div>
+        </div>
+      </div>
+      <div class="arch-arrow"></div>
+      <div class="arch-layer">
+        <div class="arch-layer-label">能力层</div>
+        <div class="arch-nodes">
+          <div class="arch-node">技能执行器</div>
+          <div class="arch-node">工具决策引擎</div>
+          <div class="arch-node">参数构建器</div>
+          <div class="arch-node">沙箱安全</div>
+        </div>
+      </div>
+      <div class="arch-arrow"></div>
+      <div class="arch-layer">
+        <div class="arch-layer-label">基础层</div>
+        <div class="arch-nodes">
+          <div class="arch-node">多模型路由</div>
+          <div class="arch-node">记忆系统</div>
+          <div class="arch-node">审批门控</div>
+          <div class="arch-node">事件总线</div>
+          <div class="arch-node">PostgreSQL 持久化</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Workflow -->
+  <h3 style="font-family:'Noto Serif SC',serif;font-size:1.3rem;font-weight:700;color:var(--ink-900);margin-bottom:8px;">核心工作流</h3>
+  <p style="color:var(--ink-600);margin-bottom:24px;font-size:0.95rem;">用户发消息 → 意图识别（规则→嵌入→LLM 三层路由） → 规划执行 → 安全审批 → 技能执行（沙箱隔离） → 反思优化 → 流式响应（SSE）</p>
+
+  <div class="flow-container reveal">
+    <div class="flow-step">
+      <div class="flow-circle">💬</div>
+      <h4>用户输入</h4>
+      <p>自然语言对话</p>
+    </div>
+    <div class="flow-arrow">→</div>
+    <div class="flow-step">
+      <div class="flow-circle">🎯</div>
+      <h4>意图路由</h4>
+      <p>规则+嵌入+LLM 三层路由</p>
+    </div>
+    <div class="flow-arrow">→</div>
+    <div class="flow-step">
+      <div class="flow-circle">📋</div>
+      <h4>规划执行</h4>
+      <p>步骤编排+审批</p>
+    </div>
+    <div class="flow-arrow">→</div>
+    <div class="flow-step">
+      <div class="flow-circle">⚡</div>
+      <h4>技能执行</h4>
+      <p>沙箱隔离运行</p>
+    </div>
+    <div class="flow-arrow">→</div>
+    <div class="flow-step">
+      <div class="flow-circle">🔍</div>
+      <h4>反思优化</h4>
+      <p>自我评估改进</p>
+    </div>
+    <div class="flow-arrow">→</div>
+    <div class="flow-step">
+      <div class="flow-circle">📡</div>
+      <h4>流式响应</h4>
+      <p>实时推送结果</p>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════ -->
+<!-- FEATURES                                        -->
+<!-- ═══════════════════════════════════════════════ -->
+<section style="background:var(--ink-50);">
+  <div class="section">
+    <div class="section-label">核心特性</div>
+    <h2 class="section-title">六大能力，重新定义<br>本地 AI 助手的天花板</h2>
+
+    <div class="feature-grid">
+      <div class="feature-card reveal">
+        <div class="feature-num">01</div>
+        <h3>技能生态 · 热插拔</h3>
+        <p>每个技能是独立模块，支持文件处理、数据查询、报告生成、流程编排等权限声明。技能可随时启用/禁用，无需重启，像装 App 一样扩展 AI 能力。</p>
+        <span class="feature-tag">可扩展</span>
+      </div>
+      <div class="feature-card reveal">
+        <div class="feature-num">02</div>
+        <h3>多模型路由 · 按需切换</h3>
+        <p>内置双模型路由（DeepSeek DP + 火山引擎 Ark Seed），按任务类型自动选择最优模型。意图分类用轻量模型，深度推理用强力模型，降本增效。</p>
+        <span class="feature-tag">智能调度</span>
+      </div>
+      <div class="feature-card reveal">
+        <div class="feature-num">03</div>
+        <h3>持久记忆 · 越用越懂你</h3>
+        <p>自动提取对话中的业务偏好、关键事实、历史决策，构建语义向量索引。下次对话自动召回相关记忆，AI 真正"记住"你的工作习惯和业务上下文。</p>
+        <span class="feature-tag">个性化</span>
+      </div>
+      <div class="feature-card reveal">
+        <div class="feature-num">04</div>
+        <h3>安全审批 · 人机协作</h3>
+        <p>高风险操作（如批量修改数据、对外发送文件、执行关键流程）触发审批门控，用户可逐条批准/拒绝。支持超时自动拒绝，确保 AI 永远不会越权行动。</p>
+        <span class="feature-tag">安全可控</span>
+      </div>
+      <div class="feature-card reveal">
+        <div class="feature-num">05</div>
+        <h3>反思引擎 · 自我进化</h3>
+        <p>每次执行后自动评估结果质量，检测目标偏移和工具失败，触发重新规划。AI 不是一条路走到黑，而是会"想一想再调整"。</p>
+        <span class="feature-tag">自优化</span>
+      </div>
+      <div class="feature-card reveal">
+        <div class="feature-num">06</div>
+        <h3>本地优先 · 隐私守护</h3>
+        <p>核心业务数据（对话记录、审批日志、记忆库）存储在本地 PostgreSQL，用户完全掌控。LLM 推理默认调用云端 API（可配置自部署模型实现全离线），文件上传默认使用阿里云 OSS（可关闭）。灵活适配不同企业的合规需求。</p>
+        <span class="feature-tag">隐私安全</span>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════ -->
+<!-- TARGET USERS                                    -->
+<!-- ═══════════════════════════════════════════════ -->
+<section id="users" class="user-section">
+  <div class="section">
+    <div class="section-label">目标用户</div>
+    <h2 class="section-title">谁最需要 SunPilot？</h2>
+    <p class="section-desc">面向对数据安全有要求、对业务效率有追求的企业用户和知识工作者。</p>
+
+    <div class="user-scenarios">
+      <div class="scenario-card reveal">
+        <img class="scenario-img" src="https://trae-api-cn.mchost.guru/api/ide/v1/text_to_image?prompt=developer%20coding%20with%20AI%20assistant%20on%20dual%20monitors%2C%20warm%20amber%20light&image_size=landscape_4_3" alt="开发者场景">
+        <div class="scenario-body">
+          <h3>业务流程自动化</h3>
+          <p>让 AI 自动编排复杂业务流程：批量处理数据、生成分析报告、定时执行任务。审批门控确保关键操作逐条确认，业务安全可控。</p>
+          <span class="scenario-user">📊 业务管理者</span>
+        </div>
+      </div>
+      <div class="scenario-card reveal">
+        <img class="scenario-img" src="https://trae-api-cn.mchost.guru/api/ide/v1/text_to_image?prompt=researcher%20reading%20papers%20with%20AI%20notes%2C%20warm%20lighting%2C%20cozy%20study&image_size=landscape_4_3" alt="研究者场景">
+        <div class="scenario-body">
+          <h3>数据分析与知识管理</h3>
+          <p>AI 自动清洗数据、生成可视化图表、关联历史决策。跨会话的业务记忆让分析不再碎片化，每次决策都站在之前的洞察之上。</p>
+          <span class="scenario-user">📈 数据分析师</span>
+        </div>
+      </div>
+      <div class="scenario-card reveal">
+        <img class="scenario-img" src="https://trae-api-cn.mchost.guru/api/ide/v1/text_to_image?prompt=office%20worker%20using%20AI%20dashboard%2C%20modern%20workspace%2C%20warm%20amber&image_size=landscape_4_3" alt="职场场景">
+        <div class="scenario-body">
+          <h3>企业合规与数据管理</h3>
+          <p>核心数据本地存储的 AI 助手：处理财务报表、生成合规报告、查询内部数据库。持久化数据在本地 PostgreSQL 中完全掌控，推理支持云端 API 或自建模型灵活切换，满足不同合规要求。</p>
+          <span class="scenario-user">💼 企业管理者</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════ -->
+<!-- VALUE                                           -->
+<!-- ═══════════════════════════════════════════════ -->
+<section id="value" class="section">
+  <div class="section-label">价值与意义</div>
+  <h2 class="section-title">为什么 SunPilot 值得存在？</h2>
+  <p class="section-desc">从商业、效率、社会三个维度，重新衡量本地 AI 助手的价值。</p>
+
+  <div class="value-grid">
+    <div class="value-card reveal">
+      <div class="value-icon">💰</div>
+      <h3>商业价值</h3>
+      <p>本地优先架构大幅降低云端算力成本。技能市场生态带来平台抽成机会。企业版可提供私有部署、审计合规等增值服务。</p>
+      <div class="value-metric">
+        <div class="value-metric-num">80%↓</div>
+        <div class="value-metric-label">相比纯云端方案的推理成本降低</div>
+      </div>
+    </div>
+    <div class="value-card reveal">
+      <div class="value-icon">⚡</div>
+      <h3>效率提升</h3>
+      <p>智能体自动编排多步骤业务流，将"说一句 → 批量处理数据、生成报告、发送通知"变为现实。持久记忆消除重复业务背景输入，反思引擎持续优化执行质量。</p>
+      <div class="value-metric">
+        <div class="value-metric-num">3-5x</div>
+        <div class="value-metric-label">复杂工作流执行效率提升</div>
+      </div>
+    </div>
+    <div class="value-card reveal">
+      <div class="value-icon">🌍</div>
+      <h3>社会价值</h3>
+      <p>让每个人都能拥有"自己掌控数据"的 AI 助手——核心数据留在本地，推理可灵活选择云端或自建模型。开源技能生态促进社区协作，推动 AI 能力民主化。</p>
+ 	      <div class="value-metric">
+	        <div class="value-metric-num">可配</div>
+	        <div class="value-metric-label">全离线部署可选（自建模型 + 本地存储）</div>
+	      </div>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════ -->
+<!-- TECH STACK                                      -->
+<!-- ═══════════════════════════════════════════════ -->
+<section style="background:var(--ink-50);">
+  <div class="section">
+    <div class="section-label">技术栈</div>
+    <h2 class="section-title">工程实现</h2>
+    <p class="section-desc">TypeScript Monorepo 架构，模块化设计，每个包职责清晰。</p>
+
+    <div class="tech-stack reveal">
+      <div class="tech-item"><span class="tech-dot" style="background:#3178c6;"></span>TypeScript</div>
+      <div class="tech-item"><span class="tech-dot" style="background:#68a063;"></span>Node.js</div>
+      <div class="tech-item"><span class="tech-dot" style="background:#f7df1e;"></span>Fastify</div>
+      <div class="tech-item"><span class="tech-dot" style="background:#003545;"></span>PostgreSQL + pgvector</div>
+      <div class="tech-item"><span class="tech-dot" style="background:#61dafb;"></span>React + Vite</div>
+      <div class="tech-item"><span class="tech-dot" style="background:#ff6f00;"></span>WebSocket</div>
+      <div class="tech-item"><span class="tech-dot" style="background:#ef4444;"></span>pgvector</div>
+      <div class="tech-item"><span class="tech-dot" style="background:#8b5cf6;"></span>OpenAI 兼容 API</div>
+      <div class="tech-item"><span class="tech-dot" style="background:#06b6d4;"></span>pnpm Workspaces</div>
+      <div class="tech-item"><span class="tech-dot" style="background:#f97316;"></span>阿里云 OSS</div>
+    </div>
+
+    <div style="margin-top:48px;display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:16px;" class="reveal">
+      <div style="padding:24px;background:#fff;border-radius:var(--radius-sm);border:1px solid var(--ink-200);">
+        <div style="font-size:1.8rem;font-weight:900;color:var(--sun-600);font-family:'Noto Serif SC',serif;">9</div>
+        <div style="font-size:0.85rem;color:var(--ink-600);margin-top:4px;">Monorepo 包</div>
+      </div>
+      <div style="padding:24px;background:#fff;border-radius:var(--radius-sm);border:1px solid var(--ink-200);">
+        <div style="font-size:1.8rem;font-weight:900;color:var(--sun-600);font-family:'Noto Serif SC',serif;">19</div>
+        <div style="font-size:0.85rem;color:var(--ink-600);margin-top:4px;">数据库迁移</div>
+      </div>
+      <div style="padding:24px;background:#fff;border-radius:var(--radius-sm);border:1px solid var(--ink-200);">
+        <div style="font-size:1.8rem;font-weight:900;color:var(--sun-600);font-family:'Noto Serif SC',serif;">6</div>
+        <div style="font-size:0.85rem;color:var(--ink-600);margin-top:4px;">安全模块</div>
+      </div>
+      <div style="padding:24px;background:#fff;border-radius:var(--radius-sm);border:1px solid var(--ink-200);">
+        <div style="font-size:1.8rem;font-weight:900;color:var(--sun-600);font-family:'Noto Serif SC',serif;">∞</div>
+        <div style="font-size:0.85rem;color:var(--ink-600);margin-top:4px;">可扩展技能</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════ -->
+<!-- FOOTER                                          -->
+<!-- ═══════════════════════════════════════════════ -->
+<footer class="footer">
+  <div class="footer-logo">SunPilot</div>
+  <p>SunPilot · 本地业务流智能体</p>
+  <p style="margin-top:8px;font-size:0.8rem;">核心数据在本地，能力不设边界</p>
+  <div class="tag">学习工作赛道 · 本地 AI 智能体平台</div>
+</footer>
+
+<script>
+  // Scroll reveal
+  const observer = new IntersectionObserver((entries) => {
+    entries.forEach((entry, i) => {
+      if (entry.isIntersecting) {
+        setTimeout(() => entry.target.classList.add('visible'), i * 80);
+        observer.unobserve(entry.target);
+      }
+    });
+  }, { threshold: 0.12 });
+
+  document.querySelectorAll('.reveal').forEach(el => observer.observe(el));
+</script>
+</body>
+</html>

@@ -108,4 +108,9 @@ export interface ChatMessage {
     dataUrl?: string;
     storageKey?: string;
   }>;
+  /**
+   * Client-generated request ID for optimistic message binding.
+   * Used to match local user messages with server-confirmed messages via chat.send ack.
+   */
+  clientRequestId?: string;
 }

@@ -26,6 +26,8 @@ import {
   type MemorySearchInput,
   type StepRecord,
 } from "@sunpilot/protocol";
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import {
   AbortRegistry,
   AgentLoopEngine,
@@ -115,8 +117,12 @@ export function createAgentLoopService(deps: {
       // Transient streaming event — skip persist, delivered via sync onDelta
       return;
     }
-    const persisted = await eventSink.persist(event);
-    if (persisted) liveEventBus.publish(persisted);
+    try {
+      const persisted = await eventSink.persist(event);
+      if (persisted) liveEventBus.publish(persisted);
+    } catch (err) {
+      console.error("[eventBus] Failed to persist event:", (err as Error).message);
+    }
   });
 
   // ── Embedding ───────────────────────────────────────────────────
@@ -391,11 +397,9 @@ export function createAgentLoopService(deps: {
     if (typeof schema === "object" && schema !== null) return schema as Record<string, unknown>;
     if (typeof schema !== "string") return undefined;
     try {
-      const fs = require("fs");
-      const path = require("path");
-      const filePath = path.join(skillPath, schema);
-      if (fs.existsSync(filePath)) {
-        return JSON.parse(fs.readFileSync(filePath, "utf-8"));
+      const filePath = join(skillPath, schema);
+      if (existsSync(filePath)) {
+        return JSON.parse(readFileSync(filePath, "utf-8"));
       }
     } catch { /* Best effort */ }
     return undefined;

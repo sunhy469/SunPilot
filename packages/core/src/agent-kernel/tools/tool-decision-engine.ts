@@ -24,6 +24,16 @@ import type { EmbeddingService } from "../context/embedding-service.js";
 import type { AgentEventBus } from "../agent-event-bus.js";
 import type { ModelRouter } from "../model-router.js";
 import { checkAnyOfUnsatisfied } from "./tool-schema-utils.js";
+import { RichCardBuilder } from "./rich-card-builder.js";
+
+const MARKDOWN_RESPONSE_POLICY = `Response format policy:
+- Default to structured Markdown output unless the user explicitly asks for plain text.
+- For informational answers: use ##/### headings, short intro, grouped bullets, tables when comparing, **bold** for key conclusions, fenced code blocks or inline code for code/commands/paths, ordered lists for multi-step plans.
+- For product/resource/search results: give a summary first, then a structured table, then filtering suggestions, then follow-up directions.
+- Avoid "以下是..." repetitive openings. Do not repeat the same content in the same paragraph.
+- Do not use raw HTML — the Markdown renderer handles formatting.
+- Use the same language as the user.`;
+
 import type {
   ChatMessage,
   ToolCall,
@@ -976,6 +986,8 @@ IMPORTANT: return ONLY the JSON object. No markdown code fences, no surrounding 
       messageId?: string;
       /** User-selected model for request-level routing. */
       modelId?: "dp" | "seed";
+      /** User-selected permission mode for tool execution safety checks. */
+      permissionMode?: "ask" | "auto" | "full";
       prioritySkills?: Array<{
         skillId: string;
         reason: string;
@@ -1019,12 +1031,14 @@ IMPORTANT: return ONLY the JSON object. No markdown code fences, no surrounding 
         context,
         intent,
         allSkills,
+        input.permissionMode,
       );
       const { tools, nameMap } = this.buildStreamingToolDefinitions(retrieval);
 
       // 4. Streaming loop: interleave text + tool calls
       let iteration = 0;
       let currentMessages = messages;
+      let summarizeStatusId: string | undefined;
 
       while (iteration < MAX_TOOL_ITERATIONS) {
         if (signal.aborted) break;
@@ -1062,6 +1076,14 @@ IMPORTANT: return ONLY the JSON object. No markdown code fences, no surrounding 
           stream.appendText(prefacePart.id, prefaceText);
           fullContent += prefaceText;
           stream.completeTextPart(prefacePart.id);
+        }
+
+        // Complete the "summarizing" status when LLM starts producing text
+        if (summarizeStatusId && result.textContent && stream) {
+          stream.updateStatus(summarizeStatusId, {
+            status: "completed",
+            label: "已整理搜索结果",
+          });
         }
 
         // Complete the text part if one was created
@@ -1104,6 +1126,7 @@ IMPORTANT: return ONLY the JSON object. No markdown code fences, no surrounding 
           allSkills,
           signal,
           stream,
+          input.permissionMode,
         );
 
         allArtifacts.push(...toolResults.artifacts);
@@ -1146,6 +1169,15 @@ IMPORTANT: return ONLY the JSON object. No markdown code fences, no surrounding 
           toolResults,
         );
 
+        // ── Post-tool status: let user know we're summarizing results ──
+        if (stream) {
+          const statusPart = stream.startStatus({
+            label: "正在整理搜索结果...",
+            metadata: { phase: "summarizing" },
+          });
+          summarizeStatusId = statusPart.id;
+        }
+
         // If all tools failed or were denied, give the LLM one more
         // chance to explain the situation, then stop
         const allFailed = toolResults.summaries.every(
@@ -1168,6 +1200,18 @@ IMPORTANT: return ONLY the JSON object. No markdown code fences, no surrounding 
           }
           break;
         }
+      }
+
+      // ── Deterministic fallback: if tools ran but LLM produced no text content ──
+      if (allArtifacts.length > 0 && stream && !stream.hasTextContent()) {
+        const toolNames = [...new Set(allArtifacts.map(a => a.name).filter(Boolean))];
+        const fallbackText = toolNames.length > 0
+          ? `已完成${toolNames.join("、")}的搜索，正在整理结果。你可以让我筛选、排序或展示更多详情。`
+          : "工具执行已完成，正在整理结果。";
+        const fallbackPart = stream.startTextPart();
+        stream.appendText(fallbackPart.id, fallbackText);
+        fullContent += fallbackText;
+        stream.completeTextPart(fallbackPart.id);
       }
 
       // 5. Check for abort after loop — signal may have fired between
@@ -1271,6 +1315,7 @@ Do not reveal hidden chain-of-thought. Keep progress concise and factual.
 Use the same language as the user.`,
       "When you need to use a tool, call it directly. When you have results, summarize them for the user.",
       "If you don't need any tools, just respond naturally.",
+      MARKDOWN_RESPONSE_POLICY,
     ];
 
     if (context.system.rules.length > 0) {
@@ -1357,13 +1402,14 @@ Use the same language as the user.`,
     context: AgentContext,
     intent: RoutedIntent,
     allSkills: SkillSummary[],
+    permissionMode?: "ask" | "auto" | "full",
   ): Promise<ToolRetrievalResult> {
     try {
       const result = await this.deps.toolRetriever!.retrieve({
         query: context.currentMessage.content,
         intent,
         availableSkills: allSkills,
-        permissionMode: "auto",
+        permissionMode: permissionMode ?? "auto",
       });
 
       if (result.tools.length > 0) {
@@ -1373,15 +1419,27 @@ Use the same language as the user.`,
       // Retriever failed — fall through to full skill list
     }
 
-    // Fallback: all enabled skills
+    // Fallback: limit to category-matched + top 10 enabled skills
+    const maxFallbackSkills = 10;
     const enabledSkills = allSkills.filter((s) => s.enabled);
+    // Prioritize skills matching the detected intent category
+    const categoryMatched = enabledSkills.filter(
+      (s) => s.category.toLowerCase() === intent.type.toLowerCase(),
+    );
+    const nonCategoryMatched = enabledSkills.filter(
+      (s) => s.category.toLowerCase() !== intent.type.toLowerCase(),
+    );
+    const fallbackSkills = [
+      ...categoryMatched,
+      ...nonCategoryMatched,
+    ].slice(0, maxFallbackSkills);
     return {
-      tools: enabledSkills.map((skill) => ({
+      tools: fallbackSkills.map((skill) => ({
         skill,
         score: 0.3,
         matchReasons: ["fallback: all enabled tools"],
       })),
-      topK: enabledSkills.length,
+      topK: fallbackSkills.length,
       fallbackUsed: true,
       topKReason: "retriever returned empty or failed — presenting all tools",
     };
@@ -1582,6 +1640,7 @@ Use the same language as the user.`,
     allSkills: SkillSummary[],
     signal: AbortSignal,
     stream?: IAssistantMessageStream,
+    permissionMode?: "ask" | "auto" | "full",
   ): Promise<{
     artifacts: ArtifactRef[];
     summaries: ToolCallSummary[];
@@ -1811,7 +1870,7 @@ Use the same language as the user.`,
           permissions: plannedCall.permissions,
           arguments: finalArgs,
           context,
-          permissionMode: "auto",
+          permissionMode: permissionMode ?? "auto",
           riskHints: plannedCall.riskHints,
         });
 
@@ -2056,16 +2115,15 @@ Use the same language as the user.`,
   private buildStreamingRichCards(
     artifacts: ArtifactRef[],
   ): Array<{ type: string; title?: string; data: Record<string, unknown> }> {
-    return artifacts
-      .filter((a) => a.type === "video" || a.type === "image")
-      .map((a) => ({
+    const builder = new RichCardBuilder();
+    builder.fromArtifacts(
+      artifacts.map((a) => ({
         type: a.type,
-        title: a.name,
-        data: {
-          src: (a as unknown as Record<string, unknown>).url ?? "",
-          caption: a.name,
-        },
-      }));
+        name: a.name,
+        url: (a as unknown as Record<string, unknown>).url as string | undefined,
+      })),
+    );
+    return builder.build();
   }
 }
 

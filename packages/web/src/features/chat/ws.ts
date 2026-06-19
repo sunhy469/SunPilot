@@ -17,12 +17,15 @@ export function chatSocketUrl(): string {
  * ChatComposer → sendChatMessage → WebSocket → daemon JsonRpcRouter → AgentService.handleChatCommand
  *
  * 返回的流式事件通过 WebSocket 的 onmessage 回调接收（JSON-RPC notification 格式）。
+ *
+ * @returns The JSON-RPC request id, used to match the ack response.
  */
-export function sendChatMessage(socket: WebSocket, params: ChatSendParams) {
+export function sendChatMessage(socket: WebSocket, params: ChatSendParams): string {
+  const id = crypto.randomUUID();
   socket.send(
     JSON.stringify({
       jsonrpc: "2.0",
-      id: crypto.randomUUID(),
+      id,
       method: "chat.send",
       params: {
         conversationId: params.conversationId,
@@ -35,6 +38,7 @@ export function sendChatMessage(socket: WebSocket, params: ChatSendParams) {
       },
     }),
   );
+  return id;
 }
 
 export function sendChatStop(socket: WebSocket, params: ChatStopParams) {
