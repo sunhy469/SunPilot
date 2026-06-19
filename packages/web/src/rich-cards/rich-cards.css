@@ -258,23 +258,24 @@
   overflow-wrap: anywhere;
 }
 
-/* Headings */
+/* Headings — clear visual hierarchy for structured Markdown */
 .markdown-body h1,
 .markdown-body h2,
 .markdown-body h3,
 .markdown-body h4,
 .markdown-body h5,
 .markdown-body h6 {
-  margin: 1.2em 0 0.6em;
-  font-weight: 600;
+  margin: 1.2em 0 0.5em;
+  font-weight: 700;
   line-height: 1.35;
   color: var(--sp-ink);
+  letter-spacing: -0.01em;
 }
 
-.markdown-body h1 { font-size: 1.5em; }
-.markdown-body h2 { font-size: 1.3em; }
+.markdown-body h1 { font-size: 1.5em; border-bottom: 2px solid var(--sp-border); padding-bottom: 0.3em; }
+.markdown-body h2 { font-size: 1.3em; border-bottom: 1px solid var(--sp-border-soft); padding-bottom: 0.25em; }
 .markdown-body h3 { font-size: 1.15em; }
-.markdown-body h4 { font-size: 1.05em; }
+.markdown-body h4 { font-size: 1.05em; font-weight: 600; }
 
 .markdown-body h1:first-child,
 .markdown-body h2:first-child,
@@ -295,12 +296,12 @@
   margin-bottom: 0;
 }
 
-/* Bold, Italic, Strikethrough */
-.markdown-body strong { font-weight: 600; }
+/* Bold, Italic, Strikethrough — bold uses accent color for key conclusions */
+.markdown-body strong { font-weight: 700; color: var(--sp-ink); }
 .markdown-body em { font-style: italic; }
 .markdown-body del { text-decoration: line-through; opacity: 0.7; }
 
-/* Lists */
+/* Lists — compact spacing with clear second-level indent */
 .markdown-body ul,
 .markdown-body ol {
   margin: 0.5em 0;
@@ -308,24 +309,27 @@
 }
 
 .markdown-body li {
-  margin: 0.25em 0;
+  margin: 0.15em 0;
+  line-height: 1.65;
 }
 
 .markdown-body ul ul,
 .markdown-body ol ol,
 .markdown-body ul ol,
 .markdown-body ol ul {
-  margin: 0.25em 0;
+  margin: 0.15em 0;
+  padding-left: 1.2em;
 }
 
-/* Blockquote */
+/* Blockquote — lightweight tip style */
 .md-blockquote {
   margin: 0.75em 0;
-  padding: 8px 16px;
+  padding: 10px 18px;
   border-left: 3px solid var(--sp-blue);
   background: var(--sp-blue-soft);
   border-radius: 0 8px 8px 0;
   color: #374151;
+  font-size: 0.95em;
 }
 
 .md-blockquote p {
@@ -413,18 +417,20 @@
   font-size: 12px !important;
 }
 
-/* ── Tables ───────────────────────────────────────────────────────── */
+/* ── Tables — prominent header, comfortable cell padding, horizontal scroll ── */
 .md-table-wrapper {
   margin: 0.75em 0;
   overflow-x: auto;
   border: 1px solid var(--sp-border);
   border-radius: 12px;
+  -webkit-overflow-scrolling: touch;
 }
 
 .md-table {
   width: 100%;
   border-collapse: collapse;
   font-size: 13px;
+  line-height: 1.6;
 }
 
 .md-table thead {
@@ -434,16 +440,20 @@
 }
 
 .md-table th {
-  padding: 10px 14px;
+  padding: 10px 16px;
   text-align: left;
-  font-weight: 600;
+  font-weight: 700;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
   background: var(--sp-surface-soft);
   border-bottom: 2px solid var(--sp-border);
   white-space: nowrap;
+  color: var(--sp-ink);
 }
 
 .md-table td {
-  padding: 8px 14px;
+  padding: 10px 16px;
   border-bottom: 1px solid var(--sp-border-soft);
 }
 

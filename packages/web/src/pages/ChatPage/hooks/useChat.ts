@@ -27,10 +27,26 @@ import { validateAttachmentRefsForSend } from "../../../features/chat/attachment
 import type {
   AgentActivity,
   ChatMessage,
+  AssistantMessagePart,
 } from "../../../features/conversations/types";
 import type { ChatViewState, LocalSendState } from "../types";
 
 type ChatSocketPayload = ChatSocketEvent | ChatSocketErrorResponse;
+
+/** JSON-RPC response result from chat.send ack */
+interface ChatSendAckResult {
+  accepted: boolean;
+  conversationId: string;
+  runId: string;
+  messageId: string;
+}
+
+interface JsonRpcResponse {
+  jsonrpc: "2.0";
+  id: string;
+  result?: ChatSendAckResult;
+  error?: { code: number; message: string };
+}
 
 export interface AgentArtifactPreview {
   id: string;
@@ -46,9 +62,18 @@ export interface AgentArtifactSelection {
   content: string;
 }
 
-function parseSocketPayload(data: string): ChatSocketPayload | undefined {
-  const payload = JSON.parse(data) as Partial<ChatSocketPayload> | undefined;
+function parseSocketPayload(data: string): ChatSocketPayload | JsonRpcResponse | undefined {
+  const payload = JSON.parse(data) as
+    | Partial<ChatSocketPayload>
+    | Partial<JsonRpcResponse>
+    | undefined;
   if (!payload || typeof payload !== "object") return undefined;
+
+  // JSON-RPC response (chat.send ack, etc.)
+  if ("jsonrpc" in payload && payload.jsonrpc === "2.0" && "id" in payload && !("method" in payload)) {
+    return payload as JsonRpcResponse;
+  }
+
   if ("error" in payload && typeof payload.error?.message === "string") {
     return { error: { message: payload.error.message } };
   }
@@ -59,9 +84,6 @@ function parseSocketPayload(data: string): ChatSocketPayload | undefined {
       case "agent.context.completed":
       case "agent.intent.detected":
       case "agent.plan.created":
-      case "agent.response.started":
-      case "agent.response.delta":
-      case "agent.response.completed":
       case "agent.clarification.requested":
       case "agent.model.started":
       case "agent.model.delta":
@@ -134,6 +156,212 @@ function isAgentEnvelope(value: unknown): value is {
     !!candidate.payload &&
     typeof candidate.payload === "object"
   );
+}
+
+const lastDeltaIndexByPartId = new Map<string, number>();
+
+// ── Unified assistant message reducer (§P0: idempotent message lifecycle) ──
+// Handles all agent.message.* events with idempotent guarantees:
+//   - messageId is the dedup key for assistant messages
+//   - partId is the dedup key for parts
+//   - completed is final override, not incremental append
+
+function assistantMessageReducer(
+  items: ChatMessage[],
+  event: { method: string; params: Record<string, unknown> },
+  conversationId: string,
+): ChatMessage[] {
+  if (event.method === "agent.message.started") {
+    const msgParams = event.params as {
+      runId: string;
+      conversationId: string;
+      messageId: string;
+    };
+
+    // If a message with this messageId already exists, just update it
+    if (items.some((m) => m.id === msgParams.messageId)) {
+      return items.map((m) =>
+        m.id === msgParams.messageId
+          ? { ...m, status: "streaming" as const, parts: m.parts ?? [] }
+          : m,
+      );
+    }
+
+    // Find the best pending placeholder to bind:
+    // 1. Prefer the last assistant with conversationId === "pending"
+    // 2. Then the last assistant with matching conversationId that is still pending
+    const pendingPlaceholderIdx = findLastIndex(items, (m) =>
+      m.role === "assistant" &&
+      m.status === "pending" &&
+      (m.conversationId === "pending" || m.conversationId === (msgParams.conversationId || conversationId)),
+    );
+
+    if (pendingPlaceholderIdx >= 0) {
+      return items.map((m, idx) =>
+        idx === pendingPlaceholderIdx
+          ? {
+              ...m,
+              id: msgParams.messageId,
+              conversationId: msgParams.conversationId ?? conversationId,
+              status: "streaming" as const,
+              parts: [],
+            }
+          : m,
+      );
+    }
+
+    // No placeholder found — create a new streaming assistant message
+    return [
+      ...items,
+      {
+        id: msgParams.messageId,
+        conversationId: msgParams.conversationId ?? conversationId,
+        role: "assistant" as const,
+        content: "",
+        createdAt: new Date().toISOString(),
+        status: "streaming" as const,
+        activities: [],
+        parts: [],
+      },
+    ];
+  }
+
+  if (event.method === "agent.message.part.started") {
+    const partParams = event.params as {
+      messageId: string;
+      part: Record<string, unknown>;
+    };
+    const partId = partParams.part.id as string | undefined;
+    const incomingPart = partParams.part as unknown as AssistantMessagePart;
+
+    return items.map((item) => {
+      if (item.id !== partParams.messageId) return item;
+      const parts = item.parts ?? [];
+      // Upsert by part.id: if part already exists, merge; otherwise append
+      const existingIdx = partId != null
+        ? parts.findIndex((p) => p.id === partId)
+        : -1;
+      const nextParts = existingIdx >= 0
+        ? parts.map((p, i) => i === existingIdx ? { ...p, ...incomingPart } : p)
+        : [...parts, incomingPart];
+      return { ...item, parts: nextParts };
+    });
+  }
+
+  if (event.method === "agent.message.part.delta") {
+    const deltaParams = event.params as {
+      conversationId?: string;
+      messageId: string;
+      partId: string;
+      delta: string;
+      deltaIndex?: number;
+    };
+
+    // Delta dedup: if deltaIndex is provided, skip already-seen deltas
+    if (typeof deltaParams.deltaIndex === "number") {
+      const key = `${deltaParams.messageId}:${deltaParams.partId}`;
+      const lastIndex = lastDeltaIndexByPartId.get(key) ?? -1;
+      if (deltaParams.deltaIndex <= lastIndex) {
+        return items; // Skip duplicate or out-of-order delta
+      }
+      lastDeltaIndexByPartId.set(key, deltaParams.deltaIndex);
+    }
+
+    return upsertTextPartDelta(items, {
+      conversationId: deltaParams.conversationId ?? conversationId,
+      messageId: deltaParams.messageId,
+      partId: deltaParams.partId,
+      delta: deltaParams.delta,
+    });
+  }
+
+  if (event.method === "agent.message.part.updated") {
+    const updateParams = event.params as {
+      messageId: string;
+      partId: string;
+      patch: Record<string, unknown>;
+    };
+    return items.map((item) =>
+      item.id === updateParams.messageId
+        ? {
+            ...item,
+            parts: (item.parts ?? []).map((part) =>
+              part.id === updateParams.partId
+                ? { ...part, ...updateParams.patch }
+                : part,
+            ),
+          }
+        : item,
+    );
+  }
+
+  if (event.method === "agent.message.completed") {
+    const completedParams = event.params as {
+      runId?: string;
+      conversationId?: string;
+      messageId: string;
+      content: string;
+      parts: Array<Record<string, unknown>>;
+      cards?: Array<{ type: string; title?: string; data: Record<string, unknown> }>;
+    };
+
+    // Idempotent: if message already completed with same content, skip to avoid re-render
+    const existing = items.find((m) => m.id === completedParams.messageId);
+    if (
+      existing &&
+      existing.status === "completed" &&
+      existing.content === completedParams.content
+    ) {
+      return items;
+    }
+
+    // If message exists, replace with final state
+    if (existing) {
+      // Clear delta index tracking for this message's parts
+      for (const key of lastDeltaIndexByPartId.keys()) {
+        if (key.startsWith(completedParams.messageId + ":")) {
+          lastDeltaIndexByPartId.delete(key);
+        }
+      }
+      return items.map((m) =>
+        m.id === completedParams.messageId
+          ? {
+              ...m,
+              content: completedParams.content,
+              parts: completedParams.parts as unknown as ChatMessage["parts"],
+              status: "completed" as const,
+              cards: (completedParams.cards as ChatMessage["cards"]) ?? m.cards,
+            }
+          : m,
+      );
+    }
+
+    // Message not found — create a completed assistant message
+    return [
+      ...items,
+      {
+        id: completedParams.messageId,
+        conversationId: completedParams.conversationId ?? conversationId,
+        role: "assistant" as const,
+        content: completedParams.content,
+        createdAt: new Date().toISOString(),
+        status: "completed" as const,
+        activities: [],
+        parts: completedParams.parts as unknown as ChatMessage["parts"],
+        cards: completedParams.cards as ChatMessage["cards"],
+      },
+    ];
+  }
+
+  return items;
+}
+
+/** findLastIndex polyfill — returns -1 if no match */
+function findLastIndex<T>(arr: T[], predicate: (item: T) => boolean): number {
+  for (let i = arr.length - 1; i >= 0; i--) {
+    if (predicate(arr[i]!)) return i;
+  }
+  return -1;
 }
 
 function findActiveAssistantMessageIndex(messages: ChatMessage[]): number {
@@ -324,6 +552,8 @@ export function useChat(
     useState<AgentArtifactSelection | null>(null);
   const seenEventIdsRef = useRef(new Set<string>());
   const lastSequenceRef = useRef(0);
+  /** Maps JSON-RPC request id → clientRequestId for chat.send ack binding */
+  const pendingAcksRef = useRef(new Map<string, string>());
 
   const setPendingState = useCallback((next: boolean) => {
     pendingRef.current = next;
@@ -471,137 +701,23 @@ export function useChat(
         setActiveRunId(null);
       }
 
-      // ── Message content-block events (§Phase 2d: unified reducer) ──
-      // These are applied here so both live WebSocket events AND
-      // replayConversationEvents() results update message parts.
-      // The live path also triggers startResponseTimer/setSendState
-      // in the WebSocket message handler, but the core state mutation
-      // (setMessages) lives here for both paths.
-      if (method === "agent.message.started") {
-        const msgParams = params as {
-          runId: string;
-          conversationId: string;
-          messageId: string;
-        };
-        setMessages((items) => {
-          const placeholderIdx = items.findIndex(
-            (item) => item.role === "assistant" && item.status === "pending",
-          );
-          if (placeholderIdx >= 0) {
-            return items.map((item, idx) =>
-              idx === placeholderIdx
-                ? {
-                    ...item,
-                    id: msgParams.messageId,
-                    conversationId: msgParams.conversationId ?? conversationId,
-                    status: "streaming" as const,
-                    parts: [],
-                  }
-                : item,
-            );
-          }
-          if (items.some((item) => item.id === msgParams.messageId)) {
-            return items;
-          }
-          return [
-            ...items,
-            {
-              id: msgParams.messageId,
-              conversationId: msgParams.conversationId ?? conversationId,
-              role: "assistant" as const,
-              content: "",
-              createdAt: new Date().toISOString(),
-              status: "streaming" as const,
-              activities: [],
-              parts: [],
-            },
-          ];
-        });
-        return;
-      }
-
-      if (method === "agent.message.part.started") {
-        const partParams = params as {
-          messageId: string;
-          part: Record<string, unknown>;
-        };
+      // ── Message content-block events (§P0: unified reducer) ──
+      // All agent.message.* mutations go through assistantMessageReducer
+      // for idempotent guarantees. Both live WebSocket events AND
+      // replayConversationEvents() results share this path.
+      const messageMethods = [
+        "agent.message.started",
+        "agent.message.part.started",
+        "agent.message.part.delta",
+        "agent.message.part.updated",
+        "agent.message.completed",
+      ];
+      if (messageMethods.includes(method)) {
         setMessages((items) =>
-          items.map((item) =>
-            item.id === partParams.messageId
-              ? {
-                  ...item,
-                  parts: [
-                    ...(item.parts ?? []),
-                    partParams.part as ChatMessage["parts"] extends Array<infer T> ? T : never,
-                  ],
-                }
-              : item,
-          ),
-        );
-        return;
-      }
-
-      if (method === "agent.message.part.delta") {
-        const deltaParams = params as {
-          conversationId?: string;
-          messageId: string;
-          partId: string;
-          delta: string;
-        };
-        setMessages((items) =>
-          upsertTextPartDelta(items, {
-            conversationId: deltaParams.conversationId ?? conversationId,
-            messageId: deltaParams.messageId,
-            partId: deltaParams.partId,
-            delta: deltaParams.delta,
-          }),
-        );
-        return;
-      }
-
-      if (method === "agent.message.part.updated") {
-        const updateParams = params as {
-          messageId: string;
-          partId: string;
-          patch: Record<string, unknown>;
-        };
-        setMessages((items) =>
-          items.map((item) =>
-            item.id === updateParams.messageId
-              ? {
-                  ...item,
-                  parts: (item.parts ?? []).map((part) =>
-                    part.id === updateParams.partId
-                      ? { ...part, ...updateParams.patch }
-                      : part,
-                  ),
-                }
-              : item,
-          ),
-        );
-        return;
-      }
-
-      if (method === "agent.message.completed") {
-        const completedParams = params as {
-          runId?: string;
-          conversationId?: string;
-          messageId: string;
-          content: string;
-          parts: Array<Record<string, unknown>>;
-          cards?: Array<{ type: string; title?: string; data: Record<string, unknown> }>;
-        };
-        setMessages((items) =>
-          items.map((item) =>
-            item.id === completedParams.messageId
-              ? {
-                  ...item,
-                  content: completedParams.content,
-                  parts: completedParams.parts as unknown as ChatMessage["parts"],
-                  status: "completed" as const,
-                  cards: (completedParams.cards as ChatMessage["cards"]) ?? item.cards,
-                }
-              : item,
+          assistantMessageReducer(
+            items,
+            { method, params: params as Record<string, unknown> },
+            conversationId,
           ),
         );
         return;
@@ -705,32 +821,86 @@ export function useChat(
       }
     });
     socket.addEventListener("message", (raw) => {
-      let payload: ChatSocketPayload | undefined;
+      let payload: ChatSocketPayload | JsonRpcResponse | undefined;
       try {
         payload = parseSocketPayload(String(raw.data));
       } catch {
         return;
       }
       if (!payload) return;
-      if ("error" in payload) {
+      if ("error" in payload && payload.error) {
         clearResponseTimer();
         setError(payload.error.message);
         setPendingState(false);
         setStatus("online");
         return;
       }
+
+      // ── JSON-RPC response (chat.send ack) ─────────────────────
+      // When the server acknowledges chat.send, bind the local optimistic
+      // user message to the server-confirmed messageId and conversationId.
+      if ("result" in payload && payload.result && "messageId" in payload.result) {
+        const ack = payload.result as ChatSendAckResult;
+        const rpcId = (payload as JsonRpcResponse).id;
+        const clientRequestId = pendingAcksRef.current.get(rpcId);
+        if (clientRequestId) {
+          pendingAcksRef.current.delete(rpcId);
+        }
+
+        if (ack.accepted && ack.messageId) {
+          const matchClientRequestId = clientRequestId;
+          setMessages((items) =>
+            items.map((item) => {
+              // Match by clientRequestId (preferred) or by local_ prefix + pending conversationId
+              if (
+                item.role === "user" &&
+                (matchClientRequestId
+                  ? item.clientRequestId === matchClientRequestId
+                  : item.id.startsWith("local_") && item.conversationId === "pending")
+              ) {
+                return {
+                  ...item,
+                  id: ack.messageId,
+                  conversationId: ack.conversationId || item.conversationId,
+                  clientRequestId: item.clientRequestId,
+                };
+              }
+              return item;
+            }),
+          );
+          // Also update the assistant placeholder's conversationId
+          if (ack.conversationId) {
+            setMessages((items) =>
+              items.map((item) => {
+                if (
+                  item.role === "assistant" &&
+                  item.status === "pending" &&
+                  item.conversationId === "pending"
+                ) {
+                  return { ...item, conversationId: ack.conversationId };
+                }
+                return item;
+              }),
+            );
+          }
+        }
+        return;
+      }
+
+      // From here, payload must be a ChatSocketEvent (notification)
+      const event = payload as ChatSocketEvent;
       // ── Agent error events ────────────────────────────────────
-      if (payload.method === "agent.error") {
+      if (event.method === "agent.error") {
         clearResponseTimer();
         setSendState("failed");
-        applyAgentEvent(payload);
-        const activity = activityFromAgentEvent(payload);
+        applyAgentEvent(event);
+        const activity = activityFromAgentEvent(event);
         if (activity) {
           appendAssistantActivity(activity);
         }
         setError(
-          payload.params.error?.message ??
-            payload.params.message ??
+          event.params.error?.message ??
+            event.params.message ??
             "Agent request failed.",
         );
         setPendingState(false);
@@ -738,41 +908,41 @@ export function useChat(
         return;
       }
 
-      if (payload.method === "pong") return;
+      if (event.method === "pong") return;
 
-      applyAgentEvent(payload);
-      const activity = activityFromAgentEvent(payload);
+      applyAgentEvent(event);
+      const activity = activityFromAgentEvent(event);
       if (activity) {
         appendAssistantActivity(activity);
       }
 
-      if (payload.method === "agent.run.created") {
-        activeRunIdRef.current = payload.params.runId ?? null;
-        setActiveRunId(payload.params.runId);
-        setConversationId(payload.params.conversationId);
+      if (event.method === "agent.run.created") {
+        activeRunIdRef.current = event.params.runId ?? null;
+        setActiveRunId(event.params.runId);
+        setConversationId(event.params.conversationId);
         setSendState("running");
         setStatus("thinking");
         // Replace "pending" conversationId on all local messages with the real one
         setMessages((items) =>
           items.map((item) =>
             item.conversationId === "pending"
-              ? { ...item, conversationId: payload.params.conversationId }
+              ? { ...item, conversationId: event.params.conversationId }
               : item,
           ),
         );
       }
 
       // ── Tool call tracking ──────────────────────────────────
-      if (payload.method === "agent.tool.started") {
-        const toolParams = payload.params as { name?: string };
+      if (event.method === "agent.tool.started") {
+        const toolParams = event.params as { name?: string };
         toolCallCountRef.current += 1;
         setSendState("running");
         if (toolParams.name) {
           setToolName(toolParams.name);
         }
       }
-      if (payload.method === "agent.tool.delta") {
-        const deltaParams = payload.params as {
+      if (event.method === "agent.tool.delta") {
+        const deltaParams = event.params as {
           toolCallId?: string;
           delta?: string;
           type?: string;
@@ -805,8 +975,8 @@ export function useChat(
         }
       }
       if (
-        payload.method === "agent.tool.completed" ||
-        payload.method === "agent.tool.failed"
+        event.method === "agent.tool.completed" ||
+        event.method === "agent.tool.failed"
       ) {
         toolCallCountRef.current = Math.max(0, toolCallCountRef.current - 1);
         if (toolCallCountRef.current === 0) {
@@ -821,29 +991,29 @@ export function useChat(
       // Core data mutations (setMessages) are handled by applyAgentEvent()
       // called above, so live + replay share the same reducer.
       // Here we only manage live UI concerns: timers, sendState, status.
-      if (payload.method === "agent.message.started") {
-        const msgParams = payload.params as { runId: string };
+      if (event.method === "agent.message.started") {
+        const msgParams = event.params as { runId: string };
         activeRunIdRef.current = msgParams.runId;
         setActiveRunId(msgParams.runId);
         setSendState("streaming");
         setStatus("thinking");
       }
 
-      if (payload.method === "agent.message.part.started") {
+      if (event.method === "agent.message.part.started") {
         startResponseTimer();
         setSendState("streaming");
       }
 
-      if (payload.method === "agent.message.part.delta") {
+      if (event.method === "agent.message.part.delta") {
         startResponseTimer();
         setSendState("streaming");
       }
 
-      if (payload.method === "agent.message.part.updated") {
+      if (event.method === "agent.message.part.updated") {
         setSendState("streaming");
       }
 
-      if (payload.method === "agent.message.completed") {
+      if (event.method === "agent.message.completed") {
         clearResponseTimer();
         setSendState("completed");
         setStatus("online");
@@ -856,7 +1026,7 @@ export function useChat(
 
       // ── Agent message completed via content-block event ──────────
       // (agent.response.completed UI handler removed — agent.message.completed handles this)
-      if (payload.method === "agent.run.completed") {
+      if (event.method === "agent.run.completed") {
         clearResponseTimer();
         setSendState("completed");
         setStatus("online");
@@ -868,12 +1038,12 @@ export function useChat(
       }
 
       // ── Agent run failed ──────────────────────────────────────
-      if (payload.method === "agent.run.failed") {
+      if (event.method === "agent.run.failed") {
         clearResponseTimer();
         setSendState("failed");
         setStatus("online");
         setPendingState(false);
-        setError(payload.params.error.message);
+        setError(event.params.error.message);
         setToolName(null);
         toolCallCountRef.current = 0;
         activeRunIdRef.current = null;
@@ -881,7 +1051,7 @@ export function useChat(
       }
 
       // ── Agent run cancelled ───────────────────────────────────
-      if (payload.method === "agent.run.cancelled") {
+      if (event.method === "agent.run.cancelled") {
         clearResponseTimer();
         setSendState("failed");
         setStatus("online");
@@ -901,7 +1071,7 @@ export function useChat(
       }
 
       // ── Agent run interrupted ─────────────────────────────────
-      if (payload.method === "agent.run.interrupted") {
+      if (event.method === "agent.run.interrupted") {
         clearResponseTimer();
         setSendState("failed");
         setStatus("online");
@@ -969,7 +1139,7 @@ export function useChat(
       modelId?: "dp" | "seed",
     ) => {
       const text = message.trim();
-      if ((!text && (!attachments || attachments.length === 0)) || pending)
+      if ((!text && (!attachments || attachments.length === 0)) || pendingRef.current)
         return;
 
       // §5.2: Final gate — validate AttachmentRef[] (not just UploadFile[] UI state).
@@ -987,7 +1157,9 @@ export function useChat(
         }
       }
 
-      const placeholderId = `local_${crypto.randomUUID()}`;
+      const clientRequestId = `chat_${crypto.randomUUID()}`;
+      const localUserMessageId = `local_user_${clientRequestId}`;
+      const placeholderId = `local_assistant_${clientRequestId}`;
 
       setPendingState(true);
       setSendState("sending");
@@ -1002,11 +1174,12 @@ export function useChat(
       setMessages((items) => [
         ...items,
         {
-          id: `local_${crypto.randomUUID()}`,
+          id: localUserMessageId,
           conversationId: conversationId || "pending",
           role: "user" as const,
           content: text,
           createdAt: new Date().toISOString(),
+          clientRequestId,
           attachments: attachments?.map((a) => ({
             id: a.id,
             name: a.name,
@@ -1026,20 +1199,24 @@ export function useChat(
           content: "",
           createdAt: new Date().toISOString(),
           status: "pending" as const,
+          clientRequestId,
         },
       ]);
 
       const socket = ensureSocket();
       const transmit = () => {
         setSendState("accepted");
-        sendChatMessage(socket, {
+        const requestId = sendChatMessage(socket, {
           ...(conversationId ? { conversationId } : {}),
           message: text,
           mode: "agent",
           permissionMode: permissionMode ?? "auto",
           modelId: modelId ?? "seed",
+          clientRequestId,
           attachments,
         });
+        // Track the request so we can match the ack response
+        pendingAcksRef.current.set(requestId, clientRequestId);
       };
       if (socket.readyState === WebSocket.OPEN) transmit();
       else socket.addEventListener("open", transmit, { once: true });
@@ -1118,6 +1295,15 @@ export function useChat(
     setSelectedArtifact(null);
   }, []);
 
+  /**
+   * Preconnect the WebSocket without sending any message.
+   * Called when user clicks "新对话" so the WS is ready when they type.
+   * Does NOT change pending/sendState, does NOT start response timer.
+   */
+  const preconnect = useCallback(() => {
+    ensureSocket();
+  }, [ensureSocket]);
+
   const chatViewState: ChatViewState = (() => {
     if (error) return "error";
     if (status === "offline" && pending) return "offline";
@@ -1137,6 +1323,7 @@ export function useChat(
   return {
     send,
     stop,
+    preconnect,
     pending,
     status,
     sendState,

@@ -73,6 +73,7 @@ export interface IAssistantMessageStream {
     artifactIds?: string[];
     trust?: "trusted" | "untrusted";
   }): AssistantToolResultPart;
+  hasTextContent(): boolean;
   addError(input: {
     message: string;
     code?: string;
@@ -588,6 +589,8 @@ export interface ToolDecisionEngine {
       plan?: AgentPlan;
       messageId?: string;
       modelId?: "dp" | "seed";
+      /** User-selected permission mode for tool execution safety checks. */
+      permissionMode?: "ask" | "auto" | "full";
       prioritySkills?: Array<{
         skillId: string;
         reason: string;
@@ -713,21 +716,6 @@ export interface ResponseComposer {
         stream: IAssistantMessageStream;
         textPartId: string;
       };
-    },
-    signal: AbortSignal,
-  ): Promise<{
-    messageId: string;
-    content: string;
-  }>;
-
-  composeFromObservation(
-    input: {
-      input: AgentLoopInput;
-      context: AgentContext;
-      observation: AgentObservation;
-      reflection?: AgentReflection;
-      messageId?: string;
-      modelId?: "dp" | "seed";
     },
     signal: AbortSignal,
   ): Promise<{

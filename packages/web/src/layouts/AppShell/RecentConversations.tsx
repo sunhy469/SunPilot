@@ -37,10 +37,12 @@ function SectionHeader({
 
 // ── Time-group helpers ──────────────────────────────────────────────────
 
-type TimeGroup = "today" | "yesterday" | "thisWeek" | "earlier";
+type TimeGroup = "pinned" | "today" | "yesterday" | "thisWeek" | "earlier";
 
 function getTimeGroupLabel(g: TimeGroup): string {
   switch (g) {
+    case "pinned":
+      return "置顶";
     case "today":
       return "今天";
     case "yesterday":
@@ -58,13 +60,20 @@ function classifyByTime(convs: Conversation[]): Map<TimeGroup, Conversation[]> {
   const startOfWeek = startOfToday - 6 * 86400000;
 
   const groups = new Map<TimeGroup, Conversation[]>();
+  groups.set("pinned", []);
   groups.set("today", []);
   groups.set("yesterday", []);
   groups.set("thisWeek", []);
   groups.set("earlier", []);
 
   for (const conv of convs) {
-    const ts = new Date(conv.createdAt).getTime();
+    // Pinned conversations go to the "pinned" group only (not duplicated in time groups)
+    if (conv.pinned) {
+      groups.get("pinned")!.push(conv);
+      continue;
+    }
+    // Use updatedAt (not createdAt) for time-based grouping
+    const ts = new Date(conv.updatedAt).getTime();
     if (ts >= startOfToday) {
       groups.get("today")!.push(conv);
     } else if (ts >= startOfYesterday) {

@@ -214,13 +214,7 @@ const RichCard = memo(function RichCard({ card }: { card: RichCardView }) {
       >
         {render
           ? render(card)
-          : process.env.NODE_ENV === "development" && (
-              <div className="rich-card rich-card--unknown">
-                <Text type="warning">
-                  未知卡片类型: {card.type}
-                </Text>
-              </div>
-            )}
+          : <InfoCard title={card.title} data={{ text: `未知卡片类型: ${card.type}` }} />}
       </div>
     </CardErrorBoundary>
   );
@@ -237,9 +231,14 @@ export const RichCardRenderer = memo(function RichCardRenderer({
 
   return (
     <Flex vertical gap={12} className="rich-cards-stack">
-      {cards.map((card) => (
-        <RichCard key={card.id} card={card} />
-      ))}
+      {cards.map((card, index) => {
+        // Fallback key for cards missing id (backward compat with old backend data)
+        const cardKey = card.id || `${card.type}_${index}`;
+        const normalizedCard: RichCardView = card.id
+          ? card
+          : { ...card, id: cardKey };
+        return <RichCard key={cardKey} card={normalizedCard} />;
+      })}
     </Flex>
   );
 });

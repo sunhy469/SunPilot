@@ -42,10 +42,6 @@ export const AGENT_EVENT_TYPES = [
   "agent.model.delta",
   "agent.model.completed",
   "agent.model.failed",
-  // Response
-  "agent.response.started",
-  "agent.response.delta",
-  "agent.response.completed",
   "agent.clarification.requested",
   // Error
   "agent.error",
@@ -281,24 +277,6 @@ export interface AgentModelFailedPayload {
     category?: string;
     retryable?: boolean;
   };
-}
-
-export interface AgentResponseStartedPayload {
-  runId: string;
-  messageId: string;
-}
-
-export interface AgentResponseDeltaPayload {
-  runId: string;
-  conversationId: string;
-  messageId: string;
-  delta: string;
-}
-
-export interface AgentResponseCompletedPayload {
-  runId: string;
-  conversationId: string;
-  messageId: string;
 }
 
 export interface AgentClarificationRequestedPayload {

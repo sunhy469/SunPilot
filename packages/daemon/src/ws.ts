@@ -48,7 +48,7 @@ export function setupDaemonWebSocket(deps: {
   port: number;
   isAllowedOrigin: (origin: string | undefined, port: number) => boolean;
 }) {
-  const wsServer = new WebSocketServer({ noServer: true });
+  const wsServer = new WebSocketServer({ noServer: true, maxPayload: 1024 * 1024 });
   const connectionRegistry = new ConnectionRegistry<WebSocket>(WebSocket.OPEN);
   const jsonRpcRouter = new JsonRpcRouter({
     getChatAgent: deps.getChatAgent,

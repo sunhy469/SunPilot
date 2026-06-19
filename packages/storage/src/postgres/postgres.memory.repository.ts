@@ -130,6 +130,8 @@ export class PostgresMemoryRepository implements MemoryRepository {
     const query = input.query?.trim();
     const hasQuery = Boolean(query);
     const hasEmbedding = Array.isArray(input.embedding) && input.embedding.length > 0;
+    // Escape ILIKE wildcards in query to prevent them from being interpreted as SQL patterns
+    const escapedQuery = query?.replace(/[%_\\]/g, '\\$&');
 
     // ── Scoring ────────────────────────────────────────────────────
     // Hybrid score: keyword (up to 0.45) + semantic (up to 0.45) + quality (0.10)
@@ -149,9 +151,9 @@ export class PostgresMemoryRepository implements MemoryRepository {
       : `0`;
     const keywordSql = hasQuery
       ? `(
-          CASE WHEN title ILIKE '%' || $${queryParamIndex} || '%' THEN 0.20 ELSE 0 END +
-          CASE WHEN summary ILIKE '%' || $${queryParamIndex} || '%' THEN 0.15 ELSE 0 END +
-          CASE WHEN content ILIKE '%' || $${queryParamIndex} || '%' THEN 0.10 ELSE 0 END
+          CASE WHEN title ILIKE '%' || $${queryParamIndex} || '%' ESCAPE '\\' THEN 0.20 ELSE 0 END +
+          CASE WHEN summary ILIKE '%' || $${queryParamIndex} || '%' ESCAPE '\\' THEN 0.15 ELSE 0 END +
+          CASE WHEN content ILIKE '%' || $${queryParamIndex} || '%' ESCAPE '\\' THEN 0.10 ELSE 0 END
         )`
       : `0`;
     // Quality score: importance + confidence + recency decay (§P2-8).
@@ -174,8 +176,8 @@ export class PostgresMemoryRepository implements MemoryRepository {
       params.push(formatVector(input.embedding!));
     }
     if (hasQuery) {
-      params.push(query);
-      queryClause = `${where ? `${where} AND` : "WHERE"} (title ILIKE '%' || $${queryParamIndex} || '%' OR summary ILIKE '%' || $${queryParamIndex} || '%' OR content ILIKE '%' || $${queryParamIndex} || '%' OR key ILIKE '%' || $${queryParamIndex} || '%' OR value::text ILIKE '%' || $${queryParamIndex} || '%')`;
+      params.push(escapedQuery);
+      queryClause = `${where ? `${where} AND` : "WHERE"} (title ILIKE '%' || $${queryParamIndex} || '%' ESCAPE '\\' OR summary ILIKE '%' || $${queryParamIndex} || '%' ESCAPE '\\' OR content ILIKE '%' || $${queryParamIndex} || '%' ESCAPE '\\' OR key ILIKE '%' || $${queryParamIndex} || '%' ESCAPE '\\' OR value::text ILIKE '%' || $${queryParamIndex} || '%' ESCAPE '\\')`;
     }
     // When only embedding (no text query), no ILIKE pre-filter —
     // pure vector recall based on cosine similarity.
@@ -183,10 +185,10 @@ export class PostgresMemoryRepository implements MemoryRepository {
     // ── Relevance (for display/debug) ───────────────────────────────
     const relevanceSql = hasQuery
       ? `(
-          CASE WHEN title ILIKE '%' || $${queryParamIndex} || '%' THEN 1 ELSE 0 END +
-          CASE WHEN summary ILIKE '%' || $${queryParamIndex} || '%' THEN 0.7 ELSE 0 END +
-          CASE WHEN content ILIKE '%' || $${queryParamIndex} || '%' THEN 0.5 ELSE 0 END +
-          CASE WHEN key ILIKE '%' || $${queryParamIndex} || '%' THEN 0.4 ELSE 0 END
+          CASE WHEN title ILIKE '%' || $${queryParamIndex} || '%' ESCAPE '\\' THEN 1 ELSE 0 END +
+          CASE WHEN summary ILIKE '%' || $${queryParamIndex} || '%' ESCAPE '\\' THEN 0.7 ELSE 0 END +
+          CASE WHEN content ILIKE '%' || $${queryParamIndex} || '%' ESCAPE '\\' THEN 0.5 ELSE 0 END +
+          CASE WHEN key ILIKE '%' || $${queryParamIndex} || '%' ESCAPE '\\' THEN 0.4 ELSE 0 END
         )`
       : hasEmbedding
         ? `(1 - (embedding <=> $${embeddingParamIndex}::vector))`
