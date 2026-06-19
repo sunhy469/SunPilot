@@ -29,28 +29,23 @@ describe("JsonRpcRouter", () => {
             calls.push({ input, ctx });
             // Fast ack: return immediately, then deliver events via hooks
             queueMicrotask(() => {
-              hooks?.onEvent?.({
-                id: "evt_delta",
-                type: "agent.response.delta",
-                sequence: 42,
+              hooks?.onDelta?.({
+                type: "agent.message.part.delta",
                 runId: "run_1",
                 conversationId: "conv_1",
-                payload: {
-                  runId: "run_1",
-                  conversationId: "conv_1",
-                  messageId: "msg_1",
-                  delta: "hi",
-                },
-                createdAt: "2026-06-06T00:00:00.000Z",
+                messageId: "msg_1",
+                partId: "part_text_1",
+                delta: "hi",
               });
               hooks?.onEvent?.({
                 id: "evt_started",
-                type: "agent.response.started",
+                type: "agent.message.started",
                 sequence: 41,
                 runId: "run_1",
                 conversationId: "conv_1",
                 payload: {
                   runId: "run_1",
+                  conversationId: "conv_1",
                   messageId: "msg_1",
                 },
                 createdAt: "2026-06-06T00:00:00.000Z",
@@ -100,27 +95,25 @@ describe("JsonRpcRouter", () => {
       },
     ]);
 
-    // Normal agent.* notifications must carry a real DB sequence, never -1.
-    // agent.error is the only transient notification allowed to have sequence: -1.
+    // agent.message.part.delta is a fast delta (sequence: -1).
+    // agent.message.started carries a real DB sequence.
     expect(notifications).toHaveLength(2);
     for (const n of notifications) {
       const notif = n as { method: string; params: { sequence: number; eventId: string } };
       expect(notif.method).toMatch(/^agent\./);
-      expect(notif.params.sequence).toBeGreaterThan(0);
     }
     expect(notifications).toEqual([
       {
         jsonrpc: "2.0",
-        method: "agent.response.delta",
+        method: "agent.message.part.delta",
         params: expect.objectContaining({
-          eventId: "evt_delta",
-          sequence: 42,
-          payload: expect.objectContaining({ delta: "hi" }),
+          sequence: -1,
+          payload: expect.objectContaining({ delta: "hi", partId: "part_text_1" }),
         }),
       },
       {
         jsonrpc: "2.0",
-        method: "agent.response.started",
+        method: "agent.message.started",
         params: expect.objectContaining({
           eventId: "evt_started",
           sequence: 41,

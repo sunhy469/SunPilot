@@ -85,9 +85,6 @@ export { RepositoryApprovalGate } from "./agent-kernel/persistence/repository-ap
 export { RepositoryRunStateManager } from "./agent-kernel/persistence/repository-run-state-manager.js";
 export {
   ResponseComposer,
-  projectToolResult,
-  buildResponseProvenance,
-  TOOL_RESULT_RELIABILITY_RULES,
 } from "./agent-kernel/response/response-composer.js";
 export * from "./agent-kernel/response/response-types.js";
 export { ModelRouter, createSingleModelRouter, createTieredModelRouter } from "./agent-kernel/model-router.js";

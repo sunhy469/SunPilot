@@ -6,6 +6,7 @@ import type {
   UpdateConversationPatch,
 } from "../repositories/conversation.repository.js";
 import type { PostgresPool } from "./postgres.client.js";
+import { withPostgresTransaction } from "./postgres.transaction.js";
 
 export class PostgresConversationRepository implements ConversationRepository {
   constructor(private readonly pool: PostgresPool) {}
@@ -95,9 +96,7 @@ export class PostgresConversationRepository implements ConversationRepository {
   }
 
   async delete(id: string): Promise<boolean> {
-    const client = await this.pool.connect();
-    try {
-      await client.query("BEGIN");
+    return withPostgresTransaction(this.pool, async (client) => {
       // Clean up related data that doesn't have ON DELETE CASCADE
       await client.query("DELETE FROM agent_traces WHERE conversation_id = $1", [id]);
       await client.query("DELETE FROM events WHERE conversation_id = $1", [id]);
@@ -107,14 +106,8 @@ export class PostgresConversationRepository implements ConversationRepository {
         "DELETE FROM conversations WHERE id = $1",
         [id],
       );
-      await client.query("COMMIT");
       return (result.rowCount ?? 0) > 0;
-    } catch (error) {
-      await client.query("ROLLBACK");
-      throw error;
-    } finally {
-      client.release();
-    }
+    });
   }
 }
 

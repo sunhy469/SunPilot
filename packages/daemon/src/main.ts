@@ -11,9 +11,15 @@ if (!args.has("--foreground")) {
   console.log(`SunPilot daemon running at http://127.0.0.1:${port}`);
 }
 
+let shuttingDown = false;
 const shutdown = async () => {
-  await daemon.stop();
-  process.exit(0);
+  if (shuttingDown) return;
+  shuttingDown = true;
+  try {
+    await daemon.stop();
+  } finally {
+    process.exit(0);
+  }
 };
 
 process.on("SIGINT", shutdown);

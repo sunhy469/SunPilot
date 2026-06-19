@@ -34,8 +34,10 @@ describe("daemon Agent WebSocket integration", () => {
             createdAt: "2026-06-06T00:00:00.000Z",
           });
           hooks?.onDelta?.({
+            type: "agent.message.part.delta",
             conversationId: input.conversationId ?? "conv_integration",
             messageId: "msg_integration",
+            partId: "part_text_1",
             delta: "hello integration",
           });
           return {
@@ -60,8 +62,10 @@ describe("daemon Agent WebSocket integration", () => {
             createdAt: "2026-06-06T00:00:00.000Z",
           });
           hooks?.onDelta?.({
+            type: "agent.message.part.delta",
             conversationId: input.conversationId ?? "conv_integration",
             messageId: "msg_integration",
+            partId: "part_text_1",
             delta: "hello integration",
           });
           return {
@@ -146,9 +150,9 @@ describe("daemon Agent WebSocket integration", () => {
           }),
         }),
         expect.objectContaining({
-          method: "agent.response.delta",
+          method: "agent.message.part.delta",
           params: expect.objectContaining({
-            payload: expect.objectContaining({ delta: "hello integration" }),
+            payload: expect.objectContaining({ delta: "hello integration", partId: "part_text_1" }),
           }),
         }),
         expect.objectContaining({

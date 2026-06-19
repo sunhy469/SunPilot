@@ -1,4 +1,5 @@
 import { createReadStream, existsSync, statSync } from "node:fs";
+import { resolve, sep } from "node:path";
 import type { FastifyInstance } from "fastify";
 import { ZodError } from "zod";
 import {
@@ -251,6 +252,15 @@ export function registerSunPilotApiRoutes(
     async (request, reply) => {
       const body = updateConversationBodySchema.parse(request.body ?? {});
       const updated = await database.conversations.update(request.params.id, body);
+      if (!updated) return reply.code(404).send({ error: "not_found" });
+      return updated;
+    },
+  );
+  app.post<{ Params: { id: string } }>(
+    "/v1/conversations/:id/touch",
+    async (request, reply) => {
+      await database.conversations.touch(request.params.id);
+      const updated = await database.conversations.findById(request.params.id);
       if (!updated) return reply.code(404).send({ error: "not_found" });
       return updated;
     },
@@ -624,12 +634,18 @@ export function registerSunPilotApiRoutes(
         request.params.id,
       ) as ArtifactRecord | null;
       if (!artifact) return reply.code(404).send({ error: "not_found" });
-      if (!existsSync(artifact.path) || !statSync(artifact.path).isFile()) {
+      // Prevent path traversal: artifact.path must be within the artifacts directory
+      const artifactsDir = resolve(deps.paths.artifacts);
+      const resolvedPath = resolve(artifact.path);
+      if (!resolvedPath.startsWith(artifactsDir + sep) && resolvedPath !== artifactsDir) {
+        return reply.code(403).send({ error: "path_not_allowed" });
+      }
+      if (!existsSync(resolvedPath) || !statSync(resolvedPath).isFile()) {
         return reply.code(404).send({ error: "artifact_content_missing" });
       }
       return reply
         .type(artifact.mimeType ?? "application/octet-stream")
-        .send(createReadStream(artifact.path));
+        .send(createReadStream(resolvedPath));
     },
   );
 

@@ -542,6 +542,7 @@ export class AgentLoopEngine {
             plan,
             messageId,
             modelId: input.modelId,
+            permissionMode: input.permissionMode,
             stream,
           },
           signal,
@@ -569,10 +570,12 @@ export class AgentLoopEngine {
         assistantMessageId = messageId;
       }
 
-      // §Write memories — pass observation + forceSummary when available
-      // (matching old executeToolDecision path for memory quality)
+      // Complete the stream (saves message, emits completion events)
+      const completed = await stream.complete();
+
+      // §Write memories — non-blocking, don't let it delay message completion
       const tokenRatio = context.limits.usedTokensEstimate / Math.max(1, context.limits.maxTokens);
-      await this.writeMemories({
+      this.writeMemories({
         input,
         context,
         intent,
@@ -582,10 +585,19 @@ export class AgentLoopEngine {
           ? { runId, toolCalls, artifacts, summary: toolCalls.map((t) => t.summary).join("\n") }
           : undefined,
         forceSummary: tokenRatio > 0.4 || toolCalls.length >= 15,
+      }).catch((err) => {
+        this.deps.eventBus.emit(
+          "agent.error",
+          {
+            runId,
+            code: "AGENT_MEMORY_WRITE_FAILED",
+            message: `Memory write failed (non-blocking): ${err instanceof Error ? err.message : String(err)}`,
+            category: "memory",
+            retryable: true,
+          },
+          { runId, conversationId },
+        );
       });
-
-      // Complete the stream (saves message, emits completion events)
-      const completed = await stream.complete();
 
       // Mark run as completed
       await this.deps.runStateManager.markStatus(runId, "responding");
@@ -1183,72 +1195,14 @@ export class AgentLoopEngine {
         };
       }
 
-      // Fallback: old path
-      const skippedObservation: AgentObservation = {
-        runId: input.runId,
-        toolCalls: input.rejectedToolCallId
-          ? [
-              {
-                id: input.rejectedToolCallId,
-                skillId: "rejected",
-                name: "Rejected tool",
-                status: "failed",
-                summary:
-                  "Tool execution was rejected by user. Continue without this tool.",
-              },
-            ]
-          : [],
-        artifacts: [],
-        summary: "Tool rejected — continuing without tool execution.",
-      };
-
-      const intent: RoutedIntent = {
-        type: "use_skill",
-        confidence: 0.5,
-        requiresPlanning: false,
-        requiresTool: false,
-        requiresApproval: false,
-        riskLevel: "low",
-        candidateSkills: [],
-        reason: "continue_without_tool after rejection",
-      };
-
-      const reflection = await this.deps.reflectionEngine.reflect(
-        { context, intent, observation: skippedObservation },
-        signal,
+      // saveMessage is required for content-block streaming — no fallback allowed
+      throw Object.assign(
+        new Error(
+          "AGENT_STREAM_SAVE_MESSAGE_REQUIRED: continueAfterRejection requires saveMessage for content-block streaming. " +
+          "The legacy composeFromObservation fallback has been removed.",
+        ),
+        { code: "AGENT_STREAM_SAVE_MESSAGE_REQUIRED", category: "run_state" },
       );
-
-      await this.deps.runStateManager.markStatus(input.runId, "responding");
-      const response = await this.deps.responseComposer.composeFromObservation(
-        {
-          input: agentInput,
-          context,
-          observation: skippedObservation,
-          reflection,
-        },
-        signal,
-      );
-
-      await this.deps.runStateManager.markStatus(input.runId, "completed");
-      this.deps.eventBus.emit(
-        "agent.run.completed",
-        {
-          runId: input.runId,
-          assistantMessageId: response.messageId,
-          artifacts: [],
-          toolCalls: 0,
-        },
-        { runId: input.runId, conversationId: input.conversationId },
-      );
-
-      return {
-        runId: input.runId,
-        conversationId: input.conversationId,
-        assistantMessageId: response.messageId,
-        status: "completed",
-        artifacts: [],
-        toolCalls: [],
-      };
     } catch (error) {
       if (signal.aborted) {
         await this.deps.runStateManager.markCancelled(input.runId, "aborted");

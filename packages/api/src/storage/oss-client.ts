@@ -110,7 +110,7 @@ export class OssClient {
   async delete(key: string): Promise<void> {
     const host = `${this.config.bucket}.${this.config.endpoint}`;
     const date = new Date().toUTCString();
-    const signature = this.signRequest("DELETE", key);
+    const signature = this.signRequest("DELETE", key, undefined, date);
 
     const response = await fetch(`https://${host}/${key}`, {
       method: "DELETE",
@@ -136,13 +136,14 @@ export class OssClient {
     verb: string,
     key: string,
     contentType?: string,
+    date?: string,
   ): string {
     const { bucket, accessKeySecret } = this.config;
-    const date = new Date().toUTCString();
+    const requestDate = date ?? new Date().toUTCString();
     const contentMd5 = "";
     const resource = `/${bucket}/${key}`;
 
-    const stringToSign = [verb, contentMd5, contentType ?? "", date, resource].join("\n");
+    const stringToSign = [verb, contentMd5, contentType ?? "", requestDate, resource].join("\n");
 
     return createHmac("sha1", accessKeySecret)
       .update(stringToSign)

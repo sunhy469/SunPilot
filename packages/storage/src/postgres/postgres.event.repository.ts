@@ -27,6 +27,9 @@ export class PostgresEventRepository implements EventRepository {
        FROM events WHERE id = $1`,
       [event.id],
     );
+    if (!existing.rows[0]) {
+      throw new Error(`Event ${event.id} not found after ON CONFLICT`);
+    }
     return mapEvent(existing.rows[0]);
   }
 
