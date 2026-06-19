@@ -85,13 +85,22 @@ export class RepositoryTraceManager {
     const endSpan = (summary: string, metrics: SpanMetrics = {}, error?: string): Span => {
       const span = originalEnd(summary, metrics, error);
 
-      // Merge modelCallIds into span metadata for trace-to-model-call linking (§P1-5)
-      if (metrics.modelCallIds && metrics.modelCallIds.length > 0) {
-        span.metadata = {
-          ...(span.metadata ?? {}),
-          modelCallIds: metrics.modelCallIds,
-        };
-      }
+      // Merge modelCallIds and sub-phase timing into span metadata
+      // for DB persistence (§P0-3). The metadata JSONB column carries
+      // phase-level timing so the frontend debug panel can display
+      // per-phase latency breakdown.
+      span.metadata = {
+        ...(span.metadata ?? {}),
+        ...(metrics.modelCallIds ? { modelCallIds: metrics.modelCallIds } : {}),
+        // §P0-3: Sub-phase timing for debug panel
+        ...(metrics.contextGroupAMs !== undefined ? { contextGroupAMs: metrics.contextGroupAMs } : {}),
+        ...(metrics.memorySearchMs !== undefined ? { memorySearchMs: metrics.memorySearchMs } : {}),
+        ...(metrics.intentRouteMs !== undefined ? { intentRouteMs: metrics.intentRouteMs } : {}),
+        ...(metrics.toolRetrievalMs !== undefined ? { toolRetrievalMs: metrics.toolRetrievalMs } : {}),
+        ...(metrics.firstTokenMs !== undefined ? { firstTokenMs: metrics.firstTokenMs } : {}),
+        ...(metrics.toolExecutionMs !== undefined ? { toolExecutionMs: metrics.toolExecutionMs } : {}),
+        ...(metrics.finalTokenMs !== undefined ? { finalTokenMs: metrics.finalTokenMs } : {}),
+      };
 
       // Update span in DB with completed data
       this.traceRepo

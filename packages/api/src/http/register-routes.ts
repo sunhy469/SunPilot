@@ -434,6 +434,14 @@ export function registerSunPilotApiRoutes(
             toolFailures: s.toolFailures,
             modelCallsCount: s.modelCallsCount,
             error: s.error,
+            // §P0-3: Sub-phase timing metrics from span metadata JSONB
+            contextGroupAMs: (s.metadata as Record<string, unknown>)?.contextGroupAMs,
+            memorySearchMs: (s.metadata as Record<string, unknown>)?.memorySearchMs,
+            intentRouteMs: (s.metadata as Record<string, unknown>)?.intentRouteMs,
+            toolRetrievalMs: (s.metadata as Record<string, unknown>)?.toolRetrievalMs,
+            firstTokenMs: (s.metadata as Record<string, unknown>)?.firstTokenMs,
+            toolExecutionMs: (s.metadata as Record<string, unknown>)?.toolExecutionMs,
+            finalTokenMs: (s.metadata as Record<string, unknown>)?.finalTokenMs,
           }));
         }
       }

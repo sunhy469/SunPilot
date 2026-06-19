@@ -95,7 +95,9 @@ export class SkillToolExecutor implements ToolExecutor {
       return {
         status: "completed",
         summary: summarizeOutput(output),
-        content: typeof output === "string" ? output : undefined,
+        // §P0-2: Capture full content for all output types so the model
+        // receives the actual tool output, not just a terse summary.
+        content: captureContent(output),
         structured: extractStructured(output),
         artifacts,
       };
@@ -157,6 +159,35 @@ function resolveCapability(
       (item) => item.name === capabilityName,
     );
     if (capability) return { skill, capability };
+  }
+  return undefined;
+}
+
+/**
+ * §P0-2: Capture the full content of tool output for model observation.
+ * Unlike summarizeOutput which produces a short human-readable summary,
+ * this preserves the complete output so the model can use it directly
+ * (e.g., a generated script, search results, or structured data).
+ */
+function captureContent(output: unknown): string | undefined {
+  if (typeof output === "string") return output;
+  if (output === undefined || output === null) return undefined;
+  if (typeof output === "object") {
+    const record = output as Record<string, unknown>;
+    // For objects with a content/script/markdown field, use that as the main content
+    if (typeof record.script === "string") return record.script;
+    if (typeof record.markdown === "string") return record.markdown;
+    if (typeof record.content === "string") return record.content;
+    if (typeof record.finalText === "string") return record.finalText;
+    if (typeof record.text === "string") return record.text;
+    if (typeof record.message === "string") return record.message;
+    // For small objects, stringify the whole thing
+    try {
+      const str = JSON.stringify(output);
+      return str.length < 4000 ? str : str.slice(0, 4000);
+    } catch {
+      return undefined;
+    }
   }
   return undefined;
 }

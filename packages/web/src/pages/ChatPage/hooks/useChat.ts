@@ -62,7 +62,9 @@ export interface AgentArtifactSelection {
   content: string;
 }
 
-function parseSocketPayload(data: string): ChatSocketPayload | JsonRpcResponse | undefined {
+function parseSocketPayload(
+  data: string,
+): ChatSocketPayload | JsonRpcResponse | undefined {
   const payload = JSON.parse(data) as
     | Partial<ChatSocketPayload>
     | Partial<JsonRpcResponse>
@@ -70,7 +72,12 @@ function parseSocketPayload(data: string): ChatSocketPayload | JsonRpcResponse |
   if (!payload || typeof payload !== "object") return undefined;
 
   // JSON-RPC response (chat.send ack, etc.)
-  if ("jsonrpc" in payload && payload.jsonrpc === "2.0" && "id" in payload && !("method" in payload)) {
+  if (
+    "jsonrpc" in payload &&
+    payload.jsonrpc === "2.0" &&
+    "id" in payload &&
+    !("method" in payload)
+  ) {
     return payload as JsonRpcResponse;
   }
 
@@ -190,10 +197,13 @@ function assistantMessageReducer(
     // Find the best pending placeholder to bind:
     // 1. Prefer the last assistant with conversationId === "pending"
     // 2. Then the last assistant with matching conversationId that is still pending
-    const pendingPlaceholderIdx = findLastIndex(items, (m) =>
-      m.role === "assistant" &&
-      m.status === "pending" &&
-      (m.conversationId === "pending" || m.conversationId === (msgParams.conversationId || conversationId)),
+    const pendingPlaceholderIdx = findLastIndex(
+      items,
+      (m) =>
+        m.role === "assistant" &&
+        m.status === "pending" &&
+        (m.conversationId === "pending" ||
+          m.conversationId === (msgParams.conversationId || conversationId)),
     );
 
     if (pendingPlaceholderIdx >= 0) {
@@ -238,12 +248,14 @@ function assistantMessageReducer(
       if (item.id !== partParams.messageId) return item;
       const parts = item.parts ?? [];
       // Upsert by part.id: if part already exists, merge; otherwise append
-      const existingIdx = partId != null
-        ? parts.findIndex((p) => p.id === partId)
-        : -1;
-      const nextParts = existingIdx >= 0
-        ? parts.map((p, i) => i === existingIdx ? { ...p, ...incomingPart } : p)
-        : [...parts, incomingPart];
+      const existingIdx =
+        partId != null ? parts.findIndex((p) => p.id === partId) : -1;
+      const nextParts =
+        existingIdx >= 0
+          ? parts.map((p, i) =>
+              i === existingIdx ? { ...p, ...incomingPart } : p,
+            )
+          : [...parts, incomingPart];
       return { ...item, parts: nextParts };
     });
   }
@@ -302,15 +314,23 @@ function assistantMessageReducer(
       messageId: string;
       content: string;
       parts: Array<Record<string, unknown>>;
-      cards?: Array<{ type: string; title?: string; data: Record<string, unknown> }>;
+      cards?: Array<{
+        type: string;
+        title?: string;
+        data: Record<string, unknown>;
+      }>;
     };
+    const completedParts = normalizeCompletedAssistantParts(
+      completedParams.parts,
+    );
 
     // Idempotent: if message already completed with same content, skip to avoid re-render
     const existing = items.find((m) => m.id === completedParams.messageId);
     if (
       existing &&
       existing.status === "completed" &&
-      existing.content === completedParams.content
+      existing.content === completedParams.content &&
+      !hasOpenAssistantParts(existing.parts)
     ) {
       return items;
     }
@@ -328,7 +348,7 @@ function assistantMessageReducer(
           ? {
               ...m,
               content: completedParams.content,
-              parts: completedParams.parts as unknown as ChatMessage["parts"],
+              parts: completedParts,
               status: "completed" as const,
               cards: (completedParams.cards as ChatMessage["cards"]) ?? m.cards,
             }
@@ -347,7 +367,7 @@ function assistantMessageReducer(
         createdAt: new Date().toISOString(),
         status: "completed" as const,
         activities: [],
-        parts: completedParams.parts as unknown as ChatMessage["parts"],
+        parts: completedParts,
         cards: completedParams.cards as ChatMessage["cards"],
       },
     ];
@@ -362,6 +382,58 @@ function findLastIndex<T>(arr: T[], predicate: (item: T) => boolean): number {
     if (predicate(arr[i]!)) return i;
   }
   return -1;
+}
+
+function hasOpenAssistantParts(parts?: ChatMessage["parts"]): boolean {
+  return (parts ?? []).some((part) => {
+    if (part.type === "status") return part.status === "running";
+    if (part.type === "tool_use")
+      return part.status === "pending" || part.status === "running";
+    if (part.type === "text") return part.status === "streaming";
+    return false;
+  });
+}
+
+function normalizeCompletedAssistantParts(
+  parts: Array<Record<string, unknown>>,
+): ChatMessage["parts"] {
+  const completedAt = new Date().toISOString();
+  return parts.map((part) => {
+    if (part.type === "status" && part.status === "running") {
+      const metadata =
+        part.metadata && typeof part.metadata === "object"
+          ? (part.metadata as Record<string, unknown>)
+          : {};
+      return {
+        ...part,
+        status: "completed",
+        completedAt:
+          typeof part.completedAt === "string" ? part.completedAt : completedAt,
+        metadata: {
+          ...metadata,
+          phase: "completed",
+        },
+      } as unknown as AssistantMessagePart;
+    }
+    if (
+      part.type === "tool_use" &&
+      (part.status === "pending" || part.status === "running")
+    ) {
+      return {
+        ...part,
+        status: "completed",
+      } as unknown as AssistantMessagePart;
+    }
+    if (part.type === "text" && part.status === "streaming") {
+      return {
+        ...part,
+        status: "completed",
+        completedAt:
+          typeof part.completedAt === "string" ? part.completedAt : completedAt,
+      } as unknown as AssistantMessagePart;
+    }
+    return part as unknown as AssistantMessagePart;
+  });
 }
 
 function findActiveAssistantMessageIndex(messages: ChatMessage[]): number {
@@ -839,7 +911,11 @@ export function useChat(
       // ── JSON-RPC response (chat.send ack) ─────────────────────
       // When the server acknowledges chat.send, bind the local optimistic
       // user message to the server-confirmed messageId and conversationId.
-      if ("result" in payload && payload.result && "messageId" in payload.result) {
+      if (
+        "result" in payload &&
+        payload.result &&
+        "messageId" in payload.result
+      ) {
         const ack = payload.result as ChatSendAckResult;
         const rpcId = (payload as JsonRpcResponse).id;
         const clientRequestId = pendingAcksRef.current.get(rpcId);
@@ -856,7 +932,8 @@ export function useChat(
                 item.role === "user" &&
                 (matchClientRequestId
                   ? item.clientRequestId === matchClientRequestId
-                  : item.id.startsWith("local_") && item.conversationId === "pending")
+                  : item.id.startsWith("local_") &&
+                    item.conversationId === "pending")
               ) {
                 return {
                   ...item,
@@ -1139,7 +1216,10 @@ export function useChat(
       modelId?: "dp" | "seed",
     ) => {
       const text = message.trim();
-      if ((!text && (!attachments || attachments.length === 0)) || pendingRef.current)
+      if (
+        (!text && (!attachments || attachments.length === 0)) ||
+        pendingRef.current
+      )
         return;
 
       // §5.2: Final gate — validate AttachmentRef[] (not just UploadFile[] UI state).

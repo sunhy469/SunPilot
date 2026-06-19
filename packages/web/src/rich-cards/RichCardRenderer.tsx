@@ -1,5 +1,5 @@
 import { Component, memo, type ComponentType, type ReactNode } from "react";
-import { Flex, Typography } from "antd";
+import { Flex, Typography, Alert, Card } from "antd";
 import type {
   RichCardType,
   RichCardView,
@@ -67,9 +67,9 @@ class CardErrorBoundary extends Component<
   render() {
     if (this.state.hasError) {
       return (
-        <div className="rich-card rich-card--error-fallback">
-          <Text type="danger">卡片渲染失败</Text>
-        </div>
+        <Card size="small">
+          <Alert type="error" showIcon message="卡片渲染失败" />
+        </Card>
       );
     }
     return this.props.children;

@@ -36,6 +36,17 @@ export interface SpanMetrics {
   modelCallIds?: string[];
   retryCount?: number;
   errorCode?: string;
+  // ── Phase latency metrics (§P0-3) ───────────────────────────────
+  /** Total milliseconds for this span (duration). */
+  latencyMs?: number;
+  /** Sub-phase timings for detailed observability (§P0-3). */
+  contextGroupAMs?: number;
+  memorySearchMs?: number;
+  intentRouteMs?: number;
+  toolRetrievalMs?: number;
+  firstTokenMs?: number;
+  toolExecutionMs?: number;
+  finalTokenMs?: number;
   // ── Tool selection trace metadata (§P2) ─────────────────────────
   /** Embedding mode: "real" | "lexical_fallback" | "none". */
   embeddingMode?: string;
@@ -246,6 +257,10 @@ export class TraceManager {
     if (!trace) return undefined;
 
     trace.endedAt = new Date().toISOString();
+    // §P0-3: Record the real total turn duration (startTrace → endTrace),
+    // not just the max span duration. This is the authoritative total_turn_ms.
+    trace.aggregate.totalDurationMs =
+      Date.now() - new Date(trace.startedAt).getTime();
     this.activeTraces.delete(runId);
     this.completedTraces.push(trace);
 

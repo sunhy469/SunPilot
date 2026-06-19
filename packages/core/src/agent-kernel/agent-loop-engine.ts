@@ -23,6 +23,7 @@ import type {
   ResponseComposer,
   ToolDecisionEngine,
   SaveMessageFn,
+  PreliminaryInferenceResult,
 } from "./loop-types.js";
 import type { RunStateManager } from "./run-state-manager.js";
 import type { MemoryWriter } from "./memory/memory-types.js";
@@ -67,6 +68,10 @@ export interface AgentLoopEngineDeps {
   replanner?: Replanner;
   /** Optional — routes LLM calls to different models by purpose (§3). */
   modelRouter?: ModelRouter;
+  /** Optional — enables LLM pre-inference parallel with context building.
+   *  Default: false. When true, a lightweight LLM call runs concurrently
+   *  with context building to extract tool-matching hints. */
+  enablePreliminaryInference?: boolean;
   /** Optional — creates trace/spans for observability (§7, §P0-2). */
   traceManager?: TraceManager | RepositoryTraceManager;
   /** Optional — detects prompt injection in untrusted content (§5). */
@@ -191,24 +196,95 @@ export class AgentLoopEngine {
       this.deps.traceManager.startTrace(input.runId, input.conversationId);
     }
 
+    // §P0-3: Track total turn latency for trace observability
+    const turnStartTime = Date.now();
+
     const messageId = `msg_${crypto.randomUUID()}`;
+
+    // §P1-1: Create the stream EARLY (before context building) and emit
+    // a progress status so the user immediately sees activity instead of
+    // a blank assistant card. The stream is passed through to
+    // runContentBlockLoop() which adds actual content parts.
+    // Pre-inference text never enters this stream — it's handled separately.
+    const stream = this.deps.saveMessage
+      ? new AssistantMessageStream({
+          runId: input.runId,
+          conversationId: input.conversationId,
+          messageId,
+          eventBus: this.deps.eventBus,
+          saveMessage: this.deps.saveMessage,
+          skipStartedEvents: true,
+        })
+      : undefined;
 
     // §Codex flow: Emit message.started early so the frontend creates
     // the assistant message card immediately, before context/plan/decision.
-    // The model starts producing text once the content-block loop begins.
-    // (stream.start() inside runContentBlockLoop will handle the rest.)
-    if (this.deps.saveMessage) {
+    // §P1-1: Track status part for granular progress updates through pipeline.
+    let progressStatusId: string | undefined;
+    if (stream) {
       this.deps.eventBus.emit("agent.message.started",
         { runId: input.runId, conversationId: input.conversationId, messageId },
         { runId: input.runId, conversationId: input.conversationId });
+      stream.start();
+      progressStatusId = stream.startStatus({
+        label: "正在理解需求...",
+        metadata: { phase: "running" },
+      }).id;
     }
 
     try {
-      const { context, intent } = await this.buildContextAndIntent(
-        input,
-        signal,
-      );
+      // §Parallel optimization: Optionally launch LLM pre-inference
+      // concurrently with context building. Pre-inference uses only the
+      // user message + system prompt (no context) and does NOT write to
+      // the formal AssistantMessageStream — it only collects text and
+      // tool hints.
+      const preliminaryPromise = this.deps.enablePreliminaryInference && this.deps.modelRouter
+        ? this.runPreliminaryInference(input, signal)
+        : Promise.resolve(undefined as PreliminaryInferenceResult | undefined);
+
+      const contextPromise = this.buildContextAndIntent(input, signal);
+
+      // Wait for context building first — this is the critical path.
+      const { context, intent } = await contextPromise;
+
+      // §P1-1: Update progress status — context is ready, now showing intent
+      if (stream && progressStatusId) {
+        const intentLabel = intentLabelForStatus(intent);
+        stream.updateStatus(progressStatusId, {
+          label: intentLabel,
+          status: "completed",
+        });
+      }
+
+      // Get pre-inference result with a short timeout so it never blocks
+      // the main path. If pre-inference is slower than context building,
+      // we don't wait for it beyond a small grace period.
+      const preliminary = preliminaryPromise
+        ? await Promise.race([
+            preliminaryPromise,
+            new Promise<undefined>((resolve) =>
+              setTimeout(() => resolve(undefined), 300),
+            ),
+          ])
+        : undefined;
+
+      // §P1-1: Update progress status when entering planning
+      if (intent.requiresPlanning && stream) {
+        progressStatusId = stream.startStatus({
+          label: "正在制定执行计划...",
+          metadata: { phase: "running" },
+        }).id;
+      }
+
       const plan = await this.maybeCreatePlan(input, context, intent, signal);
+
+      // §P1-1: Update progress status — planning complete (or skipped)
+      if (stream && progressStatusId && intent.requiresPlanning) {
+        stream.updateStatus(progressStatusId, {
+          label: plan ? "计划已制定，正在匹配工具..." : "正在匹配可用工具...",
+          status: plan ? "completed" : "running",
+        });
+      }
 
       // Validate plan structure before tool decision (§P0-2)
       if (plan && this.deps.planValidator) {
@@ -231,16 +307,45 @@ export class AgentLoopEngine {
         }
       }
 
+      // §P1-1: Update progress status before tool decision
+      if (stream && progressStatusId && !intent.requiresPlanning) {
+        stream.updateStatus(progressStatusId, {
+          label: "正在匹配可用工具...",
+          status: "running",
+        });
+      }
+
       // §Codex flow: decideTools() is now a SAFETY GATE only.
       // It detects ask_clarification and require_approval cases.
       // For use_tool and no_tool, the MODEL decides via native
       // function calling in the content-block loop.
-      const decision = await this.decideTools(input, context, intent, plan, signal);
+      // Pre-inference tool hints are injected as prioritySkills.
+      const decision = await this.decideTools(
+        input, context, intent, plan, signal,
+        undefined,  // previousObservation
+        preliminary?.toolHints,  // prioritySkills from pre-inference
+      );
+
+      // §P1-1: Update progress status after tool decision
+      if (stream && progressStatusId) {
+        const decisionLabel = decision.type === "use_tool"
+          ? `匹配到 ${decision.toolCalls.length} 个工具，准备执行...`
+          : decision.type === "no_tool"
+            ? "正在生成回答..."
+            : undefined;
+        if (decisionLabel) {
+          stream.updateStatus(progressStatusId, {
+            label: decisionLabel,
+            status: "completed",
+          });
+        }
+      }
 
       switch (decision.type) {
         case "use_tool":
         case "no_tool":
-          return this.runContentBlockLoop(input, context, intent, plan, decision, messageId, signal);
+          // §P1-1: Pass pre-created stream for early progress status
+          return this.runContentBlockLoop(input, context, intent, plan, decision, messageId, signal, stream);
         case "ask_clarification":
           return this.handleClarification(input, decision, signal);
         case "require_approval":
@@ -261,6 +366,120 @@ export class AgentLoopEngine {
   }
 
   // ── Phase methods ──────────────────────────────────────────────────
+
+  /**
+   * §Parallel optimization: Run a lightweight LLM pre-inference using
+   * only the user message + system prompt (no context). This produces
+   * tool-matching hints that can accelerate downstream routing.
+   *
+   * IMPORTANT: This method does NOT write to the formal
+   * AssistantMessageStream. Pre-inference text is collected internally
+   * and only used for tool hint extraction. The formal stream is created
+   * later in runContentBlockLoop(), ensuring clean message persistence
+   * and avoiding history pollution.
+   *
+   * Best-effort: failure does not affect the main flow.
+   */
+  private async runPreliminaryInference(
+    input: AgentLoopInput,
+    signal: AbortSignal,
+  ): Promise<PreliminaryInferenceResult | undefined> {
+    const t0 = Date.now();
+    try {
+      const messages = [
+        { role: "system" as const, content: this.buildPreliminarySystemPrompt() },
+        { role: "user" as const, content: input.message },
+      ];
+
+      // Collect pre-inference text without writing to the formal stream.
+      // The text is only used for tool hint extraction.
+      let fullText = "";
+      const modelRouter = this.deps.modelRouter!;
+      for await (const chunk of modelRouter.streamChat("intent_classification", { messages }, signal)) {
+        if (signal.aborted) break;
+        fullText += chunk.delta;
+      }
+
+      // Extract tool hints from the pre-inference text
+      const toolHints = this.extractToolHints(fullText, input);
+
+      // Record trace metadata for observability
+      if (this.deps.traceManager) {
+        const { endSpan } = this.deps.traceManager.startSpan(input.runId, "intent_routing");
+        endSpan("preliminary_inference_completed", {
+          modelCalls: 1,
+        });
+      }
+
+      return { text: fullText, toolHints };
+    } catch (error) {
+      // Pre-inference is best-effort — never block the main flow.
+      // Record failure in trace for observability.
+      if (this.deps.traceManager) {
+        const { endSpan } = this.deps.traceManager.startSpan(input.runId, "intent_routing");
+        endSpan("preliminary_inference_failed", {}, error instanceof Error ? error.message : String(error));
+      }
+      return undefined;
+    }
+  }
+
+  /** Build a minimal system prompt for the pre-inference LLM call.
+   *  §P2: Changed from natural language acknowledgment to structured JSON
+   *  hint — avoids generating useless text and produces parseable tool hints. */
+  private buildPreliminarySystemPrompt(): string {
+    return `You are SunPilot's internal router. Analyze the user message and respond with ONLY a JSON object containing routing hints. Do NOT produce natural language.
+
+Output format:
+{"intentCategory": "product_search"|"image_analysis"|"casual_chat"|"data_analysis"|"web_search"|"file_operation"|"unknown", "toolHints": [{"category": "product sourcing|image analysis|camera|data|web", "confidence": 0.0-1.0}], "isSimpleChat": true|false}
+
+Rules:
+- "intentCategory": best-guess category of the user's request
+- "toolHints": up to 3 relevant tool categories with confidence scores
+- "isSimpleChat": true if this is clearly just conversation (greetings, thanks, small talk)
+
+Keep your response to the JSON object ONLY — no preamble, no explanation.`;
+  }
+
+  /** Extract tool-matching hints from the pre-inference text.
+   *  §P2: Parses the structured JSON response from pre-inference prompt.
+   *  Falls back to empty hints if JSON parsing fails. */
+  private extractToolHints(
+    preText: string,
+    _input: AgentLoopInput,
+  ): PreliminaryInferenceResult["toolHints"] {
+    try {
+      // Try to extract JSON from the response (may have markdown wrapping)
+      const jsonMatch = preText.match(/\{[\s\S]*\}/);
+      if (!jsonMatch) return undefined;
+      const parsed = JSON.parse(jsonMatch[0]) as {
+        intentCategory?: string;
+        toolHints?: Array<{ category: string; confidence: number }>;
+        isSimpleChat?: boolean;
+      };
+      if (!parsed.toolHints || parsed.toolHints.length === 0) return undefined;
+      // Map categories to skill IDs based on known patterns
+      const categoryToSkillMap: Record<string, string[]> = {
+        "product sourcing": ["jaderoad:product.source.search1688"],
+        "image analysis": ["image.analyze"],
+        "data analysis": ["data.analyze"],
+        "web search": ["web.search"],
+        "file operation": ["filesystem.read", "filesystem.write"],
+      };
+      const hints = parsed.toolHints
+        .filter((h) => h.confidence >= 0.5)
+        .flatMap((h) => {
+          const skillIds = categoryToSkillMap[h.category.toLowerCase()] ?? [];
+          return skillIds.map((skillId) => ({
+            skillId,
+            reason: `Pre-inference JSON hint: ${h.category} (confidence: ${h.confidence})`,
+          }));
+        })
+        .slice(0, 5);
+      return hints.length > 0 ? hints : undefined;
+    } catch {
+      return undefined;
+    }
+  }
 
   /** 阶段 1+2：上下文构建 + 意图路由。 */
   private async buildContextAndIntent(
@@ -311,6 +530,10 @@ export class AgentLoopEngine {
       {
         tokenInput: context.tokenEstimate,
         toolCalls: context.toolResults.length,
+        // §P0-3: Phase latency metrics for observability
+        latencyMs: Date.now() - ctxStart,
+        contextGroupAMs: context.timing?.groupAParallelMs,
+        memorySearchMs: context.timing?.memorySearchMs,
       },
     );
 
@@ -322,6 +545,7 @@ export class AgentLoopEngine {
     );
 
     await this.deps.runStateManager.markStatus(runId, "intent_routing");
+    const intentStart = Date.now();
     let intent: RoutedIntent;
     try {
       intent = await this.deps.intentRouter.route(context, signal);
@@ -348,6 +572,8 @@ export class AgentLoopEngine {
       `Intent: ${intent.type} (confidence: ${intent.confidence})`,
       {
         toolCalls: intent.candidateSkills?.length,
+        // §P0-3: Phase latency metrics for observability
+        intentRouteMs: Date.now() - intentStart,
         // Trace metadata for debugging tool selection (§P2):
         // embedding mode, top similarity score, form-match flag
         embeddingMode: intent.trace?.embeddingMode,
@@ -497,6 +723,11 @@ export class AgentLoopEngine {
     decision: ToolDecision,
     messageId: string,
     signal: AbortSignal,
+    /** §P1-1: Pre-created stream from run() for early progress status.
+     *  When provided, status/thinking parts are already on the stream and
+     *  content blocks are appended here. When absent, a new stream is
+     *  created (backward-compatible fallback for approval/resume paths). */
+    existingStream?: AssistantMessageStream,
   ): Promise<AgentLoopResult> {
     const { runId, conversationId } = input;
 
@@ -513,16 +744,20 @@ export class AgentLoopEngine {
       }
     }
 
-    // Create the stream for content-block parts
-    const stream = new AssistantMessageStream({
-      runId,
-      conversationId,
-      messageId,
-      eventBus: this.deps.eventBus,
-      saveMessage: this.deps.saveMessage!,
-      skipStartedEvents: true,
-    });
-    stream.start();
+    // §P1-1: Use pre-created stream when available (from run()), otherwise
+    // create a new one. Pre-inference text is never written to this stream.
+    const stream = existingStream ?? (() => {
+      const s = new AssistantMessageStream({
+        runId,
+        conversationId,
+        messageId,
+        eventBus: this.deps.eventBus,
+        saveMessage: this.deps.saveMessage!,
+        skipStartedEvents: true,
+      });
+      s.start();
+      return s;
+    })();
 
     try {
       let assistantMessageId: string;
@@ -532,6 +767,9 @@ export class AgentLoopEngine {
       if (decision.type === "use_tool") {
         // Tool path: LLM native function calling loop
         await this.deps.runStateManager.markStatus(runId, "executing");
+
+        // §P0-7: Create tool_executing span for phase timing trace
+        const toolSpan = this._startSpan(runId, "tool_executing");
 
         const result = await this.deps.toolDecisionEngine.executeStreaming(
           {
@@ -547,14 +785,29 @@ export class AgentLoopEngine {
           },
           signal,
         );
+
+        // §P0-7: Emit phase timing metrics on tool execution span
+        toolSpan?.endSpan(
+          `Tool execution: ${result.toolCalls.length} tool calls, ${result.artifacts.length} artifacts`,
+          {
+            toolCalls: result.toolCalls.length,
+            // Phase-level timing breakdown mapped to SpanMetrics fields
+            toolRetrievalMs: result.timing.toolRetrievalMs,
+            firstTokenMs: result.timing.firstRoundFirstTokenMs,
+            toolExecutionMs: result.timing.totalToolExecutionMs,
+            finalTokenMs: result.timing.finalRoundFirstTokenMs,
+          },
+        );
+
         assistantMessageId = result.messageId;
         artifacts = result.artifacts;
         toolCalls = result.toolCalls;
       } else if (decision.type === "no_tool") {
         // no_tool path: direct LLM response via ResponseComposer with stream
+        // §P0-1: Direct response is the final answer.
         await this.deps.runStateManager.markStatus(runId, "responding");
 
-        const textPart = stream.startTextPart();
+        const textPart = stream.startTextPart("final");
         await this.deps.responseComposer.composeDirect(
           {
             input,
@@ -562,7 +815,7 @@ export class AgentLoopEngine {
             intent,
             plan,
             modelId: input.modelId,
-            stream: { stream, textPartId: textPart.id },
+            stream: { stream: stream, textPartId: textPart.id },
           },
           signal,
         );
@@ -634,7 +887,7 @@ export class AgentLoopEngine {
             label: "已停止",
             metadata: { phase: "completed" },
           });
-          const stopText = stream.startTextPart();
+          const stopText = stream.startTextPart("final");
           stream.appendText(stopText.id, "已停止。");
           stream.completeTextPart(stopText.id);
         } catch {
@@ -702,7 +955,7 @@ export class AgentLoopEngine {
 
     // Emit a text part explaining what needs approval
     const toolNames = decision.toolCalls.map((tc) => tc.name).join("、");
-    const textPart = stream.startTextPart();
+    const textPart = stream.startTextPart("progress");
     stream.appendText(
       textPart.id,
       `这个操作需要你的确认：我将调用 ${toolNames}。`,
@@ -953,7 +1206,8 @@ export class AgentLoopEngine {
       stream.start();
 
       // Emit clarification as a text part
-      const textPart = stream.startTextPart();
+      // §P0-1: Clarification is the final answer (no tool will run).
+      const textPart = stream.startTextPart("final");
       stream.appendText(textPart.id, decision.question);
       stream.completeTextPart(textPart.id);
 
@@ -1163,8 +1417,8 @@ export class AgentLoopEngine {
           stream.updateToolUse(input.rejectedToolCallId, { status: "failed" });
         }
 
-        // Emit rejection explanation as text
-        const textPart = stream.startTextPart();
+        // Emit rejection explanation as text (final answer after rejection)
+        const textPart = stream.startTextPart("final");
         stream.appendText(
           textPart.id,
           "操作已取消。如果您需要其他帮助，请告诉我。",
@@ -1469,7 +1723,7 @@ export class AgentLoopEngine {
         // Let the model compose a follow-up narrative after tool execution
         await this.deps.runStateManager.markStatus(run.runId, "responding");
         if (allSummaries.length > 0) {
-          const followUpPart = stream.startTextPart();
+          const followUpPart = stream.startTextPart("final");
           await this.deps.responseComposer.composeDirect(
             {
               input,
@@ -1710,6 +1964,24 @@ function intentFromSkillId(skillId: string): RoutedIntent["type"] {
   if (skillId.includes(":") || skillId.startsWith("automation"))
     return "automation_execution";
   return "unknown";
+}
+
+/** §P1-1: Map intent type to a user-facing progress label. */
+function intentLabelForStatus(intent: RoutedIntent): string {
+  switch (intent.type) {
+    case "casual_chat": return "正在理解对话...";
+    case "question_answering": return "正在分析问题...";
+    case "project_analysis": return "正在分析项目结构...";
+    case "code_generation": case "code_modification": return "正在理解代码需求...";
+    case "file_operation": return "正在准备文件操作...";
+    case "shell_operation": return "正在准备命令执行...";
+    case "automation_execution": return "正在准备自动化任务...";
+    case "artifact_generation": return "正在准备生成内容...";
+    case "use_skill": return intent.candidateSkills.length > 0
+      ? `正在准备调用工具...`
+      : "正在理解需求...";
+    default: return "正在理解需求...";
+  }
 }
 
 

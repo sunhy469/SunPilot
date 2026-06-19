@@ -33,6 +33,7 @@ export type {
   ScoredTool,
   ToolRetrievalResult,
 } from "./agent-kernel/tools/tool-retriever.js";
+export { SkillEmbeddingCache } from "./agent-kernel/tools/skill-embedding-cache.js";
 export { RuleBasedPlanner } from "./agent-kernel/planning/rule-based-planner.js";
 export { PlanValidator } from "./agent-kernel/planning/plan-validator.js";
 export type { PlanValidatorDeps, PlanValidationIssue, PlanValidationResult } from "./agent-kernel/planning/plan-validator.js";
