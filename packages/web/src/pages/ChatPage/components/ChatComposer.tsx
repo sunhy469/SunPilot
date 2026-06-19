@@ -355,19 +355,19 @@ export function ChatComposer({
       />
 
       {uploadFailed && (
-        <div className="chat-composer__upload-status">
+        <Flex align="center" className="chat-composer__upload-status">
           <Text type="danger" style={{ fontSize: 12 }}>
             附件上传失败，
             <Button type="link" size="small" onClick={handleRetryUpload} style={{ padding: 0 }}>
               点击重试
             </Button>
           </Text>
-        </div>
+        </Flex>
       )}
 
       {/* ── Send state indicator ────────────────────────────────── */}
       {statusLabel && (
-        <div className="chat-composer__status-bar">
+        <Flex align="center" className="chat-composer__status-bar">
           {isActiveSending && <LoadingOutlined style={{ marginRight: 6 }} />}
           <Text
             type={sendState === "failed" ? "danger" : "secondary"}
@@ -375,7 +375,7 @@ export function ChatComposer({
           >
             {statusLabel}
           </Text>
-        </div>
+        </Flex>
       )}
 
       {/* ── Bottom layer: controls ──────────────────────────────── */}

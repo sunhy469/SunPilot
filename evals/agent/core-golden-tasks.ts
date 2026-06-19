@@ -202,6 +202,36 @@ const TOOL_FAILURE_MUST_NOT_SILENTLY_STOP: GoldenTask = {
   tags: ["tool-failure", "retry", "p1"],
 };
 
+// ── §P0-5: Tool output must appear verbatim in final response ────────
+
+const TOOL_SCRIPT_MUST_APPEAR_IN_FINAL_ANSWER: GoldenTask = {
+  id: "tool-script-must-appear-in-final-answer",
+  description:
+    "When a skill tool generates content (e.g., a short-video script), the final answer MUST contain the tool's output verbatim. The model may add formatting but must NOT rewrite or regenerate the script. This verifies that ToolResultProjection preserves script content through modelObservation and that the LLM respects the CRITICAL content-preservation prompt.",
+  category: "streaming",
+  userMessage: "帮我生成一个保温杯的短视频脚本，卖点是24小时保温和食品级材质",
+  attachments: [],
+  availableSkills: [
+    {
+      id: "media:script.generateShortVideo",
+      name: "生成短视频脚本",
+      description: "根据商品卖点自动生成短视频拍摄脚本",
+      category: "artifact",
+    },
+  ],
+  expectations: {
+    mustCallTools: ["media:script.generateShortVideo"],
+    mustNotFabricate: true,
+    mustWaitForToolResults: true,
+    // The final answer must contain key phrases from the generated script.
+    // The tool output includes these distinctive phrases; the final answer
+    // must preserve them — not replace with model-rewritten content.
+    mustContain: ["镜头", "特写", "24小时保温", "食品级材质"],
+    mustNotContain: ["我猜", "可能", "应该是", "相机"],
+  },
+  tags: ["tool-result-projection", "script-generation", "p0"],
+};
+
 // ── Core Suite ──────────────────────────────────────────────────────────
 
 export const coreGoldenTasks: GoldenTaskSuite = {
@@ -216,5 +246,6 @@ export const coreGoldenTasks: GoldenTaskSuite = {
     LONG_CONVERSATION_MUST_RETAIN_KEY_CONSTRAINTS,
     MEMORY_RECALL_MUST_RETURN_PREFERENCES,
     TOOL_FAILURE_MUST_NOT_SILENTLY_STOP,
+    TOOL_SCRIPT_MUST_APPEAR_IN_FINAL_ANSWER,
   ],
 };

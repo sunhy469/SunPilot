@@ -6,6 +6,7 @@ import type {
   RoutedIntent,
 } from "../loop-types.js";
 import { DEFAULT_INTENT_RULES, type IntentRule } from "./intent-types.js";
+import type { SkillEmbeddingCache } from "../tools/skill-embedding-cache.js";
 
 export interface IntentRouterDeps {
   /**
@@ -19,6 +20,12 @@ export interface IntentRouterDeps {
    * via cosine similarity BEFORE the LLM is called.
    */
   embeddingService?: EmbeddingService;
+  /**
+   * §P1-2: Shared skill embedding cache. When provided, skill embeddings
+   * are read from cache instead of recomputed per turn. Pre-warm at
+   * startup for best performance.
+   */
+  skillEmbeddingCache?: SkillEmbeddingCache;
   /** Custom intent rules to prepend before defaults. */
   rules?: IntentRule[];
 }
@@ -170,15 +177,30 @@ export class IntentRouter implements IntentRouterInterface {
     // Embed each skill using rich text: name + description + category.
     // Category adds semantic context (e.g. "web" vs "filesystem") that
     // helps distinguish tools with similar names in different domains.
+    // Parallelized with concurrency limit to avoid overwhelming the
+    // embedding service (local or remote rate-limited APIs).
+    // §P1-2: Use shared cache when available to avoid duplicate embeddings.
+    const MAX_EMBEDDING_CONCURRENCY = 8;
     const scored: Array<{ skillId: string; similarity: number }> = [];
-    for (const skill of skills) {
-      const skillText = `${skill.name} — ${skill.description} — category: ${skill.category}`;
-      try {
-        const skillEmbedding = await embeddingService.embed(skillText);
-        const similarity = cosineSimilarity(queryEmbedding, skillEmbedding);
-        scored.push({ skillId: skill.id, similarity });
-      } catch {
-        // Single skill embedding failed — skip it
+    const cache = this.deps.skillEmbeddingCache;
+
+    // Process skills in batches to limit concurrency
+    for (let i = 0; i < skills.length; i += MAX_EMBEDDING_CONCURRENCY) {
+      const batch = skills.slice(i, i + MAX_EMBEDDING_CONCURRENCY);
+      const batchResults = await Promise.allSettled(
+        batch.map(async (skill) => {
+          // §P1-2: Try cache first, fall back to embedding service
+          const skillEmbedding = cache
+            ? (await cache.getEmbedding(skill)) ?? await embeddingService.embed(`${skill.name} — ${skill.description} — category: ${skill.category}`)
+            : await embeddingService.embed(`${skill.name} — ${skill.description} — category: ${skill.category}`);
+          const similarity = cosineSimilarity(queryEmbedding, skillEmbedding);
+          return { skillId: skill.id, similarity };
+        }),
+      );
+      for (const result of batchResults) {
+        if (result.status === "fulfilled") {
+          scored.push(result.value);
+        }
       }
     }
 

@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Typography } from "antd";
+import { Typography, Flex } from "antd";
 import { ChatComposer } from "./ChatComposer";
 import type { AttachmentRef } from "../../../features/chat/types";
 import "./WelcomeView.css";
@@ -16,8 +16,8 @@ export function WelcomeView({
   const [draft, setDraft] = useState("");
 
   return (
-    <div className="welcome-view">
-      <div className="welcome-inner">
+    <Flex align="center" justify="center" className="welcome-view">
+      <Flex vertical align="center" className="welcome-inner">
         <Title level={2} className="welcome-title">
           你好，我是 SunPilot
         </Title>
@@ -30,7 +30,7 @@ export function WelcomeView({
           disabled={disabled}
           onSend={onSend}
         />
-      </div>
-    </div>
+      </Flex>
+    </Flex>
   );
 }

@@ -62,6 +62,14 @@ interface SpanRecord {
   toolFailures: number;
   modelCallsCount: number;
   error?: string;
+  // §P0-3: Sub-phase timing metrics from SpanMetrics
+  contextGroupAMs?: number;
+  memorySearchMs?: number;
+  intentRouteMs?: number;
+  toolRetrievalMs?: number;
+  firstTokenMs?: number;
+  toolExecutionMs?: number;
+  finalTokenMs?: number;
 }
 
 interface PlanSnapshot {
@@ -562,9 +570,25 @@ function SpansTab({ spans }: { spans: SpanRecord[] }) {
   if (spans.length === 0) {
     return <Empty description="No spans recorded" image={Empty.PRESENTED_IMAGE_SIMPLE} />;
   }
+
+  // §P0-3: Build phase timing lines from SpanMetrics sub-phase fields
+  function phaseTimingLines(s: SpanRecord): string[] {
+    const lines: string[] = [];
+    if (s.contextGroupAMs !== undefined) lines.push(`context_group_a: ${fmtMs(s.contextGroupAMs)}`);
+    if (s.memorySearchMs !== undefined) lines.push(`memory_search: ${fmtMs(s.memorySearchMs)}`);
+    if (s.intentRouteMs !== undefined) lines.push(`intent_route: ${fmtMs(s.intentRouteMs)}`);
+    if (s.toolRetrievalMs !== undefined) lines.push(`tool_retrieval: ${fmtMs(s.toolRetrievalMs)}`);
+    if (s.firstTokenMs !== undefined) lines.push(`first_token: ${fmtMs(s.firstTokenMs)}`);
+    if (s.toolExecutionMs !== undefined) lines.push(`tool_exec: ${fmtMs(s.toolExecutionMs)}`);
+    if (s.finalTokenMs !== undefined) lines.push(`final_token: ${fmtMs(s.finalTokenMs)}`);
+    return lines;
+  }
+
   return (
     <Flex vertical gap={10}>
-      {spans.map((s) => (
+      {spans.map((s) => {
+        const timingLines = phaseTimingLines(s);
+        return (
         <Card
           key={s.id}
           size="small"
@@ -588,11 +612,22 @@ function SpansTab({ spans }: { spans: SpanRecord[] }) {
               🧠 {s.modelCallsCount} models
             </Text>
           </Flex>
+          {/* §P0-3: Show sub-phase timing breakdown when available */}
+          {timingLines.length > 0 && (
+            <Flex gap={12} wrap="wrap" style={{ marginTop: 8 }}>
+              {timingLines.map((line, i) => (
+                <Text key={i} type="secondary" style={{ fontSize: 11 }}>
+                  ⏱ {line}
+                </Text>
+              ))}
+            </Flex>
+          )}
           {s.error && (
             <Alert type="error" message={s.error} style={{ marginTop: 8 }} />
           )}
         </Card>
-      ))}
+      );
+      })}
     </Flex>
   );
 }

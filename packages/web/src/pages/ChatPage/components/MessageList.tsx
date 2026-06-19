@@ -1,5 +1,5 @@
 import { memo } from "react";
-import { Spin } from "antd";
+import { Spin, Flex, Typography } from "antd";
 import type { ChatMessage } from "../../../features/conversations/types";
 import type { ChatViewState, LocalSendState } from "../types";
 import { useAutoScroll } from "../hooks/useAutoScroll";
@@ -75,9 +75,10 @@ export function MessageList({
         })}
 
         {status === "loadingConversation" && (
-          <div className="message-list__loading">
-            <Spin size="small" /> 加载对话中...
-          </div>
+          <Flex align="center" justify="center" gap={8} className="message-list__loading">
+            <Spin size="small" />
+            <Typography.Text type="secondary">加载对话中...</Typography.Text>
+          </Flex>
         )}
       </div>
     </div>
