@@ -365,6 +365,9 @@ export class ExecutionOrchestrator implements ExecutionOrchestratorInterface {
           name: call.name,
           status: result.status,
           summary: result.summary,
+          // §P0-2: Propagate full content and structured data so the model
+          // sees the actual tool output, not just the terse summary.
+          content: result.content,
           structured: result.structured,
           metadata: {
             ...(call.metadata ?? {}),

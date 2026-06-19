@@ -123,6 +123,9 @@ export class ContextBuilder implements ContextBuilderInterface {
 
   /** Maximum messages to fetch from history. TokenBudgeter may trim further. */
   private static readonly MAX_HISTORY_MESSAGES = 100;
+  /** Enable timing debug logs. Controlled by SUNPILOT_DEBUG_CONTEXT_TIMING env. */
+  private static readonly DEBUG_TIMING =
+    typeof process !== "undefined" && process.env?.SUNPILOT_DEBUG_CONTEXT_TIMING === "1";
 
   constructor(private readonly deps: ContextBuilderDeps) {
     this.budgeter = new TokenBudgeter(
@@ -136,6 +139,9 @@ export class ContextBuilder implements ContextBuilderInterface {
     signal: AbortSignal,
   ): Promise<AgentContext> {
     const t0 = Date.now();
+    // §P0-3: Phase timing for trace observability
+    let groupAParallelMs = 0;
+    let memorySearchMs = 0;
     const chunks: ContextChunk[] = [];
     let availableSkills: AgentContext["availableSkills"] = [];
 
@@ -218,11 +224,83 @@ export class ContextBuilder implements ContextBuilderInterface {
     );
 
     try {
-      const messages = await this.deps.listMessages(
-        input.conversationId,
-        ContextBuilder.MAX_HISTORY_MESSAGES,
-      );
+      // ── Parallel IO Group A: all independent data fetches ─────────
+      // Launch all IO operations that have no inter-dependencies in parallel.
+      // This reduces total latency from sum(all IO) to max(all IO).
+      // Uses Promise.allSettled to distinguish normal empty results from
+      // failures — critical dependencies log warnings on rejection.
+      const tGroupA = Date.now();
+      const [
+        messagesSettled,
+        summaryMemoriesSettled,
+        queryEmbeddingSettled,
+        artifactsSettled,
+        toolResultsSettled,
+        skillsSettled,
+      ] = await Promise.allSettled([
+        // 1. Conversation history
+        this.deps.listMessages(
+          input.conversationId,
+          ContextBuilder.MAX_HISTORY_MESSAGES,
+        ),
+        // 2. Conversation summaries (type+scope filter, no ILIKE)
+        this.deps.searchMemories
+          ? this.deps.searchMemories({
+              query: "",
+              runId: input.runId,
+              conversationId: input.conversationId,
+              userId: input.userId,
+              limit: 10,
+              types: ["conversation_summary"],
+              scopes: ["conversation"],
+            })
+          : Promise.resolve([] as Awaited<ReturnType<NonNullable<typeof this.deps.searchMemories>>>),
+        // 3. Query embedding (needed for memory search in Group B)
+        this.deps.embedText && input.message.trim()
+          ? this.deps.embedText(input.message)
+          : Promise.resolve(undefined as number[] | undefined),
+        // 4. Artifacts
+        this.deps.listArtifacts
+          ? this.deps.listArtifacts(input.runId)
+          : Promise.resolve([] as Awaited<ReturnType<NonNullable<typeof this.deps.listArtifacts>>>),
+        // 5. Tool results (for main context, not stale detection)
+        this.deps.listToolResults
+          ? this.deps.listToolResults(input.runId)
+          : Promise.resolve([] as Awaited<ReturnType<NonNullable<typeof this.deps.listToolResults>>>),
+        // 6. Skill catalog
+        this.deps.listSkills
+          ? this.deps.listSkills()
+          : Promise.resolve([] as Awaited<ReturnType<NonNullable<typeof this.deps.listSkills>>>),
+      ]);
 
+      // §P2: Unwrap settled results — log failures to console.error for
+      // production visibility. Future: emit via event bus for trace integration.
+      const messages = messagesSettled.status === "fulfilled"
+        ? messagesSettled.value
+        : (() => { console.error("[ContextBuilder] listMessages FAILED", { runId: input.runId, reason: String(messagesSettled.reason) }); return [] as Awaited<ReturnType<typeof this.deps.listMessages>>; })();
+      const summaryMemoriesResult = summaryMemoriesSettled.status === "fulfilled"
+        ? summaryMemoriesSettled.value
+        : (() => { console.error("[ContextBuilder] searchMemories(summary) FAILED", { runId: input.runId, reason: String(summaryMemoriesSettled.reason) }); return [] as Awaited<ReturnType<NonNullable<typeof this.deps.searchMemories>>>; })();
+      const queryEmbedding = queryEmbeddingSettled.status === "fulfilled"
+        ? queryEmbeddingSettled.value
+        : (() => { console.error("[ContextBuilder] embedText FAILED", { runId: input.runId, reason: String(queryEmbeddingSettled.reason) }); return undefined as number[] | undefined; })();
+      const artifactsResult = artifactsSettled.status === "fulfilled"
+        ? artifactsSettled.value
+        : (() => { console.error("[ContextBuilder] listArtifacts FAILED", { runId: input.runId, reason: String(artifactsSettled.reason) }); return [] as Awaited<ReturnType<NonNullable<typeof this.deps.listArtifacts>>>; })();
+      const toolResultsResult = toolResultsSettled.status === "fulfilled"
+        ? toolResultsSettled.value
+        : (() => { console.error("[ContextBuilder] listToolResults FAILED", { runId: input.runId, reason: String(toolResultsSettled.reason) }); return [] as Awaited<ReturnType<NonNullable<typeof this.deps.listToolResults>>>; })();
+      const skillsResult = skillsSettled.status === "fulfilled"
+        ? skillsSettled.value
+        : (() => { console.error("[ContextBuilder] listSkills FAILED", { runId: input.runId, reason: String(skillsSettled.reason) }); return [] as Awaited<ReturnType<NonNullable<typeof this.deps.listSkills>>>; })();
+
+      // §P0-3: Always capture timing for trace observability
+      groupAParallelMs = Date.now() - tGroupA;
+      if (ContextBuilder.DEBUG_TIMING) {
+        console.debug(`[ContextBuilder] group_a_parallel_ms=${groupAParallelMs}`);
+      }
+
+      // ── Process summaries & stale detection (depends on messages + summaries) ──
       // Check for existing conversation summaries to compress older history.
       // Summaries replace raw messages that fall within their range,
       // keeping only recent messages (after the latest summary's range)
@@ -230,198 +308,175 @@ export class ContextBuilder implements ContextBuilderInterface {
       let summaryChunks: ContextChunk[] = [];
       const summarizedMessageIds = new Set<string>();
 
-      if (this.deps.searchMemories) {
-        try {
-          // Use type+scope filter to skip ILIKE pre-filter and directly
-          // fetch conversation_summary records scoped to this conversation.
-          // Previously relied on ILIKE matching "conversation_summary" in
-          // title/content, which fails for summaries with generic titles
-          // like "Task: deploy config".
-          const summaryMemories = await this.deps.searchMemories({
-            query: "",
-            runId: input.runId,
-            conversationId: input.conversationId,
-            userId: input.userId,
-            limit: 10,
-            types: ["conversation_summary"],
-            scopes: ["conversation"],
-          });
-          const convSummaries = summaryMemories;
+      if (this.deps.searchMemories && summaryMemoriesResult.length > 0) {
+        const convSummaries = summaryMemoriesResult;
 
-          // Collect all message IDs covered by any summary range.
-          // Build a map: messageId → true for fast lookup.
-          for (const summary of convSummaries) {
-            const range = summary.metadata?.messageRange as
-              | { fromMessageId?: string; toMessageId?: string }
-              | undefined;
-            if (range?.fromMessageId && range?.toMessageId) {
-              // Find all messages between fromMessageId and toMessageId (inclusive)
-              const fromIdx = messages.findIndex(
-                (m) => m.id === range.fromMessageId,
-              );
-              const toIdx = messages.findIndex(
-                (m) => m.id === range.toMessageId,
-              );
-              if (fromIdx >= 0 && toIdx >= fromIdx) {
-                for (let i = fromIdx; i <= toIdx; i++) {
-                  summarizedMessageIds.add(messages[i]!.id);
-                }
+        // Collect all message IDs covered by any summary range.
+        // Build a map: messageId → true for fast lookup.
+        for (const summary of convSummaries) {
+          const range = summary.metadata?.messageRange as
+            | { fromMessageId?: string; toMessageId?: string }
+            | undefined;
+          if (range?.fromMessageId && range?.toMessageId) {
+            // Find all messages between fromMessageId and toMessageId (inclusive)
+            const fromIdx = messages.findIndex(
+              (m) => m.id === range.fromMessageId,
+            );
+            const toIdx = messages.findIndex(
+              (m) => m.id === range.toMessageId,
+            );
+            if (fromIdx >= 0 && toIdx >= fromIdx) {
+              for (let i = fromIdx; i <= toIdx; i++) {
+                summarizedMessageIds.add(messages[i]!.id);
               }
             }
-
-            // ── Stale detection (§P0 — full detector integration) ──
-            // Phase 1: Range-based heuristic (fast path — always computed).
-            // Phase 2: Semantic stale detection via SummaryStaleDetector
-            //   (goal-change / correction / fact-change / preference-conflict).
-            // Semantic detection wins when it reports higher severity.
-            let isStale = false;
-            let staleSeverity: "info" | "warning" | "critical" = "info";
-            let staleReasons: string[] = [];
-
-            // Phase 1 — range-based: new messages after summary boundary
-            if (range?.toMessageId) {
-              const boundaryIdx = messages.findIndex(
-                (m) => m.id === range.toMessageId,
-              );
-              if (boundaryIdx >= 0 && boundaryIdx < messages.length - 1) {
-                isStale = true;
-                staleSeverity = "warning";
-                staleReasons.push("New messages after summary boundary");
-              }
-            }
-
-            // Phase 2 — semantic: full SummaryStaleDetector check
-            if (this.deps.staleDetector) {
-              try {
-                // Collect messages after this summary's boundary.
-                // CRITICAL: the current user message MUST be included —
-                // it is the single most important signal for goal-change
-                // and correction detection (e.g. "actually, use Vue instead").
-                const boundaryIdx = range?.toMessageId
-                  ? messages.findIndex((m) => m.id === range.toMessageId)
-                  : -1;
-                const messagesAfter = boundaryIdx >= 0
-                  ? messages.slice(boundaryIdx + 1)
-                  : [];
-                // Always ensure the current user message is present for
-                // stale detection, even when it's the only message after
-                // the summary boundary.
-                const hasCurrentInMessages = messagesAfter.some(
-                  (m) => m.id === input.userMessageId,
-                );
-                const detectorMessages = hasCurrentInMessages
-                  ? messagesAfter
-                  : [
-                      ...messagesAfter,
-                      {
-                        id: input.userMessageId,
-                        role: "user",
-                        content: input.message,
-                        createdAt: new Date().toISOString(),
-                      },
-                    ];
-
-                // Collect recent tool results for fact-change detection
-                let newToolResults: StaleDetectionInput["newToolResults"];
-                if (this.deps.listToolResults && detectorMessages.length > 0) {
-                  try {
-                    const toolResults = await this.deps.listToolResults(
-                      input.runId,
-                    );
-                    newToolResults = toolResults
-                      .filter((tr) => tr.status === "completed")
-                      .map((tr) => ({
-                        skillId: tr.skillId ?? tr.name ?? tr.toolCallId,
-                        summary: tr.summary ?? "",
-                        status: tr.status,
-                      }));
-                  } catch {
-                    // Tool results unavailable — skip fact-change check
-                  }
-                }
-
-                const semanticResult = this.deps.staleDetector.checkStale({
-                  summary: {
-                    id: summary.id,
-                    content: summary.content,
-                    metadata: summary.metadata as Record<string, unknown> | undefined,
-                    createdAt:
-                      typeof summary.metadata?.createdAt === "string"
-                        ? summary.metadata.createdAt
-                        : new Date().toISOString(),
-                  },
-                  newMessages: detectorMessages.map((m) => ({
-                    role: m.role,
-                    content: m.content,
-                  })),
-                  newToolResults,
-                });
-
-                // Semantic detection wins when it reports higher severity
-                if (semanticResult.stale) {
-                  isStale = true;
-                  // Upgrade severity if semantic detects a worse condition
-                  const severityRank = {
-                    info: 0,
-                    warning: 1,
-                    critical: 2,
-                  } as const;
-                  if (
-                    severityRank[semanticResult.severity] >
-                    severityRank[staleSeverity]
-                  ) {
-                    staleSeverity = semanticResult.severity;
-                  }
-                  staleReasons = [
-                    ...staleReasons,
-                    ...semanticResult.reasons,
-                  ];
-                }
-              } catch {
-                // Stale detector failed — keep range-based result
-              }
-            }
-
-            // severity → priority mapping:
-            //   critical (goal-change / correction) → 14 (near trim line)
-            //   warning  (fact-change / preference)  → 12
-            //   info     (not stale)                  → 8  (keep above raw history)
-            const stalePriorityMap: Record<string, number> = {
-              critical: 14,
-              warning: 12,
-              info: 8,
-            };
-            const summaryPriority = isStale
-              ? (stalePriorityMap[staleSeverity] ?? 8)
-              : 8;
-            const staleLabel = isStale
-              ? ` [STALE ${staleSeverity.toUpperCase()}: ${staleReasons.join("; ")}]`
-              : "";
-            const staleContentPrefix = isStale
-              ? `[Previous conversation summary — ${staleSeverity === "critical" ? "CRITICALLY OUTDATED" : "may be outdated"}${staleReasons.length > 0 ? ` (${staleReasons.join("; ")})` : ""}]\n`
-              : "[Previous conversation summary]\n";
-
-            summaryChunks.push({
-              id: `summary_${summary.id}`,
-              source: "conversation_summary",
-              title: summary.title + staleLabel,
-              content: staleContentPrefix + summary.content,
-              priority: summaryPriority,
-              tokenEstimate: estimateTokens(summary.content),
-              metadata: {
-                memoryId: summary.id,
-                type: "conversation_summary",
-                confidence: summary.confidence,
-                score: summary.score ?? undefined,
-              },
-              trust: "user",
-              warning: isStale
-                ? `This summary is stale (${staleSeverity}). Reasons: ${staleReasons.join("; ")}`
-                : undefined,
-            });
           }
-        } catch {
-          // Memory search unavailable — skip summaries
+
+          // ── Stale detection (§P0 — full detector integration) ──
+          // Phase 1: Range-based heuristic (fast path — always computed).
+          // Phase 2: Semantic stale detection via SummaryStaleDetector
+          //   (goal-change / correction / fact-change / preference-conflict).
+          // Semantic detection wins when it reports higher severity.
+          let isStale = false;
+          let staleSeverity: "info" | "warning" | "critical" = "info";
+          let staleReasons: string[] = [];
+
+          // Phase 1 — range-based: new messages after summary boundary
+          if (range?.toMessageId) {
+            const boundaryIdx = messages.findIndex(
+              (m) => m.id === range.toMessageId,
+            );
+            if (boundaryIdx >= 0 && boundaryIdx < messages.length - 1) {
+              isStale = true;
+              staleSeverity = "warning";
+              staleReasons.push("New messages after summary boundary");
+            }
+          }
+
+          // Phase 2 — semantic: full SummaryStaleDetector check
+          if (this.deps.staleDetector) {
+            try {
+              // Collect messages after this summary's boundary.
+              // CRITICAL: the current user message MUST be included —
+              // it is the single most important signal for goal-change
+              // and correction detection (e.g. "actually, use Vue instead").
+              const boundaryIdx = range?.toMessageId
+                ? messages.findIndex((m) => m.id === range.toMessageId)
+                : -1;
+              const messagesAfter = boundaryIdx >= 0
+                ? messages.slice(boundaryIdx + 1)
+                : [];
+              // Always ensure the current user message is present for
+              // stale detection, even when it's the only message after
+              // the summary boundary.
+              const hasCurrentInMessages = messagesAfter.some(
+                (m) => m.id === input.userMessageId,
+              );
+              const detectorMessages = hasCurrentInMessages
+                ? messagesAfter
+                : [
+                    ...messagesAfter,
+                    {
+                      id: input.userMessageId,
+                      role: "user",
+                      content: input.message,
+                      createdAt: new Date().toISOString(),
+                    },
+                  ];
+
+              // Collect recent tool results for fact-change detection
+              // NOTE: We reuse toolResultsResult from Group A instead of
+              // making a separate DB query here (was a duplicate query before).
+              let newToolResults: StaleDetectionInput["newToolResults"];
+              if (toolResultsResult.length > 0 && detectorMessages.length > 0) {
+                newToolResults = toolResultsResult
+                  .filter((tr) => tr.status === "completed")
+                  .map((tr) => ({
+                    skillId: tr.skillId ?? tr.name ?? tr.toolCallId,
+                    summary: tr.summary ?? "",
+                    status: tr.status,
+                  }));
+              }
+
+              const semanticResult = this.deps.staleDetector.checkStale({
+                summary: {
+                  id: summary.id,
+                  content: summary.content,
+                  metadata: summary.metadata as Record<string, unknown> | undefined,
+                  createdAt:
+                    typeof summary.metadata?.createdAt === "string"
+                      ? summary.metadata.createdAt
+                      : new Date().toISOString(),
+                },
+                newMessages: detectorMessages.map((m) => ({
+                  role: m.role,
+                  content: m.content,
+                })),
+                newToolResults,
+              });
+
+              // Semantic detection wins when it reports higher severity
+              if (semanticResult.stale) {
+                isStale = true;
+                // Upgrade severity if semantic detects a worse condition
+                const severityRank = {
+                  info: 0,
+                  warning: 1,
+                  critical: 2,
+                } as const;
+                if (
+                  severityRank[semanticResult.severity] >
+                  severityRank[staleSeverity]
+                ) {
+                  staleSeverity = semanticResult.severity;
+                }
+                staleReasons = [
+                  ...staleReasons,
+                  ...semanticResult.reasons,
+                ];
+              }
+            } catch {
+              // Stale detector failed — keep range-based result
+            }
+          }
+
+          // severity → priority mapping:
+          //   critical (goal-change / correction) → 14 (near trim line)
+          //   warning  (fact-change / preference)  → 12
+          //   info     (not stale)                  → 8  (keep above raw history)
+          const stalePriorityMap: Record<string, number> = {
+            critical: 14,
+            warning: 12,
+            info: 8,
+          };
+          const summaryPriority = isStale
+            ? (stalePriorityMap[staleSeverity] ?? 8)
+            : 8;
+          const staleLabel = isStale
+            ? ` [STALE ${staleSeverity.toUpperCase()}: ${staleReasons.join("; ")}]`
+            : "";
+          const staleContentPrefix = isStale
+            ? `[Previous conversation summary — ${staleSeverity === "critical" ? "CRITICALLY OUTDATED" : "may be outdated"}${staleReasons.length > 0 ? ` (${staleReasons.join("; ")})` : ""}]\n`
+            : "[Previous conversation summary]\n";
+
+          summaryChunks.push({
+            id: `summary_${summary.id}`,
+            source: "conversation_summary",
+            title: summary.title + staleLabel,
+            content: staleContentPrefix + summary.content,
+            priority: summaryPriority,
+            tokenEstimate: estimateTokens(summary.content),
+            metadata: {
+              memoryId: summary.id,
+              type: "conversation_summary",
+              confidence: summary.confidence,
+              score: summary.score ?? undefined,
+            },
+            trust: "user",
+            warning: isStale
+              ? `This summary is stale (${staleSeverity}). Reasons: ${staleReasons.join("; ")}`
+              : undefined,
+          });
         }
       }
 
@@ -458,116 +513,111 @@ export class ContextBuilder implements ContextBuilderInterface {
       if (summaryChunks.length > 0) {
         chunks.push(...summaryChunks);
       }
-    } catch {
-      // Conversation store not available — skip history
-    }
-    console.debug(`[ContextBuilder] history_fetch_ms=${Date.now() - t0}`);
 
-    // ── Memories ──────────────────────────────────────────────────
-    const tMemory = Date.now();
-    if (this.deps.searchMemories) {
-      try {
-        // Generate query embedding once for reuse
-        let queryEmbedding: number[] | undefined;
-        if (this.deps.embedText && input.message.trim()) {
-          try {
-            queryEmbedding = await this.deps.embedText(input.message);
-          } catch {
-            // Embedding unavailable — hybrid search still works with keyword
-          }
-        }
-
-        // Pass 1: Hybrid search (query + embedding) — keyword-dominant
-        const hybridMemories = await this.deps.searchMemories({
-          query: input.message,
-          runId: input.runId,
-          conversationId: input.conversationId,
-          userId: input.userId,
-          limit: 10,
-          embedding: queryEmbedding,
-        });
-
-        // Pass 2: Pure vector recall (embedding only, empty query)
-        // This triggers the semantic-only path in PostgresMemoryRepository
-        // where ILIKE pre-filter is skipped. Effectively doubles recall
-        // coverage by adding semantically-similar but lexically-different
-        // memories that keyword search would miss.
-        let vectorMemories: Awaited<ReturnType<typeof this.deps.searchMemories>> = [];
-        if (queryEmbedding) {
-          try {
-            const vectorPromise = this.deps.searchMemories({
-              query: "",
-              runId: input.runId,
-              conversationId: input.conversationId,
-              userId: input.userId,
-              limit: 5,
-              embedding: queryEmbedding,
-            });
-            vectorMemories = await Promise.race([
-              vectorPromise,
-              new Promise<typeof vectorMemories>((resolve) =>
-                setTimeout(() => resolve([]), 2000),
-              ),
-            ]);
-          } catch {
-            // Pure vector recall unavailable — use hybrid results only
-          }
-        }
-
-        // Merge: deduplicate by id, preferring hybrid (higher relevance) score.
-        // Pre-populate seenIds with hybrid results so vector recall can't
-        // inject duplicates of the same memory.
-        const seenIds = new Set(hybridMemories.map((m) => m.id));
-        const allMemories = [...hybridMemories];
-        for (const mem of vectorMemories) {
-          if (!seenIds.has(mem.id)) {
-            seenIds.add(mem.id);
-            allMemories.push(mem);
-          }
-        }
-
-        // Sort by score descending
-        allMemories.sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
-
-        for (const mem of allMemories.slice(0, 15)) {
-          const content = `[${mem.type}] ${mem.title}: ${mem.content}`;
-          chunks.push({
-            id: `memory_${mem.id}`,
-            source: "memory",
-            title: mem.title,
-            content,
-            priority: 15,
-            tokenEstimate: estimateTokens(content),
-            metadata: {
-              memoryId: mem.id,
-              type: mem.type,
-              source: mem.source,
-              confidence: mem.confidence,
-              scope: mem.scope,
-              scopeId: mem.scopeId,
-              score: mem.score,
-            },
-            trust: "memory",
-            sourceUri: `memory:${mem.id}`,
-            generatedAt: new Date().toISOString(),
-            // Memory chunks expire after 24h — they carry lower trust weight
-            // once past their freshness window (see Gap-4: lifecycle fields).
-            expiresAt: new Date(
-              Date.now() + 24 * 60 * 60 * 1000,
-            ).toISOString(),
-          });
-        }
-      } catch {
-        // Memory store not available
+      if (ContextBuilder.DEBUG_TIMING) {
+        console.debug(`[ContextBuilder] history_fetch_ms=${Date.now() - t0}`);
       }
-    }
-    console.debug(`[ContextBuilder] memory_search_ms=${Date.now() - tMemory}`);
 
-    // ── Artifacts ─────────────────────────────────────────────────
-    if (this.deps.listArtifacts) {
-      try {
-        const artifacts = await this.deps.listArtifacts(input.runId);
-        for (const artifact of artifacts) {
+      // ── Parallel IO Group B: memory search (depends on queryEmbedding) ──
+      // §P1-3: Soft timeout — total memory search budget 500ms. Vector recall
+      // runs in parallel with hybrid but is cut at 500ms instead of 2s.
+      // Deep recall for complex tasks runs asynchronously after first response.
+      const tMemory = Date.now();
+      const MEMORY_BUDGET_MS = 500;
+      if (this.deps.searchMemories) {
+        try {
+          // Pass 1: Hybrid search (query + embedding) — keyword-dominant
+          // Pass 2: Pure vector recall (embedding only, empty query, 500ms cap)
+          // Both can run in parallel since they only depend on queryEmbedding
+          // from Group A.
+          const [hybridMemories, vectorMemories] = await Promise.all([
+            // Hybrid search with 500ms soft timeout
+            Promise.race([
+              this.deps.searchMemories({
+                query: input.message,
+                runId: input.runId,
+                conversationId: input.conversationId,
+                userId: input.userId,
+                limit: 10,
+                embedding: queryEmbedding,
+              }),
+              new Promise<Awaited<ReturnType<NonNullable<typeof this.deps.searchMemories>>>>((resolve) =>
+                setTimeout(() => resolve([]), MEMORY_BUDGET_MS),
+              ),
+            ]).catch(() => [] as Awaited<ReturnType<NonNullable<typeof this.deps.searchMemories>>>),
+            queryEmbedding
+              ? Promise.race([
+                  this.deps.searchMemories!({
+                    query: "",
+                    runId: input.runId,
+                    conversationId: input.conversationId,
+                    userId: input.userId,
+                    limit: 5,
+                    embedding: queryEmbedding,
+                  }),
+                  new Promise<Awaited<ReturnType<NonNullable<typeof this.deps.searchMemories>>>>((resolve) =>
+                    setTimeout(() => resolve([]), MEMORY_BUDGET_MS),
+                  ),
+                ]).catch(() => [] as Awaited<ReturnType<NonNullable<typeof this.deps.searchMemories>>>)
+              : Promise.resolve([] as Awaited<ReturnType<NonNullable<typeof this.deps.searchMemories>>>),
+          ]);
+
+          // Merge: deduplicate by id, preferring hybrid (higher relevance) score.
+          // Pre-populate seenIds with hybrid results so vector recall can't
+          // inject duplicates of the same memory.
+          const seenIds = new Set(hybridMemories.map((m) => m.id));
+          const allMemories = [...hybridMemories];
+          for (const mem of vectorMemories) {
+            if (!seenIds.has(mem.id)) {
+              seenIds.add(mem.id);
+              allMemories.push(mem);
+            }
+          }
+
+          // Sort by score descending
+          allMemories.sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
+
+          for (const mem of allMemories.slice(0, 15)) {
+            const content = `[${mem.type}] ${mem.title}: ${mem.content}`;
+            chunks.push({
+              id: `memory_${mem.id}`,
+              source: "memory",
+              title: mem.title,
+              content,
+              priority: 15,
+              tokenEstimate: estimateTokens(content),
+              metadata: {
+                memoryId: mem.id,
+                type: mem.type,
+                source: mem.source,
+                confidence: mem.confidence,
+                scope: mem.scope,
+                scopeId: mem.scopeId,
+                score: mem.score,
+              },
+              trust: "memory",
+              sourceUri: `memory:${mem.id}`,
+              generatedAt: new Date().toISOString(),
+              // Memory chunks expire after 24h — they carry lower trust weight
+              // once past their freshness window (see Gap-4: lifecycle fields).
+              expiresAt: new Date(
+                Date.now() + 24 * 60 * 60 * 1000,
+              ).toISOString(),
+            });
+          }
+        } catch {
+          // Memory store not available
+        }
+      }
+      // §P0-3: Always capture timing for trace observability
+      memorySearchMs = Date.now() - tMemory;
+      if (ContextBuilder.DEBUG_TIMING) {
+        console.debug(`[ContextBuilder] memory_search_ms=${memorySearchMs}`);
+      }
+
+      // ── Artifacts (from Group A result) ───────────────────────────
+      if (artifactsResult.length > 0) {
+        for (const artifact of artifactsResult) {
           const content = `${artifact.name}: ${artifact.summary ?? artifact.type}`;
           chunks.push({
             id: `artifact_${artifact.id}`,
@@ -585,16 +635,11 @@ export class ContextBuilder implements ContextBuilderInterface {
             generatedAt: new Date().toISOString(),
           });
         }
-      } catch {
-        // Artifact store not available
       }
-    }
 
-    // ── Tool results ──────────────────────────────────────────────
-    if (this.deps.listToolResults) {
-      try {
-        const toolResults = await this.deps.listToolResults(input.runId);
-        for (const result of toolResults) {
+      // ── Tool results (from Group A result) ────────────────────────
+      if (toolResultsResult.length > 0) {
+        for (const result of toolResultsResult) {
           const content =
             result.summary ??
             result.content ??
@@ -617,52 +662,68 @@ export class ContextBuilder implements ContextBuilderInterface {
             generatedAt: new Date().toISOString(),
           });
         }
-      } catch {
-        // Tool call store not available
       }
-    }
 
-    // ── Skill catalog summary ─────────────────────────────────────
-    const tSkills = Date.now();
-    if (this.deps.listSkills) {
-      try {
-        const skills = await this.deps.listSkills();
-        availableSkills = skills.map((skill) => ({
-          id: skill.id,
-          name: skill.name,
-          description: skill.description,
-          category: skill.category,
-        }));
-        const skillSummaries = skills
-          .map((s) => `- ${s.name} (${s.id}): ${s.description} [${s.category}]`)
-          .join("\n");
-        chunks.push({
-          id: `skill_catalog`,
-          source: "skill_catalog",
-          title: "Available Skills",
-          content:
-            skillSummaries ||
-            "No skills available. Respond as a conversational assistant.",
-          priority: 20,
-          tokenEstimate: estimateTokens(skillSummaries),
-          metadata: { skillCount: skills.length },
-          trust: "system",
-        });
-      } catch {
-        availableSkills = [];
-        chunks.push({
-          id: `skill_catalog`,
-          source: "skill_catalog",
-          title: "Available Skills",
-          content: "Skill catalog unavailable.",
-          priority: 20,
-          tokenEstimate: estimateTokens("Skill catalog unavailable."),
-          metadata: {},
-          trust: "system",
-        });
+      // ── Skill catalog (from Group A result) ───────────────────────
+      const tSkills = Date.now();
+      if (this.deps.listSkills) {
+        const skillsFailed = skillsSettled.status === "rejected";
+        if (skillsResult.length > 0) {
+          availableSkills = skillsResult.map((skill) => ({
+            id: skill.id,
+            name: skill.name,
+            description: skill.description,
+            category: skill.category,
+          }));
+          const skillSummaries = skillsResult
+            .map((s) => `- ${s.name} (${s.id}): ${s.description} [${s.category}]`)
+            .join("\n");
+          chunks.push({
+            id: `skill_catalog`,
+            source: "skill_catalog",
+            title: "Available Skills",
+            content:
+              skillSummaries ||
+              "No skills available. Respond as a conversational assistant.",
+            priority: 20,
+            tokenEstimate: estimateTokens(skillSummaries),
+            metadata: { skillCount: skillsResult.length },
+            trust: "system",
+          });
+        } else if (skillsFailed) {
+          // listSkills query failed — system degradation, not "no skills"
+          availableSkills = [];
+          chunks.push({
+            id: `skill_catalog`,
+            source: "skill_catalog",
+            title: "Available Skills",
+            content: "Skill catalog unavailable due to a system error. Respond as a conversational assistant and inform the user that tools are temporarily unavailable.",
+            priority: 20,
+            tokenEstimate: estimateTokens("Skill catalog unavailable due to a system error."),
+            metadata: { skillCount: 0, degraded: true },
+            trust: "system",
+          });
+        } else {
+          // listSkills succeeded but returned empty — no skills configured
+          availableSkills = [];
+          chunks.push({
+            id: `skill_catalog`,
+            source: "skill_catalog",
+            title: "Available Skills",
+            content: "No skills available. Respond as a conversational assistant.",
+            priority: 20,
+            tokenEstimate: estimateTokens("No skills available. Respond as a conversational assistant."),
+            metadata: { skillCount: 0 },
+            trust: "system",
+          });
+        }
       }
+      if (ContextBuilder.DEBUG_TIMING) {
+        console.debug(`[ContextBuilder] skill_catalog_ms=${Date.now() - tSkills}`);
+      }
+    } catch {
+      // Parallel IO or context processing failed — skip context enrichment
     }
-    console.debug(`[ContextBuilder] skill_catalog_ms=${Date.now() - tSkills}`);
 
     // ── Run state ─────────────────────────────────────────────────
     chunks.push({
@@ -789,7 +850,9 @@ export class ContextBuilder implements ContextBuilderInterface {
       (c) => c.source === "safety_policy",
     );
 
-    console.debug(`[ContextBuilder] total_build_ms=${Date.now() - t0}`);
+    if (ContextBuilder.DEBUG_TIMING) {
+      console.debug(`[ContextBuilder] total_build_ms=${Date.now() - t0}`);
+    }
 
     return {
       runId: input.runId,
@@ -871,6 +934,12 @@ export class ContextBuilder implements ContextBuilderInterface {
       },
       tokenEstimate: budget.totalTokens,
       contextSnapshot,
+      // §P0-3: Phase timing for trace observability
+      timing: {
+        groupAParallelMs,
+        memorySearchMs,
+        totalBuildMs: Date.now() - t0,
+      },
     };
   }
 }

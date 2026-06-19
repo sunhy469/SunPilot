@@ -8,7 +8,7 @@
 }
 
 .message-inner {
-  max-width: var(--chat-content-width, 760px);
+  max-width: var(--chat-content-width, 920px);
   margin: 0 auto;
   padding-bottom: 10px;
 }

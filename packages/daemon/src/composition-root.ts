@@ -60,6 +60,7 @@ import {
   ModelRouter,
   OpenAICompatibleChatProvider,
   ToolRetriever,
+  SkillEmbeddingCache,
   PromptInjectionDetector,
   ToolSandbox,
   TaskScopedPermissionManager,
@@ -139,6 +140,16 @@ export function createAgentLoopService(deps: {
     llm: deps.llmProvider,
     embeddingProvider,
   });
+
+  // §P1-2: Shared skill embedding cache — pre-warmed at startup to avoid
+  // duplicate embedding API calls between IntentRouter and ToolRetriever.
+  // Both consumers read from this cache instead of computing embeddings
+  // independently per turn.
+  // Note: The cache key includes skill name + description + category,
+  // so skill content changes after registry reload naturally invalidate
+  // the cache (old keys won't match new descriptions). For full
+  // invalidation on registry reload, call skillEmbeddingCache.invalidate().
+  const skillEmbeddingCache = new SkillEmbeddingCache(embeddingService);
 
   // Log embedding mode at startup so operators know what's active
   if (embeddingService.hasRealProvider) {
@@ -278,7 +289,10 @@ export function createAgentLoopService(deps: {
     },
     searchMemories: async (input) => {
       try {
-        // Use provided embedding or generate from query for hybrid search
+        // §P1: Prefer caller-provided embedding to avoid duplicate API calls.
+        // ContextBuilder already passes queryEmbedding from Group A; this
+        // fallback only runs for callers that don't supply one (e.g. summary
+        // search or future direct memory queries).
         const queryEmbedding =
           input.embedding ??
           (input.query.trim()
@@ -376,6 +390,7 @@ export function createAgentLoopService(deps: {
   const intentRouter = new IntentRouter({
     llm: intentLlm,
     embeddingService,
+    skillEmbeddingCache,
   });
 
   // ── Tools ──────────────────────────────────────────────────────
@@ -447,14 +462,21 @@ export function createAgentLoopService(deps: {
   };
 
   // ── Pre-warm embedding cache at startup ────────────────────────
-  // Batch-embed all skill texts using rich embedding text (name +
-  // description + category) so the first user request doesn't pay
-  // the cold-start latency. Fire-and-forget — cache is an optimization.
+  // §P1-2: Use shared SkillEmbeddingCache instead of raw embedding service.
+  // Pre-warm with skill id/name/description/category so both IntentRouter
+  // and ToolRetriever can serve from cache without duplicate API calls.
+  // Fire-and-forget — cache is an optimization, first request falls back
+  // to on-demand computation if pre-warm hasn't completed.
   listSkillSummaries()
     .then((skills) => {
-      const texts = skills.map((s) => buildSkillEmbeddingText(s));
-      if (texts.length > 0) {
-        embeddingService.preWarm(texts).catch((err) => {
+      const skillRecords = skills.map((s) => ({
+        id: s.id,
+        name: s.name,
+        description: s.description,
+        category: s.category,
+      }));
+      if (skillRecords.length > 0) {
+        skillEmbeddingCache.preWarm(skillRecords).catch((err) => {
           console.warn(
             "[embedding] pre-warm batch failed:",
             (err as Error).message,
@@ -462,7 +484,7 @@ export function createAgentLoopService(deps: {
         });
       }
       console.log(
-        `[embedding] pre-warm queued for ${texts.length} skill texts (cache size: ${embeddingService.cacheSize})`,
+        `[embedding] pre-warm queued for ${skillRecords.length} skills (cache size: ${skillEmbeddingCache.size})`,
       );
     })
     .catch(() => {
@@ -544,6 +566,7 @@ export function createAgentLoopService(deps: {
     argumentBuilder: toolArgBuilder,
     toolRetriever,
     embeddingService,
+    skillEmbeddingCache,
     // Streaming execution deps
     eventBus: rawEventBus,
     modelRouter,

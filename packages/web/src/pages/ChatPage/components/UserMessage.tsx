@@ -14,7 +14,7 @@ export function UserMessage({ message }: { message: ChatMessage }) {
   const hasText = message.content.trim().length > 0;
 
   return (
-    <div className="message-row user">
+    <Flex justify="flex-end" className="message-row user">
       <div className="user-bubble">
         <Card size="small" className="user-card">
           {/* ── Upper layer: attachments ───────────────────────── */}
@@ -54,6 +54,6 @@ export function UserMessage({ message }: { message: ChatMessage }) {
           )}
         </Card>
       </div>
-    </div>
+    </Flex>
   );
 }

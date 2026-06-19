@@ -12,7 +12,7 @@
 
 .welcome-inner {
   width: 100%;
-  max-width: var(--chat-content-width, 760px);
+  max-width: var(--chat-content-width, 920px);
   text-align: center;
 }
 
