@@ -8,14 +8,7 @@ import type {
 } from "../loop-types.js";
 import type { ComposeResult, ResponseComposerDeps } from "./response-types.js";
 import { estimateTokens } from "../context/context-types.js";
-
-const MARKDOWN_RESPONSE_POLICY = `Response format policy:
-- Default to structured Markdown output unless the user explicitly asks for plain text.
-- For informational answers: use ##/### headings, short intro, grouped bullets, tables when comparing, **bold** for key conclusions, fenced code blocks or inline code for code/commands/paths, ordered lists for multi-step plans.
-- For product/resource/search results: give a summary first, then a structured table, then filtering suggestions, then follow-up directions.
-- Avoid "以下是..." repetitive openings. Do not repeat the same content in the same paragraph.
-- Do not use raw HTML — the Markdown renderer handles formatting.
-- Use the same language as the user.`;
+import { MARKDOWN_RESPONSE_POLICY } from "../tools/markdown-response-policy.js";
 
 /**
  * ResponseComposer — 生成最终的助手回复。

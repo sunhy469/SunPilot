@@ -141,6 +141,23 @@ export function createAgentLoopService(deps: {
     embeddingProvider,
   });
 
+  const saveMessage = async (input: { id: string; conversationId: string; role: string; content: string; metadata?: Record<string, unknown> }) => {
+    try {
+      let embedding: number[] | undefined;
+      if (input.content.trim()) {
+        try { embedding = await embeddingService.embed(input.content); } catch { /* Best effort */ }
+      }
+      await deps.database.messages.create({
+        id: input.id,
+        conversationId: input.conversationId,
+        role: input.role as "system" | "user" | "assistant",
+        content: input.content,
+        metadata: input.metadata,
+        embedding,
+      });
+    } catch { /* Best effort */ }
+  };
+
   // §P1-2: Shared skill embedding cache — pre-warmed at startup to avoid
   // duplicate embedding API calls between IntentRouter and ToolRetriever.
   // Both consumers read from this cache instead of computing embeddings
@@ -572,28 +589,7 @@ export function createAgentLoopService(deps: {
     modelRouter,
     permissionPolicy,
     executionOrchestrator,
-    saveMessage: async (input) => {
-      try {
-        let embedding: number[] | undefined;
-        if (input.content.trim()) {
-          try {
-            embedding = await embeddingService.embed(input.content);
-          } catch {
-            // Best effort
-          }
-        }
-        await deps.database.messages.create({
-          id: input.id,
-          conversationId: input.conversationId,
-          role: input.role as "system" | "user" | "assistant",
-          content: input.content,
-          metadata: input.metadata,
-          embedding,
-        });
-      } catch {
-        // Best effort
-      }
-    },
+    saveMessage: saveMessage as (msg: { id: string; conversationId: string; role: "assistant"; content: string; runId: string; metadata?: Record<string, unknown> }) => Promise<void>
   });
 
   // ── Reflection ─────────────────────────────────────────────────
@@ -606,29 +602,7 @@ export function createAgentLoopService(deps: {
     llm: responseLlm,
     eventBus: rawEventBus,
     modelCalls: deps.database.modelCalls,
-    saveMessage: async (input) => {
-      try {
-        // Generate embedding for semantic message search (best-effort)
-        let embedding: number[] | undefined;
-        if (input.content.trim()) {
-          try {
-            embedding = await embeddingService.embed(input.content);
-          } catch {
-            // Embedding generation failed — save without semantic index
-          }
-        }
-        await deps.database.messages.create({
-          id: input.id,
-          conversationId: input.conversationId,
-          role: input.role as "system" | "user" | "assistant",
-          content: input.content,
-          metadata: input.metadata,
-          embedding,
-        });
-      } catch {
-        // Best effort
-      }
-    },
+    saveMessage: saveMessage as (input: { id: string; conversationId: string; role: "assistant"; content: string; runId?: string; metadata?: Record<string, unknown> }) => Promise<void>
   });
 
   // ── Memory ────────────────────────────────────────────────────
@@ -701,24 +675,7 @@ export function createAgentLoopService(deps: {
     // ── Tool call persistence for safety audits (§P0-3) ────────────
     toolCalls: deps.database.toolCalls,
     // ── Content-block stream message persistence (§Codex flow) ──────
-    saveMessage: async (input) => {
-      try {
-        let embedding: number[] | undefined;
-        if (input.content.trim()) {
-          try {
-            embedding = await embeddingService.embed(input.content);
-          } catch { /* Best effort */ }
-        }
-        await deps.database.messages.create({
-          id: input.id,
-          conversationId: input.conversationId,
-          role: input.role as "system" | "user" | "assistant",
-          content: input.content,
-          metadata: input.metadata,
-          embedding,
-        });
-      } catch { /* Best effort */ }
-    },
+    saveMessage,
   });
 
   // ── Agent Service ──────────────────────────────────────────────
@@ -906,20 +863,6 @@ function classifySideEffects(
   if (permissions.includes("artifact.write")) return "mutation";
   if (permissions.includes("memory.write")) return "mutation";
   return "none";
-}
-
-/**
- * Build rich embedding text from a SkillSummary (§P2).
- * Uses name + description + category for semantic vector generation.
- * If examples were available in the manifest, they'd be included here
- * (Tool2Vec approach: embed example user queries alongside descriptions).
- */
-export function buildSkillEmbeddingText(skill: {
-  name: string;
-  description: string;
-  category: string;
-}): string {
-  return `${skill.name} — ${skill.description} — category: ${skill.category}`;
 }
 
 function toolResultSummary(result: unknown): string | undefined {

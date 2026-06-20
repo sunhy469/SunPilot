@@ -2,13 +2,8 @@ import { useState } from "react";
 import {
   DownloadOutlined,
   FileOutlined,
-  PlayCircleOutlined,
-  PauseCircleOutlined,
-  SoundOutlined,
-  FileTextOutlined,
-  FilterOutlined,
 } from "@ant-design/icons";
-import { Button, Typography, Tag, Input, Flex } from "antd";
+import { Button, Typography, Tag } from "antd";
 import type {
   AudioCardData,
   FileBundleCardData,
@@ -18,7 +13,6 @@ import type {
 } from "../types";
 import type { RichTextValue } from "../types";
 import { RichCardShell } from "./RichCardShell";
-import { RichTextRenderer } from "../richText";
 
 const { Text, Paragraph } = Typography;
 

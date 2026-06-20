@@ -6,6 +6,7 @@ import {
   LLM_BASE_URL_ENV,
   LLM_MODEL_ENV,
 } from "./llm.config.js";
+import { normalizeBaseUrl, safeResponseText } from "./llm-utils.js";
 import type {
   ChatCompletionDelta,
   ChatCompletionRequest,
@@ -174,20 +175,6 @@ export function createDefaultLlmProvider(
     },
     fetchImpl,
   );
-}
-
-function normalizeBaseUrl(baseUrl: string): string {
-  const trimmed = baseUrl.trim();
-  if (!trimmed) return DEFAULT_LLM_BASE_URL;
-  return trimmed.endsWith("/") ? trimmed : `${trimmed}/`;
-}
-
-async function safeResponseText(response: Response): Promise<string> {
-  try {
-    return await response.text();
-  } catch {
-    return "";
-  }
 }
 
 async function* parseOpenAIStream(

@@ -1,5 +1,7 @@
 import { AuditActor, type ApprovalRecord } from "@sunpilot/protocol";
 import type { DatabaseContext } from "@sunpilot/storage";
+import type { AgentEventBus } from "../agent-event-bus.js";
+import { RUN_PHASE_LABELS } from "../agent-loop-engine.js";
 import { RepositoryRunStateManager } from "./repository-run-state-manager.js";
 
 export interface ExpiredApprovalResult {
@@ -11,7 +13,10 @@ export interface ExpiredApprovalResult {
 export class RepositoryApprovalExpiryService {
   private readonly runStateManager: RepositoryRunStateManager;
 
-  constructor(private readonly db: DatabaseContext) {
+  constructor(
+    private readonly db: DatabaseContext,
+    private readonly eventBus?: AgentEventBus,
+  ) {
     this.runStateManager = new RepositoryRunStateManager(db);
   }
 
@@ -50,6 +55,34 @@ export class RepositoryApprovalExpiryService {
         },
         createdAt: now,
       });
+
+      // §P0-3: Update the original "等待确认" status part to failed
+      if (this.eventBus) {
+        const runState = await this.runStateManager.getRun(expired.runId);
+        const gatheredFacts = runState?.taskState?.gatheredFacts as Record<string, unknown> | undefined;
+        const partsSnapshot = gatheredFacts?.partsSnapshot as Array<{ id: string; type: string; status?: string; label?: string }> | undefined;
+        const approvalMessageId = gatheredFacts?.approvalMessageId as string | undefined;
+        if (approvalMessageId && partsSnapshot) {
+          for (const part of partsSnapshot) {
+            if (part.type === "status" && part.status === "running" && part.label?.startsWith(RUN_PHASE_LABELS.waiting_approval)) {
+              this.eventBus.emit(
+                "agent.message.part.updated",
+                {
+                  runId: expired.runId,
+                  conversationId: run?.conversationId,
+                  messageId: approvalMessageId,
+                  partId: part.id,
+                  patch: {
+                    status: "failed",
+                    label: `确认已过期: ${part.label.replace(`${RUN_PHASE_LABELS.waiting_approval}: `, "")}`,
+                  },
+                },
+                { runId: expired.runId, conversationId: run?.conversationId },
+              );
+            }
+          }
+        }
+      }
 
       await this.db.events.append({
         id: `evt_${crypto.randomUUID()}`,

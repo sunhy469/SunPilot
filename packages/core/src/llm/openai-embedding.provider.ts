@@ -4,6 +4,7 @@ import {
   DEEPSEEK_API_KEY_ENV,
   LLM_API_KEY_ENV,
 } from "./llm.config.js";
+import { normalizeBaseUrl, safeResponseText } from "./llm-utils.js";
 import type { FetchLike } from "./llm.types.js";
 
 interface EmbeddingResponse {
@@ -144,16 +145,4 @@ export function createDefaultEmbeddingProvider(
   }
 }
 
-function normalizeBaseUrl(baseUrl: string): string {
-  const trimmed = baseUrl.trim();
-  if (!trimmed) return DEFAULT_LLM_BASE_URL;
-  return trimmed.endsWith("/") ? trimmed : `${trimmed}/`;
-}
 
-async function safeResponseText(response: Response): Promise<string> {
-  try {
-    return await response.text();
-  } catch {
-    return "";
-  }
-}

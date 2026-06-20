@@ -38,24 +38,6 @@ export const AGENT_ACTIVE_STATUSES = [
   "responding",
 ] as const satisfies readonly RunStatus[];
 
-export const AGENT_RECOVERABLE_STATUSES = [
-  "context_building",
-  "intent_routing",
-  "planning",
-  "tool_deciding",
-  "executing",
-  "observing",
-  "reflecting",
-  "responding",
-] as const satisfies readonly RunStatus[];
-
-export const TERMINAL_RUN_STATUSES = [
-  "completed",
-  "failed",
-  "cancelled",
-  "interrupted",
-] as const satisfies readonly RunStatus[];
-
 // ── Step status ────────────────────────────────────────────────────
 
 export type StepStatus =
@@ -179,20 +161,10 @@ export interface ArtifactRecord {
 // Tracks how memories relate to each other for contradiction detection,
 // merge policy, and stale detection (§6 of architecture next steps).
 
-export const MEMORY_RELATIONS = [
-  "supersedes",
-  "contradicts",
-  "resolvedBy",
-  "confirmedBy",
-  "sourceOfTruth",
-] as const;
-
-export type MemoryRelation = (typeof MEMORY_RELATIONS)[number];
-
 export interface MemoryRelationEntry {
   /** The target memory ID this relation points to. */
   targetId: string;
-  relation: MemoryRelation;
+  relation: "supersedes" | "contradicts" | "resolvedBy" | "confirmedBy" | "sourceOfTruth";
   /** When this relation was established. */
   establishedAt: string;
   /** Human-readable reason for this relation. */
@@ -345,17 +317,4 @@ export interface InstalledSkillRecord {
   updatedAt: string;
 }
 
-// ── Agent wire event envelope ──────────────────────────────────────
 
-export interface AgentWireEvent<TPayload = Record<string, unknown>> {
-  jsonrpc: "2.0";
-  method: AgentEventType;
-  params: {
-    eventId: string;
-    sequence: number;
-    runId?: string;
-    conversationId?: string;
-    createdAt: string;
-    payload: TPayload;
-  };
-}

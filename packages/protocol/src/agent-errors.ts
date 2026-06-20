@@ -45,15 +45,6 @@ export type AgentErrorCategory =
   | "rate_limit"
   | "internal";
 
-export interface AgentError {
-  code: AgentErrorCode;
-  message: string;
-  category: AgentErrorCategory;
-  retryable: boolean;
-  details?: Record<string, unknown>;
-  cause?: unknown;
-}
-
 /** JSON-RPC error code mapping per the architecture document. */
 export const JSON_RPC_ERROR_CODES = {
   PARSE_ERROR: -32700,

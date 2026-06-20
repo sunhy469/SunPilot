@@ -10,15 +10,14 @@ describe("RichCardRenderer", () => {
     const cards: RichCardView[] = [
       {
         id: "card_1",
-        type: "info",
-        title: "Info Card",
-        data: { text: "This is an info card" },
+        type: "image",
+        title: "Image Card",
+        data: { src: "https://example.com/img.png", alt: "test" },
       },
     ];
     render(<RichCardRenderer cards={cards} />);
 
-    expect(screen.getByText("Info Card")).toBeInTheDocument();
-    expect(screen.getByText("This is an info card")).toBeInTheDocument();
+    expect(screen.getByText("Image Card")).toBeInTheDocument();
   });
 
   test("renders fallback for unknown card types", () => {
@@ -43,15 +42,15 @@ describe("RichCardRenderer", () => {
     const cards: RichCardView[] = [
       {
         id: "card_good",
-        type: "info",
+        type: "image",
         title: "Good Card",
-        data: { text: "This works fine" },
+        data: { src: "https://example.com/img.png", alt: "works" },
       },
       {
         id: "card_bad",
-        type: "summary",
+        type: "image",
         title: "Bad Card",
-        data: null as unknown as { text: string },
+        data: null as unknown as { src: string },
       },
     ];
 
@@ -72,35 +71,36 @@ describe("RichCardRenderer", () => {
     const cards: RichCardView[] = [
       {
         id: "",
-        type: "info",
+        type: "image",
         title: "No ID Card",
-        data: { text: "Missing ID" },
+        data: { src: "https://example.com/img.png", alt: "test" },
       } as RichCardView,
     ];
     const { container } = render(<RichCardRenderer cards={cards} />);
 
     // Card should still render with a generated key
     expect(screen.getByText("No ID Card")).toBeInTheDocument();
-    const wrapper = container.querySelector('[data-card-id="info_0"]');
+    const wrapper = container.querySelector('[data-card-id="image_0"]');
     expect(wrapper).toBeInTheDocument();
   });
 
-  test("passes cardState and onAction to interactive cards", async () => {
+  test("interactive cards (choice_group) correctly receive cardState and onAction", async () => {
     const onAction = vi.fn();
     const cards: RichCardView[] = [
       {
-        id: "check_1",
-        type: "checklist",
+        id: "choice_1",
+        type: "choice_group",
         data: {
-          items: [
-            { id: "item_1", label: "Task A" },
+          options: [
+            { id: "opt_1", label: "选项 A" },
+            { id: "opt_2", label: "选项 B" },
           ],
-          mode: "local",
+          mode: "single",
         },
       },
     ];
     const stateByCardId = {
-      check_1: { checkedItemIds: ["item_1"] },
+      choice_1: { selectedIds: ["opt_1"] },
     };
 
     render(
@@ -111,9 +111,12 @@ describe("RichCardRenderer", () => {
       />,
     );
 
-    // The checkbox should be checked based on cardState
-    const checkbox = screen.getByRole("checkbox");
-    expect(checkbox).toBeChecked();
+    // ChoiceGroupCard renders Radio buttons for single mode
+    const radio = screen.getAllByRole("radio");
+    expect(radio.length).toBe(2);
+    expect(radio[0]).toBeChecked();
+    // Option text should be visible
+    expect(screen.getByText("选项 A")).toBeInTheDocument();
   });
 
   test("returns null for empty cards array", () => {

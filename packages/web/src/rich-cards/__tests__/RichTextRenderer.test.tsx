@@ -81,4 +81,46 @@ describe("RichTextRenderer", () => {
     const textEl = container.querySelector(".ant-typography-warning, .ant-typography");
     expect(textEl).toBeInTheDocument();
   });
+
+  // ── linkify edge cases (§2.6) ──
+
+  test("URL followed by Chinese punctuation is not truncated", () => {
+    render(<RichTextRenderer value="访问 https://example.com查看详情" />);
+    const link = screen.getByRole("link");
+    expect(link).toHaveAttribute("href", "https://example.com");
+    expect(link.textContent).toBe("https://example.com");
+  });
+
+  test("URL followed by English comma is not included in link", () => {
+    render(<RichTextRenderer value="See https://example.com, for details" />);
+    const link = screen.getByRole("link");
+    expect(link).toHaveAttribute("href", "https://example.com");
+    expect(link.textContent).toBe("https://example.com");
+  });
+
+  test("URL followed by English period is not included in link", () => {
+    render(<RichTextRenderer value="Visit https://example.com." />);
+    const link = screen.getByRole("link");
+    expect(link).toHaveAttribute("href", "https://example.com");
+    expect(link.textContent).toBe("https://example.com");
+  });
+
+  test("URL with percent-encoded Chinese characters is preserved", () => {
+    render(<RichTextRenderer value="See https://example.com/search?q=%E4%B8%AD%E6%96%87" />);
+    const link = screen.getByRole("link");
+    expect(link).toHaveAttribute("href", "https://example.com/search?q=%E4%B8%AD%E6%96%87");
+  });
+
+  test("Markdown link with Chinese label works correctly", () => {
+    render(<RichTextRenderer value="点击[中文链接](https://example.com/中文路径)查看" />);
+    const link = screen.getByRole("link", { name: "中文链接" });
+    expect(link).toBeInTheDocument();
+    expect(link).toHaveAttribute("href", "https://example.com/中文路径");
+  });
+
+  test("URL followed by closing parenthesis is handled", () => {
+    render(<RichTextRenderer value="(see https://example.com)" />);
+    const link = screen.getByRole("link");
+    expect(link).toHaveAttribute("href", "https://example.com");
+  });
 });
