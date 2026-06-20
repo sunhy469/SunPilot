@@ -598,4 +598,149 @@ describe("AgentService", () => {
 
     expect(deltas).toEqual(["hello from ", "agent loop"]);
   });
+
+  // ── §P0-1: reject() must emit run terminal events ────────────────
+
+  test("reject with interrupt strategy emits agent.run.interrupted", async () => {
+    const events: Array<{ type: string; payload: unknown }> = [];
+    const { service, eventBus } = createService({
+      approvalDecisionService: {
+        reject: async () => ({
+          approvalId: "appr_1",
+          runId: "run_interrupt",
+          decidedBy: "user_1",
+        }),
+      } as any,
+      runStateManager: {
+        getRun: async () => ({
+          runId: "run_interrupt",
+          conversationId: "conv_1",
+          status: "waiting_approval",
+          mode: "agent",
+          taskState: { gatheredFacts: {} },
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        }),
+        markStatus: async () => ({ status: "interrupted" }),
+      } as any,
+    });
+    eventBus.subscribe((event) => {
+      events.push({ type: event.type, payload: event.payload });
+    });
+
+    await service.reject("appr_1", "user_1", "not needed", "interrupt");
+
+    const terminalEvents = events.filter(
+      (e) => e.type === "agent.run.interrupted",
+    );
+    expect(terminalEvents).toHaveLength(1);
+    expect(terminalEvents[0]!.payload).toMatchObject({
+      runId: "run_interrupt",
+      reason: "not needed",
+    });
+  });
+
+  test("reject with cancel strategy emits agent.run.cancelled", async () => {
+    const events: Array<{ type: string; payload: unknown }> = [];
+    const { service, eventBus } = createService({
+      approvalDecisionService: {
+        reject: async () => ({
+          approvalId: "appr_2",
+          runId: "run_cancel",
+          decidedBy: "user_1",
+        }),
+      } as any,
+      runStateManager: {
+        getRun: async () => ({
+          runId: "run_cancel",
+          conversationId: "conv_1",
+          status: "waiting_approval",
+          mode: "agent",
+          taskState: { gatheredFacts: {} },
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        }),
+        markCancelled: async (runId: string) => ({
+          runId,
+          conversationId: "conv_1",
+          status: "cancelled",
+          mode: "agent",
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        }),
+      } as any,
+    });
+    eventBus.subscribe((event) => {
+      events.push({ type: event.type, payload: event.payload });
+    });
+
+    await service.reject("appr_2", "user_1", "cancel it", "cancel");
+
+    const terminalEvents = events.filter(
+      (e) => e.type === "agent.run.cancelled",
+    );
+    expect(terminalEvents).toHaveLength(1);
+    expect(terminalEvents[0]!.payload).toMatchObject({
+      runId: "run_cancel",
+      reason: "cancel it",
+    });
+  });
+
+  test("reject with continue_without_tool updates status part to completed", async () => {
+    const events: Array<{ type: string; payload: unknown }> = [];
+    const { service, eventBus } = createService({
+      approvalDecisionService: {
+        reject: async () => ({
+          approvalId: "appr_3",
+          runId: "run_continue",
+          decidedBy: "user_1",
+        }),
+      } as any,
+      runStateManager: {
+        getRun: async () => ({
+          runId: "run_continue",
+          conversationId: "conv_1",
+          status: "waiting_approval",
+          mode: "agent",
+          taskState: {
+            gatheredFacts: {
+              approvalMessageId: "msg_1",
+              partsSnapshot: [
+                { id: "status_1", type: "status", status: "running", label: "等待确认: searchTool" },
+              ],
+            },
+          },
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        }),
+        markStatus: async () => ({ status: "responding" }),
+      } as any,
+      loopEngine: {
+        continueAfterRejection: async () => ({
+          runId: "run_continue",
+          conversationId: "conv_1",
+          status: "completed",
+          artifacts: [],
+          toolCalls: [],
+        }),
+      } as any,
+    });
+    eventBus.subscribe((event) => {
+      events.push({ type: event.type, payload: event.payload });
+    });
+
+    await service.reject("appr_3", "user_1", "skip tool", "continue_without_tool");
+
+    const partUpdated = events.filter(
+      (e) => e.type === "agent.message.part.updated",
+    );
+    expect(partUpdated.length).toBeGreaterThanOrEqual(1);
+    expect(partUpdated[0]!.payload).toMatchObject({
+      partId: "status_1",
+      patch: {
+        status: "completed",
+        label: expect.stringContaining("已拒绝"),
+      },
+    });
+  });
 });

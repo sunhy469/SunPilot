@@ -5,7 +5,7 @@
 import { useState, useEffect, useCallback, type ReactNode } from "react";
 import {
   Spin, Result, Empty, Card, Tag, Tabs, Timeline,
-  Alert, Flex, Typography, Button, Space, List, Row, Col, Divider,
+  Alert, Flex, Typography, Button, Space, List, Row, Col,
 } from "antd";
 import {
   ReloadOutlined, ArrowLeftOutlined,
@@ -14,7 +14,7 @@ import {
   SafetyOutlined,
   FileSearchOutlined, ExperimentOutlined,
 } from "@ant-design/icons";
-import "./RunDebugPanel.css";
+import "./RunDebugPanel.scss";
 
 const { Title, Text, Paragraph } = Typography;
 

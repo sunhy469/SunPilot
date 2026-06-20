@@ -1,10 +1,8 @@
 import { memo, useState } from "react";
-import { Card, Typography, Flex, Button, Tag, Collapse } from "antd";
+import { Card, Typography, Flex, Button, Tag } from "antd";
 import {
   CheckCircleFilled,
   CloseCircleFilled,
-  LoadingOutlined,
-  SyncOutlined,
   DownOutlined,
   UpOutlined,
   ToolOutlined,
@@ -189,5 +187,3 @@ export const ToolResultWidget = memo(function ToolResultWidget({
     </Card>
   );
 });
-
-export default ToolResultWidget;

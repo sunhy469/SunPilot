@@ -14,7 +14,7 @@ import {
   Popconfirm,
 } from "antd";
 import { ReloadOutlined, DeleteOutlined, ExclamationCircleOutlined } from "@ant-design/icons";
-import "./SettingsPage.css";
+import "./SettingsPage.scss";
 
 const { Title, Text, Paragraph } = Typography;
 

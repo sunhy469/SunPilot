@@ -46,6 +46,24 @@ import { AssistantMessageStream } from "./assistant-message-stream.js";
 
 const MAX_TOOL_ITERATIONS = 5;
 
+/**
+ * §P2: Canonical mapping from run phase to user-visible status label.
+ * All startStatus() calls MUST use this mapping instead of hardcoded strings,
+ * so the frontend can reliably parse phase labels.
+ */
+export const RUN_PHASE_LABELS = {
+  context_building: "正在整理上下文",
+  intent_routing: "正在理解需求",
+  planning: "正在制定计划",
+  tool_deciding: "正在匹配工具",
+  executing: "正在调用工具",
+  observing: "正在整理工具结果",
+  reflecting: "正在检查结果",
+  responding: "正在生成回答",
+  waiting_approval: "等待确认",
+  stopped: "已停止",
+} as const;
+
 export interface AgentLoopEngineDeps {
   contextBuilder: ContextBuilder;
   intentRouter: IntentRouter;
@@ -227,7 +245,7 @@ export class AgentLoopEngine {
         { runId: input.runId, conversationId: input.conversationId });
       stream.start();
       progressStatusId = stream.startStatus({
-        label: "正在理解需求...",
+        label: RUN_PHASE_LABELS.intent_routing,
         metadata: { phase: "running" },
       }).id;
     }
@@ -271,7 +289,7 @@ export class AgentLoopEngine {
       // §P1-1: Update progress status when entering planning
       if (intent.requiresPlanning && stream) {
         progressStatusId = stream.startStatus({
-          label: "正在制定执行计划...",
+          label: RUN_PHASE_LABELS.planning,
           metadata: { phase: "running" },
         }).id;
       }
@@ -884,7 +902,7 @@ Keep your response to the JSON object ONLY — no preamble, no explanation.`;
         // the stream, so the history shows "已停止" instead of a blank card.
         try {
           stream.startStatus({
-            label: "已停止",
+            label: RUN_PHASE_LABELS.stopped,
             metadata: { phase: "completed" },
           });
           const stopText = stream.startTextPart("final");
@@ -964,11 +982,11 @@ Keep your response to the JSON object ONLY — no preamble, no explanation.`;
 
     // Emit status parts for each tool needing approval
     for (const tc of decision.toolCalls) {
-      stream.startStatus({
-        label: `等待确认: ${tc.name}`,
-        toolCallId: tc.id,
-        metadata: { skillId: tc.skillId, phase: "queued" },
-      });
+    stream.startStatus({
+      label: `${RUN_PHASE_LABELS.waiting_approval}: ${tc.name}`,
+      toolCallId: tc.id,
+      metadata: { skillId: tc.skillId, phase: "queued" },
+    });
       stream.addToolUse({
         toolCallId: tc.id,
         skillId: tc.skillId,
@@ -1055,9 +1073,9 @@ Keep your response to the JSON object ONLY — no preamble, no explanation.`;
       });
       stream.start();
       stream.startStatus({
-        label: `等待确认: ${decision.approval.title}`,
-        metadata: { phase: "queued" },
-      });
+      label: `${RUN_PHASE_LABELS.waiting_approval}: ${decision.approval.title}`,
+      metadata: { phase: "queued" },
+    });
 
       // §Step 1b: Snapshot current parts for resume continuity.
       // The stream is NOT completed — events are live-emitted via WebSocket.
@@ -1601,6 +1619,20 @@ Keep your response to the JSON object ONLY — no preamble, no explanation.`;
         });
         stream.start();
 
+        // §P0-3: Update the original "等待确认" status part to completed
+        // The hydrated parts include the "等待确认" status part(s) that were
+        // created during the approval request. Mark them as completed now.
+        if (hydrateParts) {
+          for (const part of hydrateParts) {
+            if (part.type === "status" && part.status === "running" && part.label?.startsWith(RUN_PHASE_LABELS.waiting_approval)) {
+              stream.updateStatus(part.id, {
+                status: "completed",
+                label: `已确认: ${part.label.replace(`${RUN_PHASE_LABELS.waiting_approval}: `, "")}`,
+              });
+            }
+          }
+        }
+
         await this.deps.runStateManager.markStatus(run.runId, "executing");
 
         // §P1-2 fix: Execute approved tool calls DIRECTLY instead of
@@ -1845,61 +1877,6 @@ Keep your response to the JSON object ONLY — no preamble, no explanation.`;
       };
     }
   }
-
-  /**
-   * 发起审批请求。
-   *
-   * 两条路径：
-   * 1. DB 持久化审批（approvalRequestService 存在）：写入 DB 并发布预构建事件
-   * 2. 内存审批（仅 approvalGate）：写入内存并 emit 事件
-   *
-   * 审批请求创建后，状态机暂停在 waiting_approval，等待 approve() 或 reject()。
-   */
-  private async requestApproval(input: {
-    runId: string;
-    conversationId: string;
-    stepId?: string;
-    toolCallId?: string;
-    title: string;
-    description: string;
-    riskLevel: RiskLevel;
-    requestedAction: {
-      skillId: string;
-      arguments: Record<string, unknown>;
-      permissions: Permission[];
-      toolCallId?: string;
-    };
-  }): Promise<{ id: string; status: string }> {
-    if (this.deps.approvalRequestService) {
-      const result =
-        await this.deps.approvalRequestService.requestApproval(input);
-      this.deps.eventBus.publish(result.event);
-      return result.approval;
-    }
-
-    await this.deps.runStateManager.markStatus(
-      input.runId,
-      "waiting_approval",
-      `awaiting approval for ${input.title}`,
-    );
-    const approval = await this.deps.approvalGate.createApproval(input);
-    this.deps.eventBus.emit(
-      "agent.approval.required",
-      {
-        runId: input.runId,
-        approvalId: approval.id,
-        title: input.title,
-        description: input.description,
-        riskLevel: input.riskLevel,
-        skillId: input.requestedAction.skillId,
-        argumentsPreview: summarizeArguments(input.requestedAction.arguments),
-        reasons: buildRiskReasons(input.riskLevel, input.requestedAction),
-      },
-      { runId: input.runId, conversationId: input.conversationId },
-    );
-    return approval;
-  }
-
 
   /**
    * 写入记忆（最佳努力，失败不阻塞主流程）。

@@ -10,7 +10,7 @@ import {
   PushpinFilled,
   DeleteOutlined,
 } from "@ant-design/icons";
-import "./RecentConversations.css";
+import "./RecentConversations.scss";
 
 const { Text } = Typography;
 

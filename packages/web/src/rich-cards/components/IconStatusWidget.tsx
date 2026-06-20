@@ -233,5 +233,3 @@ export const IconStatusWidget = {
   SkillStatusBadge,
   InfoTip,
 };
-
-export default IconStatusWidget;

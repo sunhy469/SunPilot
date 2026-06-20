@@ -25,14 +25,7 @@ import type { AgentEventBus } from "../agent-event-bus.js";
 import type { ModelRouter } from "../model-router.js";
 import { checkAnyOfUnsatisfied } from "./tool-schema-utils.js";
 import { RichCardBuilder } from "./rich-card-builder.js";
-
-const MARKDOWN_RESPONSE_POLICY = `Response format policy:
-- Default to structured Markdown output unless the user explicitly asks for plain text.
-- For informational answers: use ##/### headings, short intro, grouped bullets, tables when comparing, **bold** for key conclusions, fenced code blocks or inline code for code/commands/paths, ordered lists for multi-step plans.
-- For product/resource/search results: give a summary first, then a structured table, then filtering suggestions, then follow-up directions.
-- Avoid "以下是..." repetitive openings. Do not repeat the same content in the same paragraph.
-- Do not use raw HTML — the Markdown renderer handles formatting.
-- Use the same language as the user.`;
+import { MARKDOWN_RESPONSE_POLICY } from "./markdown-response-policy.js";
 
 import type {
   ChatMessage,
@@ -2272,7 +2265,7 @@ Use the same language as the user.`,
     const builder = new RichCardBuilder();
     builder.fromArtifacts(
       artifacts.map((a) => ({
-        type: a.type as import("@sunpilot/protocol").RichCardType,
+        type: a.type,
         name: a.name,
         url: (a as unknown as Record<string, unknown>).url as
           | string

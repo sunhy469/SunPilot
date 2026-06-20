@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 import { Layout } from "antd";
-import "./AppShell.css";
+import "./AppShell.scss";
 
 const { Content } = Layout;
 

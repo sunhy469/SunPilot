@@ -190,5 +190,3 @@ export const SkillResultWidget = memo(function SkillResultWidget({
     </Card>
   );
 });
-
-export default SkillResultWidget;

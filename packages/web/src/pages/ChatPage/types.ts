@@ -1,7 +1,3 @@
-import type { RichCardView } from "../../rich-cards";
-
-export type AgentStatus = "online" | "offline" | "thinking";
-
 export type ChatViewState =
   | "welcome"
   | "loadingConversation"
@@ -9,15 +5,6 @@ export type ChatViewState =
   | "streaming"
   | "offline"
   | "error";
-
-export type MessageRole = "user" | "assistant" | "system";
-
-export type MessageStatus =
-  | "pending"
-  | "streaming"
-  | "completed"
-  | "error"
-  | "stopped";
 
 /**
  * Local send state — tracks the lifecycle of a user message from composition
@@ -35,12 +22,3 @@ export type LocalSendState =
   | "streaming"
   | "completed"
   | "failed";
-
-export interface ChatMessageView {
-  id: string;
-  role: MessageRole;
-  content: string;
-  createdAt?: string;
-  status?: MessageStatus;
-  cards?: RichCardView[];
-}

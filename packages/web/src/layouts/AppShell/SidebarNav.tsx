@@ -1,6 +1,6 @@
 import { AppstoreOutlined, BugOutlined, ClockCircleOutlined, PlusOutlined } from "@ant-design/icons";
 import { Button, Flex } from "antd";
-import "./SidebarNav.css";
+import "./SidebarNav.scss";
 
 export function SidebarNav({
   activePanel,

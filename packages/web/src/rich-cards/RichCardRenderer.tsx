@@ -2,8 +2,7 @@ import { Component, memo, type ReactNode } from "react";
 import { Flex, Typography, Alert, Card } from "antd";
 import type { RichCardView, RichCardAction, RichCardRendererProps } from "./types";
 import { CARD_REGISTRY } from "./registry";
-import { InfoCard } from "./components/BasicCards";
-import "./rich-cards.css";
+import "./rich-cards.scss";
 
 const { Text } = Typography;
 
@@ -75,7 +74,7 @@ const RichCard = memo(function RichCard({
       >
         {render
           ? render(card, cardState, actionHandler)
-          : <InfoCard title={card.title} data={{ text: `未知卡片类型: ${card.type}` }} />}
+          : <div className="rich-card-fallback">未知卡片类型: {card.type}</div>}
       </div>
     </CardErrorBoundary>
   );

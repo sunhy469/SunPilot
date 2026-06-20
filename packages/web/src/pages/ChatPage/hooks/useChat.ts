@@ -88,6 +88,7 @@ function parseSocketPayload(
   if ("method" in payload) {
     switch (payload.method) {
       case "agent.run.created":
+      case "agent.run.started":
       case "agent.context.started":
       case "agent.context.completed":
       case "agent.intent.detected":
@@ -174,6 +175,22 @@ const lastDeltaIndexByPartId = new Map<string, number>();
 //   - partId is the dedup key for parts
 //   - completed is final override, not incremental append
 
+/**
+ * Local placeholder status part inserted on agent.message.started
+ * so the UI shows "正在理解需求..." immediately via ThinkingProcessSection,
+ * instead of falling through to the static fallback branch.
+ * Replaced/removed when the first real agent.message.part.started arrives.
+ */
+const LOCAL_PENDING_STATUS_PART: AssistantMessagePart = {
+  id: "__local_pending",
+  type: "status",
+  label: "正在理解需求...",
+  status: "running",
+  runId: "",
+  createdAt: "",
+  metadata: { phase: "local_pending" },
+};
+
 function assistantMessageReducer(
   items: ChatMessage[],
   event: { method: string; params: Record<string, unknown> },
@@ -190,7 +207,15 @@ function assistantMessageReducer(
     if (items.some((m) => m.id === msgParams.messageId)) {
       return items.map((m) =>
         m.id === msgParams.messageId
-          ? { ...m, status: "streaming" as const, parts: m.parts ?? [] }
+          ? {
+              ...m,
+              status: "streaming" as const,
+              // Insert local pending status part if no parts yet
+              parts:
+                (m.parts ?? []).length > 0
+                  ? m.parts
+                  : [LOCAL_PENDING_STATUS_PART],
+            }
           : m,
       );
     }
@@ -215,7 +240,7 @@ function assistantMessageReducer(
               id: msgParams.messageId,
               conversationId: msgParams.conversationId ?? conversationId,
               status: "streaming" as const,
-              parts: [],
+              parts: [LOCAL_PENDING_STATUS_PART],
             }
           : m,
       );
@@ -232,7 +257,7 @@ function assistantMessageReducer(
         createdAt: new Date().toISOString(),
         status: "streaming" as const,
         activities: [],
-        parts: [],
+        parts: [LOCAL_PENDING_STATUS_PART],
       },
     ];
   }
@@ -248,15 +273,17 @@ function assistantMessageReducer(
     return items.map((item) => {
       if (item.id !== partParams.messageId) return item;
       const parts = item.parts ?? [];
+      // Remove local pending placeholder when the first real part arrives
+      const withoutLocal = parts.filter((p) => p.id !== "__local_pending");
       // Upsert by part.id: if part already exists, merge; otherwise append
       const existingIdx =
-        partId != null ? parts.findIndex((p) => p.id === partId) : -1;
+        partId != null ? withoutLocal.findIndex((p) => p.id === partId) : -1;
       const nextParts =
         existingIdx >= 0
-          ? parts.map((p, i) =>
+          ? withoutLocal.map((p, i) =>
               i === existingIdx ? { ...p, ...incomingPart } : p,
             )
-          : [...parts, incomingPart];
+          : [...withoutLocal, incomingPart];
       return { ...item, parts: nextParts };
     });
   }
@@ -516,16 +543,69 @@ function upsertTextPartDelta(
 }
 
 /**
+ * §P1-4: Explicit event visibility classification.
+ *
+ * Every event in the protocol's AGENT_EVENT_TYPES MUST be listed here
+ * with one of four visibility levels:
+ *   - "visible"  → mapped to a user-visible AgentActivity
+ *   - "status"   → drives UI state (sendState/status/pending) but no activity
+ *   - "debug"    → only shown in the debug panel, no UI impact
+ *   - "ignored"  → intentionally not handled (e.g. pong)
+ *
+ * When new events are added to the protocol, they MUST be added here
+ * to avoid silent no-ops.
+ */
+const AGENT_EVENT_VISIBILITY: Record<string, "visible" | "status" | "debug" | "ignored"> = {
+  // ── User-visible activities ──────────────────────────────────────
+  "agent.tool.started": "visible",
+  "agent.tool.delta": "visible",
+  "agent.tool.completed": "visible",
+  "agent.tool.failed": "visible",
+  "agent.error": "visible",
+
+  // ── Status-driving events (handled in live handler, no activity) ─
+  "agent.run.created": "status",
+  "agent.run.started": "status",
+  "agent.run.completed": "status",
+  "agent.run.failed": "status",
+  "agent.run.cancelled": "status",
+  "agent.run.interrupted": "status",
+  "agent.message.started": "status",
+  "agent.message.part.started": "status",
+  "agent.message.part.delta": "status",
+  "agent.message.part.updated": "status",
+  "agent.message.completed": "status",
+  "agent.approval.required": "status",
+  "agent.approval.approved": "status",
+  "agent.approval.rejected": "status",
+  "agent.approval.expired": "status",
+  "agent.artifact.created": "status",
+  "agent.memory.written": "status",
+
+  // ── Debug-only events (no user-visible activity) ─────────────────
+  "agent.context.started": "debug",
+  "agent.context.completed": "debug",
+  "agent.intent.detected": "debug",
+  "agent.plan.created": "debug",
+  "agent.tool.selected": "debug",
+  "agent.model.started": "debug",
+  "agent.model.delta": "debug",
+  "agent.model.completed": "debug",
+  "agent.model.failed": "debug",
+  "agent.clarification.requested": "debug",
+
+  // ── Ignored ──────────────────────────────────────────────────────
+  "pong": "ignored",
+};
+
+/**
  * Map agent events to user-visible activities.
  *
- * Internal lifecycle events (context, intent, plan, model lifecycle)
- * are intentionally NOT mapped to activities — they are debug/trace
- * information, not user-facing content. The debug panel shows full
- * event traces separately.
+ * Only events classified as "visible" in AGENT_EVENT_VISIBILITY produce
+ * an AgentActivity. All other events are classified but do not produce
+ * activities — they are either status-driving, debug-only, or ignored.
  *
- * Phase 0 of content-block streaming refactoring:
- *   https://github.com/sunhy469/SunPilot/blob/main/developer_docs/guides/
- *   agent_interleaved_streaming_response_design.md
+ * The debug panel shows full event traces separately.
  */
 function activityFromAgentEvent(
   event: ChatSocketEvent,
@@ -533,6 +613,21 @@ function activityFromAgentEvent(
   if (event.method === "pong") return undefined;
   const createdAt = event.createdAt ?? new Date().toISOString();
   const id = event.id ?? `${event.method}_${createdAt}`;
+
+  // Exhaustive check: if an event is not in the visibility map, log a warning
+  const visibility = AGENT_EVENT_VISIBILITY[event.method];
+  if (!visibility) {
+    if (typeof console !== "undefined") {
+      console.warn(
+        `[activityFromAgentEvent] Unmapped event: "${event.method}". ` +
+        `Add it to AGENT_EVENT_VISIBILITY with an appropriate level.`,
+      );
+    }
+    return undefined;
+  }
+
+  // Only "visible" events produce activities
+  if (visibility !== "visible") return undefined;
 
   switch (event.method) {
     // ── Tool execution (user-visible) ──────────────────────────
@@ -583,15 +678,6 @@ function activityFromAgentEvent(
         createdAt,
       };
 
-    // ── Internal lifecycle events — intentionally hidden ──────
-    // agent.context.started    → debug only
-    // agent.context.completed  → debug only
-    // agent.intent.detected    → debug only
-    // agent.plan.created       → debug only
-    // agent.tool.selected      → debug only
-    // agent.model.started      → debug only
-    // agent.model.completed    → debug only
-    // agent.model.failed       → debug only
     default:
       return undefined;
   }
@@ -650,6 +736,37 @@ export function useChat(
       setError("Chat request timed out before the daemon returned a response.");
     }, 90_000);
   }, [clearResponseTimer, setPendingState]);
+
+  // ── Unified finish helper (§P1-2) ────────────────────────────────
+  // All terminal events (run.completed/failed/cancelled/interrupted,
+  // message.completed) MUST call this instead of duplicating cleanup.
+  const finishActiveRun = useCallback(
+    (outcome: { sendState: "completed" | "failed"; error?: string }) => {
+      clearResponseTimer();
+      setSendState(outcome.sendState);
+      setStatus("online");
+      setPendingState(false);
+      if (outcome.error) setError(outcome.error);
+      setToolName(null);
+      toolCallCountRef.current = 0;
+      activeRunIdRef.current = null;
+      setActiveRunId(null);
+    },
+    [clearResponseTimer, setPendingState],
+  );
+
+  // ── Unified mark-active helper (§P1-3) ──────────────────────────
+  // Called when any event indicates the run is actively progressing.
+  const markRunActive = useCallback(
+    (runId: string, uiState?: { sendState?: LocalSendState; status?: "online" | "offline" | "thinking" }) => {
+      activeRunIdRef.current = runId;
+      setActiveRunId(runId);
+      if (uiState?.sendState) setSendState(uiState.sendState);
+      if (uiState?.status) setStatus(uiState.status);
+      startResponseTimer();
+    },
+    [startResponseTimer],
+  );
 
   const closeSocket = useCallback(() => {
     if (keepAliveTimerRef.current !== null) {
@@ -733,7 +850,7 @@ export function useChat(
         method === "agent.approval.rejected" ||
         method === "agent.approval.expired"
       ) {
-        const payload = params as { approvalId: string; decidedBy?: string };
+        const payload = params as { approvalId: string; decidedBy?: string; strategy?: string; runId?: string };
         const status =
           method === "agent.approval.approved"
             ? "approved"
@@ -752,6 +869,42 @@ export function useChat(
               : item,
           ),
         );
+
+        // §P0-2: Defensive cleanup — if the rejection strategy is terminal
+        // (interrupt/cancel), the backend should emit agent.run.interrupted/cancelled,
+        // but we also clean up here as defense-in-depth in case that event is delayed.
+        if (method === "agent.approval.rejected") {
+          const strategy = payload.strategy;
+          if (strategy === "interrupt" || strategy === "cancel") {
+            // Only clean up if this run is still active
+            if (activeRunIdRef.current === payload.runId) {
+              finishActiveRun({ sendState: "failed" });
+              setMessages((items) =>
+                items.map((item) =>
+                  item.role === "assistant" && item.status === "streaming"
+                    ? { ...item, status: "stopped" as const }
+                    : item,
+                ),
+              );
+            }
+          }
+        }
+
+        // §P0-2: Approval expired — backend should emit agent.run.cancelled,
+        // but we also clean up here as defense-in-depth.
+        if (method === "agent.approval.expired") {
+          if (activeRunIdRef.current === payload.runId) {
+            finishActiveRun({ sendState: "failed" });
+            setMessages((items) =>
+              items.map((item) =>
+                item.role === "assistant" && item.status === "streaming"
+                  ? { ...item, status: "stopped" as const }
+                  : item,
+              ),
+            );
+          }
+        }
+
         return;
       }
 
@@ -763,6 +916,17 @@ export function useChat(
         if (payload.conversationId && !conversationId) {
           setConversationId(payload.conversationId);
           onConversationCreatedRef.current?.(payload.conversationId);
+        }
+      }
+
+      // §P1-1: Handle agent.run.started — the run has actually begun execution
+      if (method === "agent.run.started") {
+        const payload = params as { runId: string; conversationId?: string; originalRunId?: string; attemptAction?: string };
+        activeRunIdRef.current = payload.runId;
+        setActiveRunId(payload.runId);
+        // For resume/retry, sync conversationId if present
+        if (payload.conversationId) {
+          setConversationId(payload.conversationId);
         }
       }
       if (
@@ -970,20 +1134,18 @@ export function useChat(
       const event = payload as ChatSocketEvent;
       // ── Agent error events ────────────────────────────────────
       if (event.method === "agent.error") {
-        clearResponseTimer();
-        setSendState("failed");
+        finishActiveRun({
+          sendState: "failed",
+          error:
+            event.params.error?.message ??
+            event.params.message ??
+            "Agent request failed.",
+        });
         applyAgentEvent(event);
         const activity = activityFromAgentEvent(event);
         if (activity) {
           appendAssistantActivity(activity);
         }
-        setError(
-          event.params.error?.message ??
-            event.params.message ??
-            "Agent request failed.",
-        );
-        setPendingState(false);
-        setStatus("online");
         return;
       }
 
@@ -1009,6 +1171,16 @@ export function useChat(
               : item,
           ),
         );
+      }
+
+      // §P1-1: agent.run.started — run has actually begun execution
+      // For live events, this signals the run is actively running.
+      // For resume/retry, this is the primary "run is active again" signal.
+      if (event.method === "agent.run.started") {
+        markRunActive(event.params.runId, { sendState: "running", status: "thinking" });
+        if (event.params.conversationId) {
+          setConversationId(event.params.conversationId);
+        }
       }
 
       // ── Tool call tracking ──────────────────────────────────
@@ -1072,10 +1244,7 @@ export function useChat(
       // Here we only manage live UI concerns: timers, sendState, status.
       if (event.method === "agent.message.started") {
         const msgParams = event.params as { runId: string };
-        activeRunIdRef.current = msgParams.runId;
-        setActiveRunId(msgParams.runId);
-        setSendState("streaming");
-        setStatus("thinking");
+        markRunActive(msgParams.runId, { sendState: "streaming", status: "thinking" });
       }
 
       if (event.method === "agent.message.part.started") {
@@ -1093,52 +1262,26 @@ export function useChat(
       }
 
       if (event.method === "agent.message.completed") {
-        clearResponseTimer();
-        setSendState("completed");
-        setStatus("online");
-        setPendingState(false);
-        setToolName(null);
-        toolCallCountRef.current = 0;
-        activeRunIdRef.current = null;
-        setActiveRunId(null);
+        finishActiveRun({ sendState: "completed" });
       }
 
       // ── Agent message completed via content-block event ──────────
       // (agent.response.completed UI handler removed — agent.message.completed handles this)
       if (event.method === "agent.run.completed") {
-        clearResponseTimer();
-        setSendState("completed");
-        setStatus("online");
-        setPendingState(false);
-        setToolName(null);
-        toolCallCountRef.current = 0;
-        activeRunIdRef.current = null;
-        setActiveRunId(null);
+        finishActiveRun({ sendState: "completed" });
       }
 
       // ── Agent run failed ──────────────────────────────────────
       if (event.method === "agent.run.failed") {
-        clearResponseTimer();
-        setSendState("failed");
-        setStatus("online");
-        setPendingState(false);
-        setError(event.params.error.message);
-        setToolName(null);
-        toolCallCountRef.current = 0;
-        activeRunIdRef.current = null;
-        setActiveRunId(null);
+        finishActiveRun({
+          sendState: "failed",
+          error: event.params.error.message,
+        });
       }
 
       // ── Agent run cancelled ───────────────────────────────────
       if (event.method === "agent.run.cancelled") {
-        clearResponseTimer();
-        setSendState("failed");
-        setStatus("online");
-        setPendingState(false);
-        setToolName(null);
-        toolCallCountRef.current = 0;
-        activeRunIdRef.current = null;
-        setActiveRunId(null);
+        finishActiveRun({ sendState: "failed" });
         // §Frontend gap: Mark the active assistant message as stopped
         setMessages((items) =>
           items.map((item) =>
@@ -1151,14 +1294,7 @@ export function useChat(
 
       // ── Agent run interrupted ─────────────────────────────────
       if (event.method === "agent.run.interrupted") {
-        clearResponseTimer();
-        setSendState("failed");
-        setStatus("online");
-        setPendingState(false);
-        setToolName(null);
-        toolCallCountRef.current = 0;
-        activeRunIdRef.current = null;
-        setActiveRunId(null);
+        finishActiveRun({ sendState: "failed" });
         // §Frontend gap: Mark the active assistant message as stopped
         setMessages((items) =>
           items.map((item) =>
@@ -1173,7 +1309,8 @@ export function useChat(
   }, [
     appendAssistantActivity,
     applyAgentEvent,
-    clearResponseTimer,
+    finishActiveRun,
+    markRunActive,
     conversationId,
     setConversationId,
     setMessages,
