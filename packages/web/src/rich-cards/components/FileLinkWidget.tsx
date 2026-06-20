@@ -13,6 +13,8 @@ import {
   FileUnknownOutlined,
   LinkOutlined,
 } from "@ant-design/icons";
+import type { RichTextValue } from "../types";
+import { RichTextRenderer } from "../richText";
 
 const { Text } = Typography;
 
@@ -42,9 +44,9 @@ export interface FileLinkWidgetProps {
   /** Optional description or summary */
   description?: string;
   /** Card title */
-  title?: string;
+  title?: RichTextValue;
   /** Card subtitle */
-  subtitle?: string;
+  subtitle?: RichTextValue;
 }
 
 // ── File type config ──────────────────────────────────────────────────
@@ -215,13 +217,13 @@ export const FileLinkWidget = memo(function FileLinkWidget({
 
   if (title) {
     return (
-      <Card title={title} size="small" className="file-link-card">
+      <Card title={<RichTextRenderer value={title} inline={true} />} size="small" className="file-link-card">
         {subtitle && (
           <Text
             type="secondary"
             style={{ display: "block", margin: "0 0 12px 0" }}
           >
-            {subtitle}
+            <RichTextRenderer value={subtitle} inline={true} />
           </Text>
         )}
         {content}

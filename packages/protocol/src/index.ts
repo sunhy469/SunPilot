@@ -5,3 +5,4 @@ export * from "./agent-commands.js";
 export * from "./agent-errors.js";
 export * from "./audit.js";
 export * from "./message-parts.js";
+export * from "./rich-cards.js";

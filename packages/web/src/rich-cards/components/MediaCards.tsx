@@ -2,21 +2,24 @@ import { Image, Typography } from "antd";
 import type {
   CodeCardData,
   GalleryCardData,
+  ImageCardData,
   MetricCardData,
   TimelineCardData,
   VideoCardData,
 } from "../types";
+import type { RichTextValue } from "../types";
 import { RichCardShell } from "./RichCardShell";
+import { RichTextRenderer } from "../richText";
 
-const { Text, Paragraph } = Typography;
+const { Text } = Typography;
 
 export function VideoCard({
   title,
   subtitle,
   data,
 }: {
-  title?: string;
-  subtitle?: string;
+  title?: RichTextValue;
+  subtitle?: RichTextValue;
   data: VideoCardData;
 }) {
   return (
@@ -32,14 +35,18 @@ export function MetricCard({
   subtitle,
   data,
 }: {
-  title?: string;
-  subtitle?: string;
+  title?: RichTextValue;
+  subtitle?: RichTextValue;
   data: MetricCardData;
 }) {
+  const metrics = Array.isArray(data.metrics)
+    ? data.metrics
+    : [{ label: (data as any).label, value: (data as any).value, change: (data as any).change, tone: (data as any).tone }];
+
   return (
     <RichCardShell title={title} subtitle={subtitle}>
       <div className="rich-metrics">
-        {data.metrics.map((metric) => (
+        {metrics.map((metric) => (
           <div key={metric.label} className={`rich-metric is-${metric.tone ?? "blue"}`}>
             <Text>{metric.label}</Text>
             <Text strong>{metric.value}</Text>
@@ -56,8 +63,8 @@ export function TimelineCard({
   subtitle,
   data,
 }: {
-  title?: string;
-  subtitle?: string;
+  title?: RichTextValue;
+  subtitle?: RichTextValue;
   data: TimelineCardData;
 }) {
   return (
@@ -69,7 +76,7 @@ export function TimelineCard({
             <div>
               <Text strong>{item.title}</Text>
               {item.time && <Text type="secondary"> {item.time}</Text>}
-              {item.description && <Paragraph>{item.description}</Paragraph>}
+              {item.description && <RichTextRenderer value={item.description} inline={false} />}
             </div>
           </div>
         ))}
@@ -83,8 +90,8 @@ export function CodeCard({
   subtitle,
   data,
 }: {
-  title?: string;
-  subtitle?: string;
+  title?: RichTextValue;
+  subtitle?: RichTextValue;
   data: CodeCardData;
 }) {
   return (
@@ -103,8 +110,8 @@ export function GalleryCard({
   subtitle,
   data,
 }: {
-  title?: string;
-  subtitle?: string;
+  title?: RichTextValue;
+  subtitle?: RichTextValue;
   data: GalleryCardData;
 }) {
   return (
@@ -119,6 +126,25 @@ export function GalleryCard({
           ))}
         </div>
       </Image.PreviewGroup>
+    </RichCardShell>
+  );
+}
+
+export function ImageCard({
+  title,
+  subtitle,
+  data,
+}: {
+  title?: RichTextValue;
+  subtitle?: RichTextValue;
+  data: ImageCardData;
+}) {
+  return (
+    <RichCardShell title={title} subtitle={subtitle}>
+      <div className="rich-image-card">
+        <Image src={data.src} alt={data.alt ?? ""} className="rich-image-card__img" />
+        {data.caption && <Text type="secondary" className="rich-image-card__caption">{data.caption}</Text>}
+      </div>
     </RichCardShell>
   );
 }
