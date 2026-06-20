@@ -3,6 +3,7 @@
 }
 
 .sidebar-nav-item.ant-btn {
+  align-items: center;
   justify-content: flex-start;
   font-size: 18px;
   font-weight: 500;
@@ -12,6 +13,21 @@
   transition: all 0.15s ease;
   position: relative;
   overflow: hidden;
+}
+
+.sidebar-nav-item.ant-btn .ant-btn-icon {
+  width: 18px;
+  min-width: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+}
+
+.sidebar-nav-item.ant-btn .digital-being-icon {
+  width: 20px;
+  height: 20px;
+  vertical-align: 0;
 }
 
 .sidebar-nav-item.ant-btn:hover {

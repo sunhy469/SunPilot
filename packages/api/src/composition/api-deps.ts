@@ -1,4 +1,5 @@
 import type { AgentService } from "@sunpilot/core";
+import type { PlatformServices } from "@sunpilot/platform";
 import type { DatabaseContext, SunPilotPaths } from "@sunpilot/storage";
 import type { OssClient } from "../storage/oss-client.js";
 
@@ -8,6 +9,7 @@ import type { OssClient } from "../storage/oss-client.js";
  */
 export interface SunPilotApiDeps {
   database: DatabaseContext;
+  platform: PlatformServices;
   paths: SunPilotPaths;
   getChatAgent(): Promise<
     Pick<
