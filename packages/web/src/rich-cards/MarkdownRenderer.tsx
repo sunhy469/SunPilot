@@ -195,6 +195,7 @@ const markdownComponents: Components = {
   table: TableWrapper as any,
   a: Anchor as any,
   img: Image as any,
+  li: TaskListItem as any,
   hr: HorizontalRule as any,
 };
 

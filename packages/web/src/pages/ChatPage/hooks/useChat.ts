@@ -29,6 +29,7 @@ import type {
   ChatMessage,
   AssistantMessagePart,
 } from "../../../features/conversations/types";
+import type { RichCardAction } from "../../../rich-cards/types";
 import type { ChatViewState, LocalSendState } from "../types";
 
 type ChatSocketPayload = ChatSocketEvent | ChatSocketErrorResponse;
@@ -316,7 +317,8 @@ function assistantMessageReducer(
       parts: Array<Record<string, unknown>>;
       cards?: Array<{
         type: string;
-        title?: string;
+        title?: import("../../../rich-cards/types").RichTextValue;
+        subtitle?: import("../../../rich-cards/types").RichTextValue;
         data: Record<string, unknown>;
       }>;
     };
@@ -1384,6 +1386,70 @@ export function useChat(
     ensureSocket();
   }, [ensureSocket]);
 
+  /**
+   * Handle rich card interaction actions (toggle_item, submit, open_link).
+   * Updates the message's cardStateByCardId so interactive cards
+   * (checklist, choice_group, etc.) persist state across re-renders.
+   *
+   * Phase 1: local state only — no backend event sent.
+   * Phase 2 (future): send rich_card.action via WebSocket for submit mode.
+   */
+  const onCardAction = useCallback(
+    (messageId: string, action: RichCardAction) => {
+      setMessages((items) =>
+        items.map((item) => {
+          if (item.id !== messageId) return item;
+          const prev = item.cardStateByCardId ?? {};
+          const cardId = action.cardId;
+          const cardState = (prev[cardId] ?? {}) as Record<string, unknown>;
+
+          let nextCardState: Record<string, unknown>;
+          switch (action.type) {
+            case "toggle_item": {
+              const checkedIds = new Set<string>(
+                (cardState.checkedItemIds as string[]) ?? [],
+              );
+              if (action.checked) {
+                checkedIds.add(action.itemId);
+              } else {
+                checkedIds.delete(action.itemId);
+              }
+              nextCardState = {
+                ...cardState,
+                checkedItemIds: Array.from(checkedIds),
+              };
+              break;
+            }
+            case "submit": {
+              nextCardState = {
+                ...cardState,
+                submitted: true,
+                payload: action.payload,
+              };
+              break;
+            }
+            case "open_link": {
+              nextCardState = { ...cardState };
+              break;
+            }
+            default: {
+              nextCardState = { ...cardState };
+            }
+          }
+
+          return {
+            ...item,
+            cardStateByCardId: {
+              ...prev,
+              [cardId]: nextCardState,
+            },
+          };
+        }),
+      );
+    },
+    [setMessages],
+  );
+
   const chatViewState: ChatViewState = (() => {
     if (error) return "error";
     if (status === "offline" && pending) return "offline";
@@ -1420,5 +1486,6 @@ export function useChat(
     closeArtifact,
     approveApproval,
     rejectApproval,
+    onCardAction,
   };
 }

@@ -86,7 +86,7 @@ export interface IAssistantMessageStream {
   /** §Step 1b: Snapshot current parts without completing. */
   getPartsSnapshot(): AssistantMessagePart[];
   /** Set rich cards for inline rendering (image/video artifacts). */
-  setRichCards(cards: Array<{ type: string; title?: string; data: Record<string, unknown> }>): void;
+  setRichCards(cards: Array<import("@sunpilot/protocol").RichCardOutput>): void;
   complete(): Promise<{
     messageId: string;
     content: string;

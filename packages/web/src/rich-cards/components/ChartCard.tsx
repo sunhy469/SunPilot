@@ -1,5 +1,6 @@
 import { Progress, Typography } from "antd";
 import type { ChartCardData } from "../types";
+import type { RichTextValue } from "../types";
 import { RichCardShell } from "./RichCardShell";
 
 const { Text } = Typography;
@@ -9,8 +10,8 @@ export function ChartCard({
   subtitle,
   data,
 }: {
-  title?: string;
-  subtitle?: string;
+  title?: RichTextValue;
+  subtitle?: RichTextValue;
   data: ChartCardData;
 }) {
   const total = data.items.reduce((sum, item) => sum + item.value, 0) || 1;
