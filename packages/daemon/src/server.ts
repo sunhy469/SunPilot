@@ -20,6 +20,7 @@ import {
   ensureSunPilotHome,
   getSunPilotPaths,
 } from "@sunpilot/storage";
+import { createPlatformServices } from "@sunpilot/platform";
 import { createAgentLoopService } from "./composition-root.js";
 import {
   registerSunPilotApiRoutes,
@@ -179,6 +180,7 @@ export async function createDaemon(options: DaemonOptions = {}) {
 
   const apiDeps: SunPilotApiDeps = {
     database,
+    platform: createPlatformServices({ database }),
     paths,
     getChatAgent,
     skills: {

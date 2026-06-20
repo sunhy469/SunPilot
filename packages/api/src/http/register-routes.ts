@@ -12,6 +12,10 @@ import {
   RuntimeError,
   ossNotConfigured,
 } from "@sunpilot/core";
+import {
+  LOCAL_CONTEXT,
+  ConversationNotFoundError,
+} from "@sunpilot/platform";
 import type { SunPilotApiDeps } from "../composition/api-deps.js";
 import {
   listRunsQuerySchema,
@@ -176,58 +180,51 @@ export function registerSunPilotApiRoutes(
   });
 
   // ── Conversations ──────────────────────────────────────────────────
+  const { conversations } = deps.platform;
+
   app.get("/v1/conversations", async (request) => {
     const query = listConversationsQuerySchema.parse(request.query);
-    const conversations = await database.conversations.list({
-      limit: query.limit + 1,
+    return conversations.listConversations(LOCAL_CONTEXT, {
+      limit: query.limit,
       cursor: query.cursor,
     });
-    const items = conversations.slice(0, query.limit);
-    const next = conversations.length > query.limit ? items.at(-1) : undefined;
-    return {
-      items,
-      nextCursor: next
-        ? paginationCursor({ updatedAt: next.updatedAt, id: next.id })
-        : undefined,
-    };
   });
   app.post("/v1/conversations", async (request) =>
-    database.conversations.create({
-      title: conversationTitleFromBody(request.body),
-    }),
+    conversations.createConversation(
+      LOCAL_CONTEXT,
+      conversationTitleFromBody(request.body),
+    ),
   );
   app.get<{ Params: { id: string } }>(
     "/v1/conversations/:id",
     async (request, reply) => {
-      const conversation = await database.conversations.findById(
-        request.params.id,
-      );
-      if (!conversation) return reply.code(404).send({ error: "not_found" });
-      return conversation;
+      try {
+        return await conversations.getConversation(
+          LOCAL_CONTEXT,
+          request.params.id,
+        );
+      } catch (error) {
+        if (error instanceof ConversationNotFoundError) {
+          return reply.code(404).send({ error: "not_found" });
+        }
+        throw error;
+      }
     },
   );
   app.get<{ Params: { id: string } }>(
     "/v1/conversations/:id/messages",
     async (request, reply) => {
-      const conversation = await database.conversations.findById(
-        request.params.id,
-      );
-      if (!conversation) return reply.code(404).send({ error: "not_found" });
-      const records = await database.messages.listByConversationId(request.params.id);
-      return {
-        conversationId: request.params.id,
-        items: records.map((r) => ({
-          id: r.id,
-          conversationId: r.conversationId,
-          role: r.role,
-          content: r.content,
-          createdAt: r.createdAt,
-          attachments: (r.metadata as { attachments?: unknown })?.attachments,
-          cards: (r.metadata as { richCards?: unknown })?.richCards,
-          /** §P0-3: Restore content-block parts from metadata for history replay. */
-          parts: (r.metadata as { parts?: unknown })?.parts,
-        })),
-      };
+      try {
+        return await conversations.listMessages(
+          LOCAL_CONTEXT,
+          request.params.id,
+        );
+      } catch (error) {
+        if (error instanceof ConversationNotFoundError) {
+          return reply.code(404).send({ error: "not_found" });
+        }
+        throw error;
+      }
     },
   );
   app.get<{ Params: { id: string } }>(
@@ -251,26 +248,50 @@ export function registerSunPilotApiRoutes(
     "/v1/conversations/:id",
     async (request, reply) => {
       const body = updateConversationBodySchema.parse(request.body ?? {});
-      const updated = await database.conversations.update(request.params.id, body);
-      if (!updated) return reply.code(404).send({ error: "not_found" });
-      return updated;
+      try {
+        return await conversations.updateConversation(
+          LOCAL_CONTEXT,
+          request.params.id,
+          body,
+        );
+      } catch (error) {
+        if (error instanceof ConversationNotFoundError) {
+          return reply.code(404).send({ error: "not_found" });
+        }
+        throw error;
+      }
     },
   );
   app.post<{ Params: { id: string } }>(
     "/v1/conversations/:id/touch",
     async (request, reply) => {
-      await database.conversations.touch(request.params.id);
-      const updated = await database.conversations.findById(request.params.id);
-      if (!updated) return reply.code(404).send({ error: "not_found" });
-      return updated;
+      try {
+        return await conversations.touchConversation(
+          LOCAL_CONTEXT,
+          request.params.id,
+        );
+      } catch (error) {
+        if (error instanceof ConversationNotFoundError) {
+          return reply.code(404).send({ error: "not_found" });
+        }
+        throw error;
+      }
     },
   );
   app.delete<{ Params: { id: string } }>(
     "/v1/conversations/:id",
     async (request, reply) => {
-      const deleted = await database.conversations.delete(request.params.id);
-      if (!deleted) return reply.code(404).send({ error: "not_found" });
-      return { ok: true };
+      try {
+        return await conversations.deleteConversation(
+          LOCAL_CONTEXT,
+          request.params.id,
+        );
+      } catch (error) {
+        if (error instanceof ConversationNotFoundError) {
+          return reply.code(404).send({ error: "not_found" });
+        }
+        throw error;
+      }
     },
   );
 

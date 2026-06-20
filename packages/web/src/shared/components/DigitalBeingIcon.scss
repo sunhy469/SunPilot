@@ -1,0 +1,151 @@
+/* ── DigitalBeingIcon — 动画层 ────────────────────────────── */
+
+.digital-being-icon {
+  width: 1.15em;
+  height: 1.15em;
+  display: inline-block;
+  vertical-align: -0.18em;
+  overflow: visible;
+
+  /* 缓入缓出过渡，跟随侧边栏 hover/active 颜色变化 */
+  transition: color 0.15s ease;
+}
+
+/* ── 天线 — 微摆 ─────────────────────────────────────── */
+.antenna {
+  animation: antenna-wiggle 3s ease-in-out infinite;
+  transform-origin: 9.5px 5.5px;
+}
+
+.antenna-dot {
+  animation: antenna-dot-pulse 1.5s ease-in-out infinite;
+}
+
+@keyframes antenna-wiggle {
+  0%, 100% { transform: rotate(0deg); }
+  25% { transform: rotate(2deg); }
+  75% { transform: rotate(-2deg); }
+}
+
+@keyframes antenna-dot-pulse {
+  0%, 100% { opacity: 0.7; }
+  50% { opacity: 1; }
+}
+
+/* ── 头部轮廓 — 呼吸微光 ─────────────────────────────── */
+.head-outline {
+  animation: breathe 3s ease-in-out infinite;
+}
+
+@keyframes breathe {
+  0%, 100% { opacity: 0.8; }
+  50% { opacity: 1; }
+}
+
+/* ── 耳朵 — 微光 ─────────────────────────────────────── */
+.ear {
+  animation: ear-glow 3.5s ease-in-out infinite;
+}
+
+.ear-right {
+  animation-delay: 0.5s;
+}
+
+@keyframes ear-glow {
+  0%, 100% { opacity: 0.6; }
+  50% { opacity: 0.9; }
+}
+
+/* ── 眼睛 — 交替闪烁（数字生命感） ────────────────────── */
+.eye {
+  animation: eye-blink 4s ease-in-out infinite;
+  transform-origin: center;
+}
+
+.eye-right {
+  animation-delay: 0.15s;
+}
+
+@keyframes eye-blink {
+  0%, 94%, 100% {
+    opacity: 1;
+    transform: scaleY(1);
+  }
+  96% {
+    opacity: 0.15;
+    transform: scaleY(0.15);
+  }
+}
+
+/* ── 嘴巴 — 微动 ─────────────────────────────────────── */
+.mouth {
+  animation: mouth-twitch 6s ease-in-out infinite;
+}
+
+@keyframes mouth-twitch {
+  0%, 85%, 100% { opacity: 0.7; }
+  87.5% { opacity: 1; }
+  90% { opacity: 0.5; }
+}
+
+/* ── 扫描线 — 从上到下周期性扫描 ─────────────────────── */
+.scan-line {
+  animation: scan 2.8s ease-in-out infinite;
+}
+
+.scan-line-glow {
+  animation: scan-glow 2.8s ease-in-out infinite;
+  opacity: 0.25;
+}
+
+@keyframes scan {
+  0% {
+    transform: translateY(0);
+    opacity: 0;
+  }
+  8% { opacity: 0.85; }
+  25% { opacity: 0.5; }
+  42% {
+    transform: translateY(9px); /* head: y=5.5 h=9 → bottom edge 14.5 */
+    opacity: 0.85;
+  }
+  50% { opacity: 0; }
+  100% {
+    transform: translateY(0);
+    opacity: 0;
+  }
+}
+
+@keyframes scan-glow {
+  0% {
+    transform: translateY(-0.3px);
+    opacity: 0;
+  }
+  8% { opacity: 0.35; }
+  25% { opacity: 0.2; }
+  42% {
+    transform: translateY(8.7px);
+    opacity: 0.35;
+  }
+  50% { opacity: 0; }
+  100% {
+    transform: translateY(-0.3px);
+    opacity: 0;
+  }
+}
+
+/* ── 电路节点 — 脉冲闪烁 ─────────────────────────────── */
+.node {
+  animation: node-pulse 2s ease-in-out infinite;
+}
+
+.node-ne       { animation-delay: 0.4s; }
+.node-nw-top   { animation-delay: 0.7s; }
+.node-ne-top   { animation-delay: 0.9s; }
+.node-sw       { animation-delay: 0.3s; }
+.node-se       { animation-delay: 1s; }
+
+@keyframes node-pulse {
+  0%, 100% { opacity: 0.2; }
+  50% { opacity: 0.9; }
+}

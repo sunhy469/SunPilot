@@ -1,5 +1,5 @@
 {
-  "name": "@sunpilot/api",
+  "name": "@sunpilot/platform",
   "version": "0.1.0",
   "type": "module",
   "exports": {
@@ -14,12 +14,8 @@
     "lint": "eslint ."
   },
   "dependencies": {
-    "@sunpilot/core": "workspace:*",
-    "@sunpilot/platform": "workspace:*",
-    "@sunpilot/protocol": "workspace:*",
     "@sunpilot/storage": "workspace:*",
-    "fastify": "^5.3.3",
-    "zod": "^3.25.48"
+    "@sunpilot/protocol": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "^22.15.3",

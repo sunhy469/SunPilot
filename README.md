@@ -77,6 +77,16 @@ Docker PostgreSQL  DeepSeek / compatible LLM
 
 Local token auth is disabled during the current test phase. Browser origins are still restricted to local origins and trusted deployment origins.
 
+## Product Planning
+
+SunPilot is also exploring a Digital World surface: a 2D PixiJS-powered workspace where a WALL-E-inspired tracked digital worker can move between workstations, surface task status, manage artifacts, and trigger Agent Core runs through configured skills. This is a product and architecture plan, not a completed runtime surface yet.
+
+Planning references:
+
+- [Digital World MVP Plan](developer_docs/guides/digital_world_mvp_plan.md)
+- [PixiJS Bootstrap Guide](developer_docs/guides/digital_world_pixijs_bootstrap_guide.md)
+- [Platform Backend Refactor Plan](developer_docs/guides/platform_backend_refactor_plan.md)
+
 ## Quick Start
 
 ```bash
@@ -201,11 +211,16 @@ server {
 
 Chinese developer docs live in `developer_docs/`:
 
-- `developer_docs/cmd_docs/`
-- `developer_docs/config_docs/`
-- `developer_docs/dev_docs/`
+- `developer_docs/guides/`: implementation guides and product architecture plans
+- `developer_docs/architecture/`: architecture review and engineering summaries
+- `developer_docs/reference/`: reference material and code responsibility indexes
 
-`developer_docs/dev_docs/` is ignored by Git and intended for local implementation notes.
+Useful starting points:
+
+- [Command Manual](developer_docs/guides/命令使用手册.md)
+- [Environment Variables](developer_docs/guides/环境变量配置说明.md)
+- [File Path Guide](developer_docs/guides/文件路径与作用说明.md)
+- [Digital World MVP Plan](developer_docs/guides/digital_world_mvp_plan.md)
 
 ## License
 
