@@ -94,26 +94,28 @@ export function ChatHeader({
           </Dropdown>
         )}
       </div>
-      <div className="chat-header__actions">
-        <Popover
-          trigger="click"
-          placement="bottomRight"
-          arrow={false}
-          content={<OutputsPopover outputs={outputs} />}
-        >
-          <Tooltip title="产物">
-            <Badge count={outputCount} size="small" offset={[-2, 4]}>
-              <Button
-                type="text"
-                size="small"
-                className="chat-header__outputs-btn"
-                icon={<FolderOpenOutlined />}
-                aria-label="查看产物"
-              />
-            </Badge>
-          </Tooltip>
-        </Popover>
-      </div>
+      {showConversationActions && (
+        <div className="chat-header__actions">
+          <Popover
+            trigger="click"
+            placement="bottomRight"
+            arrow={false}
+            content={<OutputsPopover outputs={outputs} />}
+          >
+            <Tooltip title="产物">
+              <Badge count={outputCount} size="small" offset={[-2, 4]}>
+                <Button
+                  type="text"
+                  size="small"
+                  className="chat-header__outputs-btn"
+                  icon={<FolderOpenOutlined />}
+                  aria-label="查看产物"
+                />
+              </Badge>
+            </Tooltip>
+          </Popover>
+        </div>
+      )}
       <Modal
         title="重命名会话"
         open={renameModalOpen}

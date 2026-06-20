@@ -1,4 +1,5 @@
-import { AppstoreOutlined, BugOutlined, ClockCircleOutlined, PlusOutlined } from "@ant-design/icons";
+import { AppstoreOutlined, BugOutlined, PlusOutlined } from "@ant-design/icons";
+import { DigitalBeingIcon } from "../../shared/components/DigitalBeingIcon";
 import { Button, Flex } from "antd";
 import "./SidebarNav.scss";
 
@@ -38,11 +39,11 @@ export function SidebarNav({
       <Button
         type="text"
         size="large"
-        icon={<ClockCircleOutlined />}
+        icon={<DigitalBeingIcon />}
         className={`sidebar-nav-item${activePanel === "automation" ? " sidebar-nav-item--active" : ""}`}
         onClick={onOpenAutomation}
       >
-        自动化
+        数字生命
       </Button>
       <Button
         type="text"

@@ -14,6 +14,7 @@ import { OfflineBanner } from "./components/OfflineBanner/OfflineBanner";
 import { ErrorMessageCard } from "./components/ErrorMessageCard/ErrorMessageCard";
 import { PluginsEmptyView } from "./components/PluginsEmptyView/PluginsEmptyView";
 import { RunDebugPanel } from "../../features/agent-runtime/RunDebugPanel";
+import { DigitalWorld } from "../../features/digital-world";
 import { SettingsPage } from "../SettingsPage";
 import { conversationTitle } from "../../features/conversations/model";
 import { collectAiOutputs } from "./utils/collectAiOutputs";
@@ -72,17 +73,16 @@ export function ChatPage() {
         />
       }
     >
-      <div className="chat-page">
-        <ChatHeader
+      <div className={activePanel === "automation" ? "chat-page chat-page--digital-world" : "chat-page"}>
+        {activePanel !== "automation" && (
+          <ChatHeader
           title={
-            activePanel === "automation"
-              ? "自动化"
-              : activePanel === "plugins"
-                ? "插件"
-                : activePanel === "debug"
-                  ? "Run Debug"
-                  : activePanel === "settings"
-                    ? "Settings"
+            activePanel === "plugins"
+              ? "插件"
+              : activePanel === "debug"
+                ? "Run Debug"
+                : activePanel === "settings"
+                  ? "Settings"
                   : active
                     ? conversationTitle(active.title)
                     : ""
@@ -94,9 +94,10 @@ export function ChatPage() {
           outputCount={aiOutputs.length}
           outputs={aiOutputs}
         />
+        )}
 
         {activePanel === "automation" ? (
-          <div className="chat-page" />
+          <DigitalWorld />
         ) : activePanel === "plugins" ? (
           <PluginsEmptyView />
         ) : activePanel === "settings" ? (
