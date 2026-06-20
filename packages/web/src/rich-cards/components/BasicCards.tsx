@@ -5,22 +5,24 @@ import {
   InfoCircleOutlined,
 } from "@ant-design/icons";
 import { Alert, Button, Typography } from "antd";
+import type { RichTextValue } from "../types";
 import { RichCardShell } from "./RichCardShell";
+import { RichTextRenderer } from "../richText";
 
-const { Paragraph, Text, Link } = Typography;
+const { Text, Link } = Typography;
 
 export function SummaryCard({
   title,
   subtitle,
   data,
 }: {
-  title?: string;
-  subtitle?: string;
+  title?: RichTextValue;
+  subtitle?: RichTextValue;
   data: { text: string };
 }) {
   return (
     <RichCardShell title={title} subtitle={subtitle}>
-      <Paragraph>{data.text}</Paragraph>
+      <RichTextRenderer value={data.text} inline={false} />
     </RichCardShell>
   );
 }
@@ -30,8 +32,8 @@ export function InfoCard({
   subtitle,
   data,
 }: {
-  title?: string;
-  subtitle?: string;
+  title?: RichTextValue;
+  subtitle?: RichTextValue;
   data: { text: string };
 }) {
   return (
@@ -40,7 +42,7 @@ export function InfoCard({
         type="info"
         showIcon
         icon={<InfoCircleOutlined />}
-        message={data.text}
+        message={<RichTextRenderer value={data.text} inline={false} />}
       />
     </RichCardShell>
   );
@@ -51,8 +53,8 @@ export function ErrorCard({
   subtitle,
   data,
 }: {
-  title?: string;
-  subtitle?: string;
+  title?: RichTextValue;
+  subtitle?: RichTextValue;
   data: { text?: string; message?: string };
 }) {
   return (
@@ -72,8 +74,8 @@ export function FileCard({
   subtitle,
   data,
 }: {
-  title?: string;
-  subtitle?: string;
+  title?: RichTextValue;
+  subtitle?: RichTextValue;
   data: { fileName?: string; fileSize?: string; href?: string };
 }) {
   return (
@@ -83,7 +85,7 @@ export function FileCard({
           <FileOutlined />
         </div>
         <div className="rich-file__meta">
-          <Text strong>{data.fileName ?? title ?? "文件"}</Text>
+          <Text strong>{data.fileName ?? (typeof title === "string" ? title : title?.text ?? "文件")}</Text>
           {data.fileSize && <Text type="secondary"> {data.fileSize}</Text>}
         </div>
         {data.href ? (

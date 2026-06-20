@@ -29,20 +29,20 @@ export function SidebarNav({
       <Button
         type="text"
         size="large"
-        icon={<ClockCircleOutlined />}
-        className={`sidebar-nav-item${activePanel === "automation" ? " sidebar-nav-item--active" : ""}`}
-        onClick={onOpenAutomation}
-      >
-        自动化
-      </Button>
-      <Button
-        type="text"
-        size="large"
         icon={<AppstoreOutlined />}
         className={`sidebar-nav-item${activePanel === "plugins" ? " sidebar-nav-item--active" : ""}`}
         onClick={onOpenPlugins}
       >
         插件
+      </Button>
+      <Button
+        type="text"
+        size="large"
+        icon={<ClockCircleOutlined />}
+        className={`sidebar-nav-item${activePanel === "automation" ? " sidebar-nav-item--active" : ""}`}
+        onClick={onOpenAutomation}
+      >
+        自动化
       </Button>
       <Button
         type="text"

@@ -27,10 +27,14 @@ import type {
   AssistantToolResultPart,
   AssistantErrorPart,
 } from "../../../features/conversations/types";
-import type { TableCardData } from "../../../rich-cards/types";
+import type { RichCardAction } from "../../../rich-cards/types";
+import { extractMarkdownCards } from "../../../rich-cards/markdown";
 import { MarkdownRenderer, RichCardRenderer } from "../../../rich-cards";
 import { TableCard } from "../../../rich-cards/components/TableCard";
 import { GalleryCard } from "../../../rich-cards/components/MediaCards";
+import { ChecklistCard } from "../../../rich-cards/components/InteractiveCards";
+import { CodeBlockWidget } from "../../../rich-cards/components/CodeBlockWidget";
+import { FileLinkWidget } from "../../../rich-cards/components/FileLinkWidget";
 import type { LocalSendState } from "../types";
 import { formatTime } from "../../../shared/utils/formatTime";
 import { StreamingCursor } from "./StreamingCursor";
@@ -39,109 +43,18 @@ import "./AssistantMessage.css";
 
 const { Text } = Typography;
 
-// ── Markdown structured content extraction ──────────────────────────
-
-interface ExtractedContent {
-  tables: TableCardData[];
-  images: Array<{ src: string; alt?: string; caption?: string }>;
-  remainingMarkdown: string;
-}
-
-/**
- * Extract tables and images from completed Markdown content,
- * returning them as Rich Card data alongside the remaining Markdown text.
- */
-function extractStructuredContent(markdown: string): ExtractedContent {
-  const tables: TableCardData[] = [];
-  const images: Array<{ src: string; alt?: string; caption?: string }> = [];
-  const remainingLines: string[] = [];
-
-  const lines = markdown.split("\n");
-  let i = 0;
-
-  while (i < lines.length) {
-    const line = lines[i];
-    const nextLine = i + 1 < lines.length ? lines[i + 1] : undefined;
-
-    // ── Table extraction ──
-    // A Markdown table: header row | separator row | data rows
-    if (
-      line?.includes("|") &&
-      nextLine &&
-      /^\|?\s*[-:]+[-|\s:]*$/.test(nextLine)
-    ) {
-      const headers = line
-        .split("|")
-        .map((c) => c.trim())
-        .filter(Boolean);
-      const dataLines: string[] = [];
-      let j = i + 2;
-
-      while (j < lines.length && lines[j]?.includes("|")) {
-        dataLines.push(lines[j]!);
-        j++;
-      }
-
-      // Parse data rows
-      const rows = dataLines.map((dataLine) => {
-        const cells = dataLine
-          .split("|")
-          .map((c) => c.trim())
-          .filter(Boolean);
-        const row: Record<string, string | number> = {};
-        headers.forEach((h, idx) => {
-          row[h] = cells[idx] ?? "";
-        });
-        return row;
-      });
-
-      if (headers.length > 0 && rows.length > 0) {
-        tables.push({
-          columns: headers.map((h) => ({
-            key: h,
-            label: h,
-          })),
-          rows,
-        });
-      }
-
-      i = j;
-      continue;
-    }
-
-    // ── Image extraction ──
-    const imgMatch = line?.match(/^!\[([^\]]*)\]\(([^)]+)\)\s*$/);
-    if (imgMatch) {
-      images.push({
-        alt: imgMatch[1] || undefined,
-        src: imgMatch[2] ?? "",
-        caption: imgMatch[1] || undefined,
-      });
-      i++;
-      continue;
-    }
-
-    if (line !== undefined) {
-      remainingLines.push(line);
-    }
-    i++;
-  }
-
-  return {
-    tables,
-    images,
-    remainingMarkdown: remainingLines.join("\n"),
-  };
-}
-
 // ── Product content renderer (Rich Card + Streamdown) ───────────────
 
 function ProductContentRenderer({
   content,
   isStreaming,
+  cardStateByCardId,
+  onCardAction,
 }: {
   content: string;
   isStreaming: boolean;
+  cardStateByCardId?: Record<string, unknown>;
+  onCardAction?: (action: RichCardAction) => void;
 }) {
   // 流式中：直接用 MarkdownRenderer 渲染全部内容
   if (isStreaming) {
@@ -154,16 +67,20 @@ function ProductContentRenderer({
   }
 
   // 完成后：提取结构化内容，分别渲染
-  const { tables, images, remainingMarkdown } = useMemo(
-    () => extractStructuredContent(content),
+  const { tables, images, checklists, linkPreviews, codeBlocks, cardDslCards, remainingMarkdown } = useMemo(
+    () => extractMarkdownCards(content),
     [content],
   );
 
   const hasRemaining = remainingMarkdown.trim().length > 0;
   const hasTables = tables.length > 0;
   const hasImages = images.length > 0;
+  const hasChecklists = checklists.length > 0;
+  const hasLinkPreviews = linkPreviews.length > 0;
+  const hasCodeBlocks = codeBlocks.length > 0;
+  const hasCardDsl = cardDslCards.length > 0;
 
-  if (!hasRemaining && !hasTables && !hasImages) return null;
+  if (!hasRemaining && !hasTables && !hasImages && !hasChecklists && !hasLinkPreviews && !hasCodeBlocks && !hasCardDsl) return null;
 
   return (
     <Flex vertical gap={12} className="assistant-markdown-wrap">
@@ -172,6 +89,25 @@ function ProductContentRenderer({
         <TableCard key={`table-${idx}`} data={table} />
       ))}
       {hasImages && <GalleryCard data={{ images }} />}
+      {checklists.map((cl, idx) => (
+        <ChecklistCard key={`checklist-${idx}`} data={{ items: cl.items }} />
+      ))}
+      {linkPreviews.map((lp, idx) => (
+        <FileLinkWidget
+          key={`link-${idx}`}
+          fileName={lp.title ?? lp.url}
+          url={lp.url}
+          fileType="unknown"
+        />
+      ))}
+      {codeBlocks.map((cb, idx) => (
+        <CodeBlockWidget
+          key={`code-${idx}`}
+          language={cb.language}
+          code={cb.code}
+        />
+      ))}
+      {hasCardDsl && <RichCardRenderer cards={cardDslCards} stateByCardId={cardStateByCardId} onAction={onCardAction} />}
     </Flex>
   );
 }
@@ -276,13 +212,17 @@ function ThinkingTextBlock({
 function TextPartBlock({
   part,
   isStreaming,
+  cardStateByCardId,
+  onCardAction,
 }: {
   part: AssistantTextPart;
   isStreaming: boolean;
+  cardStateByCardId?: Record<string, unknown>;
+  onCardAction?: (action: RichCardAction) => void;
 }) {
   if (!part.content && !isStreaming) return null;
   return (
-    <ProductContentRenderer content={part.content} isStreaming={isStreaming} />
+    <ProductContentRenderer content={part.content} isStreaming={isStreaming} cardStateByCardId={cardStateByCardId} onCardAction={onCardAction} />
   );
 }
 
@@ -520,17 +460,21 @@ function PartRenderer({
   part,
   isStreaming,
   variant = "default",
+  cardStateByCardId,
+  onCardAction,
 }: {
   part: AssistantMessagePart;
   isStreaming: boolean;
   variant?: "default" | "thinking";
+  cardStateByCardId?: Record<string, unknown>;
+  onCardAction?: (action: RichCardAction) => void;
 }) {
   switch (part.type) {
     case "text":
       return variant === "thinking" ? (
         <ThinkingTextBlock part={part} isStreaming={isStreaming} />
       ) : (
-        <TextPartBlock part={part} isStreaming={isStreaming} />
+        <TextPartBlock part={part} isStreaming={isStreaming} cardStateByCardId={cardStateByCardId} onCardAction={onCardAction} />
       );
     case "status":
       return <StatusPartBlock part={part} />;
@@ -550,9 +494,13 @@ function PartRenderer({
 function MessagePartsRenderer({
   parts,
   isStreaming,
+  cardStateByCardId,
+  onCardAction,
 }: {
   parts?: AssistantMessagePart[];
   isStreaming: boolean;
+  cardStateByCardId?: Record<string, unknown>;
+  onCardAction?: (action: RichCardAction) => void;
 }) {
   if (!parts || parts.length === 0) return null;
   const normalizedParts = normalizeCompletedParts(parts, isStreaming);
@@ -616,6 +564,8 @@ function MessagePartsRenderer({
           isStreaming={
             isStreaming && part.type === "text" && part.status === "streaming"
           }
+          cardStateByCardId={cardStateByCardId}
+          onCardAction={onCardAction}
         />
       ))}
     </Flex>
@@ -666,14 +616,18 @@ export function AssistantMessage({
   message: msg,
   isStreaming,
   cards,
+  cardStateByCardId,
   sendState,
   toolName,
+  onCardAction,
 }: {
   message: ChatMessage;
   isStreaming?: boolean;
   cards?: ChatMessage["cards"];
+  cardStateByCardId?: ChatMessage["cardStateByCardId"];
   sendState?: LocalSendState;
   toolName?: string;
+  onCardAction?: (action: RichCardAction) => void;
 }) {
   const [liked, setLiked] = useState(false);
   const [disliked, setDisliked] = useState(false);
@@ -725,7 +679,7 @@ export function AssistantMessage({
       <Flex vertical className="assistant-content">
         {/* ── Content-block parts rendering ────────── */}
         {hasParts ? (
-          <MessagePartsRenderer parts={msg.parts} isStreaming={!!isStreaming} />
+          <MessagePartsRenderer parts={msg.parts} isStreaming={!!isStreaming} cardStateByCardId={cardStateByCardId} onCardAction={onCardAction} />
         ) : (
           <>
             {/* ── Stopped state indicator ─────────────── */}
@@ -755,6 +709,8 @@ export function AssistantMessage({
                 <ProductContentRenderer
                   content={msg.content}
                   isStreaming={!!isStreaming}
+                  cardStateByCardId={cardStateByCardId}
+                  onCardAction={onCardAction}
                 />
               )}
             </div>
@@ -824,7 +780,7 @@ export function AssistantMessage({
           )}
 
         {/* ── Rich cards (video, image, etc.) ─────────────────── */}
-        {cards && cards.length > 0 && <RichCardRenderer cards={cards} />}
+        {cards && cards.length > 0 && <RichCardRenderer cards={cards} stateByCardId={cardStateByCardId} onAction={onCardAction} />}
 
         {/* ── Action row ─────────────────────────────────────── */}
         {!isStreaming && hasContent && (
