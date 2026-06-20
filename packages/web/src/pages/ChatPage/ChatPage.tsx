@@ -120,6 +120,7 @@ export function ChatPage() {
                   status={chat.chatViewState}
                   sendState={chat.sendState}
                   toolName={chat.toolName}
+                  onCardAction={chat.onCardAction}
                 />
                 <div className="chat-composer-wrap">
                   <ArtifactPanel

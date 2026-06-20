@@ -2268,11 +2268,11 @@ Use the same language as the user.`,
    */
   private buildStreamingRichCards(
     artifacts: ArtifactRef[],
-  ): Array<{ type: string; title?: string; data: Record<string, unknown> }> {
+  ): Array<import("@sunpilot/protocol").RichCardOutput> {
     const builder = new RichCardBuilder();
     builder.fromArtifacts(
       artifacts.map((a) => ({
-        type: a.type,
+        type: a.type as import("@sunpilot/protocol").RichCardType,
         name: a.name,
         url: (a as unknown as Record<string, unknown>).url as
           | string

@@ -7,6 +7,8 @@ import {
   DownOutlined,
   FileOutlined,
 } from "@ant-design/icons";
+import type { RichTextValue } from "../types";
+import { RichTextRenderer } from "../richText";
 
 const { Text } = Typography;
 
@@ -24,9 +26,9 @@ export interface CodeBlockWidgetProps {
   /** Maximum visible lines before collapsing (default: 20) */
   collapseThreshold?: number;
   /** Card title */
-  title?: string;
+  title?: RichTextValue;
   /** Card subtitle */
-  subtitle?: string;
+  subtitle?: RichTextValue;
   /** Show border/card wrapper */
   bordered?: boolean;
 }
@@ -130,7 +132,7 @@ export const CodeBlockWidget = memo(function CodeBlockWidget({
   if (title) {
     return (
       <Card
-        title={title}
+        title={<RichTextRenderer value={title} inline={true} />}
         size="small"
         className="code-block-widget-card"
         styles={{
@@ -142,7 +144,7 @@ export const CodeBlockWidget = memo(function CodeBlockWidget({
             type="secondary"
             style={{ display: "block", margin: "0 0 12px 0", padding: "0 16px" }}
           >
-            {subtitle}
+            <RichTextRenderer value={subtitle} inline={true} />
           </Text>
         )}
         {codeContent}

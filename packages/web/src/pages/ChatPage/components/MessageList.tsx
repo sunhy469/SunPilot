@@ -2,6 +2,7 @@ import { memo } from "react";
 import { Spin, Flex, Typography } from "antd";
 import type { ChatMessage } from "../../../features/conversations/types";
 import type { ChatViewState, LocalSendState } from "../types";
+import type { RichCardAction } from "../../../rich-cards/types";
 import { useAutoScroll } from "../hooks/useAutoScroll";
 import { UserMessage } from "./UserMessage";
 import { AssistantMessage } from "./AssistantMessage";
@@ -15,11 +16,13 @@ export function MessageList({
   status,
   sendState,
   toolName,
+  onCardAction,
 }: {
   messages: ChatMessage[];
   status: ChatViewState;
   sendState?: LocalSendState;
   toolName?: string | null;
+  onCardAction?: (messageId: string, action: RichCardAction) => void;
 }) {
   const isStreaming = status === "streaming";
   const scrollRef = useAutoScroll([messages, status], isStreaming);
@@ -65,8 +68,10 @@ export function MessageList({
                 message={message}
                 isStreaming={isActiveAssistant && isStreaming}
                 cards={message.cards}
+                cardStateByCardId={message.cardStateByCardId}
                 sendState={isActiveAssistant ? sendState : undefined}
                 toolName={isActiveAssistant ? (toolName ?? undefined) : undefined}
+                onCardAction={onCardAction ? (action) => onCardAction(message.id, action) : undefined}
               />
             );
           }

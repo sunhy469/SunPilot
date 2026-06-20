@@ -7,6 +7,8 @@ import {
 } from "@ant-design/icons";
 import type { SkillStatus } from "./IconStatusWidget";
 import { SkillStatusBadge } from "./IconStatusWidget";
+import type { RichTextValue } from "../types";
+import { RichTextRenderer } from "../richText";
 
 const { Text, Paragraph } = Typography;
 
@@ -27,6 +29,8 @@ export interface SkillResultWidgetProps {
   skillId?: string;
   /** Execution steps */
   steps?: SkillStep[];
+  /** Step count (when steps array is not available) */
+  stepCount?: number;
   /** Summary of results */
   summary?: string;
   /** Detailed output */
@@ -38,7 +42,7 @@ export interface SkillResultWidgetProps {
   /** Timestamp */
   timestamp?: string;
   /** Card title */
-  title?: string;
+  title?: RichTextValue;
 }
 
 // ── Component ─────────────────────────────────────────────────────────
@@ -48,6 +52,7 @@ export const SkillResultWidget = memo(function SkillResultWidget({
   status,
   skillId,
   steps,
+  stepCount,
   summary,
   detail,
   error,
@@ -74,7 +79,7 @@ export const SkillResultWidget = memo(function SkillResultWidget({
   return (
     <Card
       title={
-        title || (
+        title ? <RichTextRenderer value={title} inline={true} /> : (
           <Flex align="center" gap={8}>
             <ThunderboltOutlined style={{ color: "#8b5cf6" }} />
             <Text strong>Skill 执行</Text>
@@ -114,6 +119,11 @@ export const SkillResultWidget = memo(function SkillResultWidget({
         </Flex>
 
         {/* Steps */}
+        {stepCount != null && (!steps || steps.length === 0) && (
+          <Text type="secondary" style={{ fontSize: 12 }}>
+            {stepCount} 个步骤
+          </Text>
+        )}
         {steps && steps.length > 0 && (
           <div className="skill-result__steps">
             <Steps

@@ -104,6 +104,8 @@ export interface ChatMessage {
   /** Legacy event timeline — being replaced by parts. */
   activities?: AgentActivity[];
   cards?: RichCardView[];
+  /** Per-card interaction state, keyed by card ID. */
+  cardStateByCardId?: Record<string, unknown>;
   attachments?: Array<{
     id: string;
     name: string;

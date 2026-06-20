@@ -27,11 +27,7 @@ export class AssistantMessageStream implements IAssistantMessageStream {
   private readonly parts: AssistantMessagePart[] = [];
   private started = false;
   private completed = false;
-  private richCards: Array<{
-    type: string;
-    title?: string;
-    data: Record<string, unknown>;
-  }> = [];
+  private richCards: Array<import("@sunpilot/protocol").RichCardOutput> = [];
   private deltaIndexByPartId = new Map<string, number>();
 
   constructor(
@@ -449,11 +445,7 @@ export class AssistantMessageStream implements IAssistantMessageStream {
    * agent.message.completed so the frontend can show artifact cards.
    */
   setRichCards(
-    cards: Array<{
-      type: string;
-      title?: string;
-      data: Record<string, unknown>;
-    }>,
+    cards: Array<import("@sunpilot/protocol").RichCardOutput>,
   ): void {
     this.richCards = cards;
   }

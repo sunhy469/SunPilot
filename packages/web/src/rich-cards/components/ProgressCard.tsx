@@ -1,6 +1,7 @@
 import { Steps } from "antd";
 import { CheckCircleFilled, LoadingOutlined } from "@ant-design/icons";
 import type { ProgressCardData, ProgressStep } from "../types";
+import type { RichTextValue } from "../types";
 import { RichCardShell } from "./RichCardShell";
 
 const stepStatusIcon = (status: ProgressStep["status"]) => {
@@ -22,8 +23,8 @@ export function ProgressCard({
   subtitle,
   data,
 }: {
-  title?: string;
-  subtitle?: string;
+  title?: RichTextValue;
+  subtitle?: RichTextValue;
   data: ProgressCardData;
 }) {
   return (

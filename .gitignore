@@ -13,3 +13,11 @@ test-results/
 playwright-report/
 blob-report/
 
+# IDE / AI assistant config
+.trae/
+.claude/
+
+# Test / eval directories
+e2e/
+evals/
+

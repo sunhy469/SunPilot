@@ -11,6 +11,8 @@ import {
 } from "@ant-design/icons";
 import type { ToolStatus } from "./IconStatusWidget";
 import { ToolStatusBadge } from "./IconStatusWidget";
+import type { RichTextValue } from "../types";
+import { RichTextRenderer } from "../richText";
 
 const { Text, Paragraph } = Typography;
 
@@ -36,7 +38,7 @@ export interface ToolResultWidgetProps {
   /** Timestamp of execution */
   timestamp?: string;
   /** Card title override */
-  title?: string;
+  title?: RichTextValue;
 }
 
 // ── Component ─────────────────────────────────────────────────────────
@@ -85,7 +87,7 @@ export const ToolResultWidget = memo(function ToolResultWidget({
   return (
     <Card
       title={
-        title || (
+        title ? <RichTextRenderer value={title} inline={true} /> : (
           <Flex align="center" gap={8}>
             <ToolOutlined />
             <Text strong>工具调用</Text>
