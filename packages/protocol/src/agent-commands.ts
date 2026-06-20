@@ -76,19 +76,15 @@ export const approvalDecideSchema = z.object({
 
 // ── Command interfaces ───────────────────────────────────────────────
 
-export type PermissionMode = 'ask' | 'auto' | 'full';
-
-export type ChatModelId = 'dp' | 'seed';
-
 export interface ChatSendParams {
   clientRequestId?: string;
   conversationId?: string;
   message: string;
   mode: 'chat' | 'agent';
   /** User-selected permission mode: ask=always approve, auto=risk-based, full=never approve. */
-  permissionMode?: PermissionMode;
+  permissionMode?: 'ask' | 'auto' | 'full';
   /** User-selected chat model. When unset, the default model is used. */
-  modelId?: ChatModelId;
+  modelId?: 'dp' | 'seed';
   attachments: Array<{
     id: string;
     name: string;
@@ -105,46 +101,4 @@ export interface ChatSendParams {
 
 export interface ChatStopParams {
   runId: string;
-}
-
-export interface ChatSendResult {
-  accepted: boolean;
-  conversationId: string;
-  runId: string;
-  messageId: string;
-}
-
-export interface ChatStopResult {
-  stopped: boolean;
-  runId: string;
-}
-
-export interface ConversationSubscribeParams {
-  conversationId: string;
-  lastSeenSequence?: number;
-}
-
-export interface ConversationSubscribeResult {
-  subscribed: boolean;
-  conversationId: string;
-  replayed: number;
-  latestSequence: number;
-}
-
-export interface RunSubscribeParams {
-  runId?: string;
-}
-
-export interface RunSubscribeResult {
-  runId: string;
-  events: unknown[];
-}
-
-/** Connection context available to every command handler. */
-export interface ClientConnectionContext {
-  source: 'web' | 'cli' | 'api';
-  connectionId: string;
-  userId?: string;
-  ip?: string;
-  userAgent?: string;
 }

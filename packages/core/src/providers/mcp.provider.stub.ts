@@ -86,13 +86,6 @@ export function mcpToolToSkillSummary(tool: McpTool): SkillSummary {
   };
 }
 
-/**
- * Batch-convert MCP tools to SkillSummaries for ToolRetriever ingestion.
- */
-export function mcpToolsToSkillSummaries(tools: McpTool[]): SkillSummary[] {
-  return tools.map(mcpToolToSkillSummary);
-}
-
 // ── Helpers ──────────────────────────────────────────────────────────────
 
 function inferMcpCategory(tool: McpTool): SkillSummary["category"] {

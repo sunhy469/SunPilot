@@ -1,6 +1,6 @@
 import { Typography, Flex, Button } from "antd";
 import { SettingOutlined } from "@ant-design/icons";
-import "./UserFooter.css";
+import "./UserFooter.scss";
 
 const { Text } = Typography;
 

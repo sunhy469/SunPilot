@@ -1,73 +1,12 @@
 import {
   DownloadOutlined,
-  ExclamationCircleOutlined,
   FileOutlined,
-  InfoCircleOutlined,
 } from "@ant-design/icons";
-import { Alert, Button, Typography } from "antd";
+import { Button, Typography } from "antd";
 import type { RichTextValue } from "../types";
 import { RichCardShell } from "./RichCardShell";
-import { RichTextRenderer } from "../richText";
 
 const { Text, Link } = Typography;
-
-export function SummaryCard({
-  title,
-  subtitle,
-  data,
-}: {
-  title?: RichTextValue;
-  subtitle?: RichTextValue;
-  data: { text: string };
-}) {
-  return (
-    <RichCardShell title={title} subtitle={subtitle}>
-      <RichTextRenderer value={data.text} inline={false} />
-    </RichCardShell>
-  );
-}
-
-export function InfoCard({
-  title,
-  subtitle,
-  data,
-}: {
-  title?: RichTextValue;
-  subtitle?: RichTextValue;
-  data: { text: string };
-}) {
-  return (
-    <RichCardShell title={title} subtitle={subtitle} className="rich-card--info">
-      <Alert
-        type="info"
-        showIcon
-        icon={<InfoCircleOutlined />}
-        message={<RichTextRenderer value={data.text} inline={false} />}
-      />
-    </RichCardShell>
-  );
-}
-
-export function ErrorCard({
-  title,
-  subtitle,
-  data,
-}: {
-  title?: RichTextValue;
-  subtitle?: RichTextValue;
-  data: { text?: string; message?: string };
-}) {
-  return (
-    <RichCardShell title={title} subtitle={subtitle} className="rich-card--error">
-      <Alert
-        type="error"
-        showIcon
-        icon={<ExclamationCircleOutlined />}
-        message={data.message ?? data.text ?? "发生未知错误"}
-      />
-    </RichCardShell>
-  );
-}
 
 export function FileCard({
   title,

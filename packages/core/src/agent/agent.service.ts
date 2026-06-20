@@ -1,3 +1,5 @@
+import { RUN_PHASE_LABELS } from "../agent-kernel/agent-loop-engine.js";
+
 import { createHash } from "node:crypto";
 import { notFound } from "../errors/index.js";
 import { AuditActor } from "@sunpilot/protocol";
@@ -784,16 +786,59 @@ export class AgentService {
     const run = await this.loopConfig.runStateManager.getRun(approval.runId);
     const conversationId = run?.conversationId;
 
+    // §P0-3: Prepare status part update data (shared across strategies)
+    const runState = await this.loopConfig.runStateManager.getRun(approval.runId);
+    const gatheredFacts = runState?.taskState?.gatheredFacts as Record<string, unknown> | undefined;
+    const partsSnapshot = gatheredFacts?.partsSnapshot as Array<{ id: string; type: string; status?: string; label?: string }> | undefined;
+    const approvalMessageId = gatheredFacts?.approvalMessageId as string | undefined;
+
+    // Helper to update "等待确认" status parts with a given status/label
+    const updateApprovalStatusParts = (patch: { status: string; label: string }) => {
+      if (approvalMessageId && partsSnapshot) {
+        for (const part of partsSnapshot) {
+          if (part.type === "status" && part.status === "running" && part.label?.startsWith(RUN_PHASE_LABELS.waiting_approval)) {
+            this.loopConfig.eventBus.emit(
+              "agent.message.part.updated",
+              {
+                runId: approval.runId,
+                conversationId,
+                messageId: approvalMessageId,
+                partId: part.id,
+                patch,
+              },
+              { runId: approval.runId, conversationId },
+            );
+          }
+        }
+      }
+    };
+
     // Transition run state based on rejection strategy
     switch (rejectionStrategy) {
       case "cancel":
+        // §P0-3: Mark status parts as failed before terminal event
+        updateApprovalStatusParts({
+          status: "failed",
+          label: `已拒绝: ${RUN_PHASE_LABELS.waiting_approval}`,
+        });
         await this.loopConfig.runStateManager.markCancelled(
           approval.runId,
           reason ?? "approval rejected — cancelled by user",
         );
         this.loopConfig.abortRegistry.abort(approval.runId);
+        // §P0-1: Emit terminal event so frontend can clean up pending state
+        this.loopConfig.eventBus.emit(
+          "agent.run.cancelled",
+          { runId: approval.runId, reason: reason ?? "approval rejected — cancelled by user" },
+          { runId: approval.runId, conversationId },
+        );
         break;
       case "continue_without_tool":
+        // §P0-3: Mark status parts as completed (run continues)
+        updateApprovalStatusParts({
+          status: "completed",
+          label: `已拒绝，正在继续处理`,
+        });
         // Continue the agent loop without the rejected tool.
         // Fire-and-forget in background: rebuilds context, reflects,
         // and responds to the user explaining the tool was skipped.
@@ -828,10 +873,21 @@ export class AgentService {
         break;
       case "interrupt":
       default:
+        // §P0-3: Mark status parts as failed before terminal event
+        updateApprovalStatusParts({
+          status: "failed",
+          label: `已拒绝`,
+        });
         await this.loopConfig.runStateManager.markStatus(
           approval.runId,
           "interrupted",
           reason ?? "approval rejected by user",
+        );
+        // §P0-1: Emit terminal event so frontend can clean up pending state
+        this.loopConfig.eventBus.emit(
+          "agent.run.interrupted",
+          { runId: approval.runId, reason: reason ?? "approval rejected by user", approvalId: approval.approvalId },
+          { runId: approval.runId, conversationId },
         );
         break;
     }
@@ -1013,11 +1069,6 @@ export class AgentService {
       throw notFound(`Unknown conversation: ${conversationId}`);
     }
     return conversation;
-  }
-
-  /** Check if the service is running in Agent Loop mode. */
-  get isAgentLoopMode(): boolean {
-    return true;
   }
 
   /**

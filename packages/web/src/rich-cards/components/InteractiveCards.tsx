@@ -1,139 +1,24 @@
-import { useState, useCallback } from "react";
+import { useState } from "react";
 import {
   CheckCircleFilled,
   CheckCircleOutlined,
   CloseCircleOutlined,
-  StarFilled,
-  StarOutlined,
   ThunderboltOutlined,
 } from "@ant-design/icons";
-import { Button, Checkbox, Radio, Typography, Tag, Flex, Steps, Rate } from "antd";
+import { Button, Checkbox, Radio, Typography, Tag, Rate } from "antd";
 import type {
-  ChecklistCardData,
   ChoiceGroupCardData,
   ApprovalSummaryCardData,
   ActionListCardData,
   RatingCardData,
-  StepsCardData,
   KanbanCardData,
   FormCardData,
   DatePickerCardData,
 } from "../types";
 import type { RichTextValue } from "../types";
 import { RichCardShell } from "./RichCardShell";
-import { RichTextRenderer } from "../richText";
 
-const { Text, Paragraph } = Typography;
-
-// ── ChecklistCard ────────────────────────────────────────────────────
-
-export function ChecklistCard({
-  title,
-  subtitle,
-  data,
-  cardState,
-  onAction,
-}: {
-  title?: RichTextValue;
-  subtitle?: RichTextValue;
-  data: ChecklistCardData;
-  cardState?: { checkedItemIds?: string[] };
-  onAction?: (action: { type: string; cardId?: string; itemId?: string; checked?: boolean; payload?: Record<string, unknown> }) => void;
-}) {
-  const [localChecked, setLocalChecked] = useState<Set<string>>(() => {
-    const initial = new Set<string>();
-    data.items.forEach((item) => {
-      if (item.checked) initial.add(item.id);
-    });
-    return initial;
-  });
-
-  const checkedIds = cardState?.checkedItemIds
-    ? new Set(cardState.checkedItemIds)
-    : localChecked;
-
-  const allRequiredChecked = data.items
-    .filter((item) => item.required)
-    .every((item) => checkedIds.has(item.id));
-
-  const handleToggle = (itemId: string) => {
-    const next = new Set(checkedIds);
-    if (next.has(itemId)) {
-      next.delete(itemId);
-    } else {
-      next.add(itemId);
-    }
-
-    if (data.mode === "submit") {
-      // For submit mode, just update local state; submit action sends to backend
-      setLocalChecked(next);
-    } else {
-      // For local mode, update immediately
-      setLocalChecked(next);
-      onAction?.({
-        type: "toggle_item",
-        itemId,
-        checked: next.has(itemId),
-      });
-    }
-  };
-
-  const handleSubmit = () => {
-    onAction?.({
-      type: "submit",
-      payload: { checkedItemIds: Array.from(checkedIds) },
-    });
-  };
-
-  return (
-    <RichCardShell title={title} subtitle={subtitle}>
-      <div className="rich-checklist">
-        {data.confirmationText && (
-          <div className="rich-checklist__intro">
-            <RichTextRenderer value={data.confirmationText} inline={false} />
-          </div>
-        )}
-        {data.items.map((item) => (
-          <div
-            key={item.id}
-            className={`rich-checklist__item ${checkedIds.has(item.id) ? "rich-checklist__item--checked" : ""} ${item.disabled ? "rich-checklist__item--disabled" : ""}`}
-          >
-            <Checkbox
-              checked={checkedIds.has(item.id)}
-              disabled={item.disabled}
-              onChange={() => handleToggle(item.id)}
-            >
-              <span>
-                <RichTextRenderer value={item.label} inline={true} />
-                {item.required && <Text type="danger"> *</Text>}
-              </span>
-            </Checkbox>
-            {item.description && (
-              <div className="rich-checklist__desc">
-                <RichTextRenderer value={item.description} inline={false} />
-              </div>
-            )}
-            {item.evidence && (
-              <div className="rich-checklist__evidence">
-                <RichTextRenderer value={item.evidence} inline={false} />
-              </div>
-            )}
-          </div>
-        ))}
-        {data.mode === "submit" && (
-          <Button
-            type="primary"
-            disabled={!allRequiredChecked && (data.requireAll ?? false)}
-            onClick={handleSubmit}
-            className="rich-checklist__submit"
-          >
-            {data.submitLabel ?? "确认提交"}
-          </Button>
-        )}
-      </div>
-    </RichCardShell>
-  );
-}
+const { Text } = Typography;
 
 // ── ChoiceGroupCard ──────────────────────────────────────────────────
 
@@ -347,33 +232,6 @@ export function RatingCard({
           </div>
         )}
       </div>
-    </RichCardShell>
-  );
-}
-
-// ── StepsCard ────────────────────────────────────────────────────────
-
-export function StepsCard({
-  title,
-  subtitle,
-  data,
-}: {
-  title?: RichTextValue;
-  subtitle?: RichTextValue;
-  data: StepsCardData;
-}) {
-  return (
-    <RichCardShell title={title} subtitle={subtitle}>
-      <Steps
-        direction="vertical"
-        size="small"
-        current={data.steps.findIndex((s) => s.status !== "done")}
-        items={data.steps.map((step) => ({
-          title: step.title,
-          description: step.description,
-          status: step.status === "error" ? "error" : step.status === "done" ? "finish" : step.status === "active" ? "process" : "wait",
-        }))}
-      />
     </RichCardShell>
   );
 }

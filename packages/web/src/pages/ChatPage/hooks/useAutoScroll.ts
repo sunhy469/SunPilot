@@ -6,10 +6,15 @@ import { useCallback, useEffect, useRef } from "react";
  * During streaming (isStreaming=true), uses instant scrollTop assignment
  * to avoid jank from repeated smooth-scroll animations. After streaming
  * completes, uses smooth behavior for a polished final scroll.
+ *
+ * When `forceScrollRef.current` is set to true (e.g. after user sends a
+ * message), the hook resets the "user scrolled away" flag and scrolls to
+ * the bottom, ensuring the latest user message is always visible.
  */
 export function useAutoScroll(
   deps: unknown[],
   isStreaming = false,
+  forceScrollRef?: React.RefObject<{ value: boolean }>,
 ) {
   const containerRef = useRef<HTMLDivElement>(null);
   const userScrolledRef = useRef(false);
@@ -36,7 +41,16 @@ export function useAutoScroll(
   // Auto-scroll on content change
   useEffect(() => {
     const container = containerRef.current;
-    if (!container || userScrolledRef.current) return;
+    if (!container) return;
+
+    // If a force-scroll is requested (e.g. user just sent a message),
+    // reset the user-scrolled flag so we always scroll to bottom.
+    if (forceScrollRef?.current?.value) {
+      userScrolledRef.current = false;
+      forceScrollRef.current.value = false;
+    }
+
+    if (userScrolledRef.current) return;
 
     if (typeof container.scrollTo === "function") {
       container.scrollTo({

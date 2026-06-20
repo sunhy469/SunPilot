@@ -10,7 +10,7 @@
 import type { RichCardType, RichCardOutput, RichTextValue } from "@sunpilot/protocol";
 
 export interface RichCardInput {
-  type: RichCardType;
+  type: string;
   name: string;
   url?: string;
   /** For structured results (products, search results, etc.) */
@@ -21,13 +21,26 @@ export class RichCardBuilder {
   private cards: RichCardOutput[] = [];
 
   /**
-   * Build cards from artifacts (video, image, file, etc.)
+   * Build cards from artifacts (video, image, audio, file, pdf only).
+   * Unknown artifact types are skipped — they should be exposed as
+   * Markdown links or artifact lists, not as rich-cards.
    */
   fromArtifacts(artifacts: RichCardInput[]): this {
     const images: RichCardInput[] = [];
     const others: RichCardInput[] = [];
 
+    // Only process known media/file artifact types
+    const MEDIA_FILE_TYPES = new Set<string>([
+      "image",
+      "video",
+      "audio",
+      "file",
+      "pdf_preview",
+      "file_bundle",
+    ]);
+
     for (const a of artifacts) {
+      if (!MEDIA_FILE_TYPES.has(a.type)) continue;
       if (a.type === "image") {
         images.push(a);
       } else {
@@ -62,7 +75,7 @@ export class RichCardBuilder {
       });
     }
 
-    // Handle other artifact types
+    // Handle other media/file artifact types
     for (const a of others) {
       switch (a.type) {
         case "video":
@@ -73,6 +86,17 @@ export class RichCardBuilder {
             data: {
               src: a.url ?? "",
               caption: a.name,
+            },
+          });
+          break;
+        case "audio":
+          this.cards.push({
+            id: `card_audio_${this.cards.length}`,
+            type: "audio",
+            title: a.name,
+            data: {
+              src: a.url ?? "",
+              title: a.name,
             },
           });
           break;
@@ -87,49 +111,30 @@ export class RichCardBuilder {
             },
           });
           break;
-        default:
-          // Generic info card for unknown artifact types
+        case "pdf_preview":
           this.cards.push({
-            id: `card_info_${this.cards.length}`,
-            type: "info",
+            id: `card_pdf_preview_${this.cards.length}`,
+            type: "pdf_preview",
             title: a.name,
             data: {
-              text: a.url ?? a.name,
+              src: a.url ?? "",
+              title: a.name,
             },
           });
+          break;
+        case "file_bundle":
+          this.cards.push({
+            id: `card_file_bundle_${this.cards.length}`,
+            type: "file_bundle",
+            title: a.name,
+            data: {
+              files: a.data?.files ?? [],
+            },
+          });
+          break;
       }
     }
 
-    return this;
-  }
-
-  /**
-   * Build a table card from structured data (e.g., product search results)
-   */
-  fromTable(input: {
-    title?: RichTextValue;
-    subtitle?: RichTextValue;
-    columns: Array<{
-      key: string;
-      label: RichTextValue;
-      type?: "text" | "number" | "link" | "markdown" | "badge" | "image" | "actions";
-      width?: number;
-      sortable?: boolean;
-    }>;
-    rows: Array<Record<string, unknown>>;
-    pagination?: false | { pageSize?: number };
-  }): this {
-    this.cards.push({
-      id: `card_table_${this.cards.length}`,
-      type: "table",
-      title: input.title,
-      subtitle: input.subtitle,
-      data: {
-        columns: input.columns,
-        rows: input.rows,
-        pagination: input.pagination,
-      },
-    });
     return this;
   }
 
@@ -202,93 +207,6 @@ export class RichCardBuilder {
         error: input.error,
         durationMs: input.durationMs,
         timestamp: input.timestamp,
-      },
-    });
-    return this;
-  }
-
-  /**
-   * Build a link_preview card
-   */
-  fromLinkPreview(input: {
-    title?: RichTextValue;
-    url: string;
-    description?: string;
-    image?: string;
-    domain?: string;
-    favicon?: string;
-  }): this {
-    this.cards.push({
-      id: `card_link_preview_${this.cards.length}`,
-      type: "link_preview",
-      title: input.title,
-      data: {
-        url: input.url,
-        title: input.title,
-        description: input.description,
-        image: input.image,
-        domain: input.domain,
-        favicon: input.favicon,
-      },
-    });
-    return this;
-  }
-
-  /**
-   * Build a metric card
-   */
-  fromMetric(input: {
-    title?: RichTextValue;
-    label: string;
-    value: string | number;
-    change?: string;
-    trend?: "up" | "down" | "flat";
-  }): this {
-    this.cards.push({
-      id: `card_metric_${this.cards.length}`,
-      type: "metric",
-      title: input.title,
-      data: {
-        metrics: [{
-          label: input.label,
-          value: input.value,
-          change: input.change,
-          tone: input.trend === "up" ? "green" : input.trend === "down" ? "pink" : "blue",
-        }],
-      },
-    });
-    return this;
-  }
-
-  /**
-   * Build a checklist card
-   */
-  fromChecklist(input: {
-    title?: RichTextValue;
-    items: Array<{
-      id: string;
-      label: RichTextValue;
-      description?: RichTextValue;
-      checked?: boolean;
-      required?: boolean;
-      disabled?: boolean;
-      evidence?: RichTextValue;
-    }>;
-    mode?: "local" | "submit";
-    submitLabel?: string;
-    requireAll?: boolean;
-    confirmationText?: RichTextValue;
-  }): this {
-    this.cards.push({
-      id: `card_checklist_${this.cards.length}`,
-      type: "checklist",
-      title: input.title,
-      data: {
-        items: input.items,
-        mode: input.mode ?? "local",
-        submitLabel: input.submitLabel,
-        requireAll: input.requireAll,
-        confirmationText: input.confirmationText,
       },
     });
     return this;
@@ -424,72 +342,6 @@ export class RichCardBuilder {
       data: {
         fields: input.fields,
         title: input.title,
-      },
-    });
-    return this;
-  }
-
-  /**
-   * Build a json_viewer card
-   */
-  fromJsonViewer(input: {
-    title?: RichTextValue;
-    value: unknown;
-    collapsedDepth?: number;
-    rootName?: string;
-  }): this {
-    this.cards.push({
-      id: `card_json_viewer_${this.cards.length}`,
-      type: "json_viewer",
-      title: input.title,
-      data: {
-        value: input.value,
-        collapsedDepth: input.collapsedDepth,
-        rootName: input.rootName,
-      },
-    });
-    return this;
-  }
-
-  /**
-   * Build a code_diff card
-   */
-  fromCodeDiff(input: {
-    title?: RichTextValue;
-    language?: string;
-    diff: string;
-    fileName?: string;
-  }): this {
-    this.cards.push({
-      id: `card_code_diff_${this.cards.length}`,
-      type: "code_diff",
-      title: input.title,
-      data: {
-        language: input.language,
-        diff: input.diff,
-        fileName: input.fileName,
-      },
-    });
-    return this;
-  }
-
-  /**
-   * Build a comparison_table card
-   */
-  fromComparisonTable(input: {
-    title?: RichTextValue;
-    subjects: Array<{ name: string; description?: string }>;
-    criteria: Array<{ key: string; label: string }>;
-    values: Array<Array<string | number | boolean | null>>;
-  }): this {
-    this.cards.push({
-      id: `card_comparison_table_${this.cards.length}`,
-      type: "comparison_table",
-      title: input.title,
-      data: {
-        subjects: input.subjects,
-        criteria: input.criteria,
-        values: input.values,
       },
     });
     return this;
@@ -678,47 +530,6 @@ export class RichCardBuilder {
   }
 
   /**
-   * Build a ranked_list card
-   */
-  fromRankedList(input: {
-    title?: RichTextValue;
-    items: Array<{
-      title: string;
-      score?: number | string;
-      description?: string;
-      badge?: string;
-    }>;
-  }): this {
-    this.cards.push({
-      id: `card_ranked_list_${this.cards.length}`,
-      type: "ranked_list",
-      title: input.title,
-      data: { items: input.items },
-    });
-    return this;
-  }
-
-  /**
-   * Build a steps card
-   */
-  fromSteps(input: {
-    title?: RichTextValue;
-    steps: Array<{
-      title: string;
-      description?: string;
-      status: "done" | "active" | "pending" | "error";
-    }>;
-  }): this {
-    this.cards.push({
-      id: `card_steps_${this.cards.length}`,
-      type: "steps",
-      title: input.title,
-      data: { steps: input.steps },
-    });
-    return this;
-  }
-
-  /**
    * Build a kanban card
    */
   fromKanban(input: {
@@ -829,81 +640,6 @@ export class RichCardBuilder {
         max: input.max,
         value: input.value,
       },
-    });
-    return this;
-  }
-
-  /**
-   * Build a quote_card
-   */
-  fromQuote(input: {
-    title?: RichTextValue;
-    quote: string;
-    source?: string;
-    url?: string;
-  }): this {
-    this.cards.push({
-      id: `card_quote_${this.cards.length}`,
-      type: "quote_card",
-      title: input.title,
-      data: {
-        quote: input.quote,
-        source: input.source,
-        url: input.url,
-      },
-    });
-    return this;
-  }
-
-  /**
-   * Build a citation_list card
-   */
-  fromCitationList(input: {
-    title?: RichTextValue;
-    items: Array<{
-      title: string;
-      url?: string;
-      snippet?: string;
-    }>;
-  }): this {
-    this.cards.push({
-      id: `card_citation_list_${this.cards.length}`,
-      type: "citation_list",
-      title: input.title,
-      data: { items: input.items },
-    });
-    return this;
-  }
-
-  /**
-   * Build a definition_list card
-   */
-  fromDefinitionList(input: {
-    title?: RichTextValue;
-    items: Array<{ term: string; description: string }>;
-  }): this {
-    this.cards.push({
-      id: `card_definition_list_${this.cards.length}`,
-      type: "definition_list",
-      title: input.title,
-      data: { items: input.items },
-    });
-    return this;
-  }
-
-  /**
-   * Build a rich_text card
-   */
-  fromRichText(input: {
-    title?: RichTextValue;
-    content: string;
-    format?: "plain" | "markdown" | "auto";
-  }): this {
-    this.cards.push({
-      id: `card_rich_text_${this.cards.length}`,
-      type: "rich_text",
-      title: input.title,
-      data: { content: input.content, format: input.format },
     });
     return this;
   }

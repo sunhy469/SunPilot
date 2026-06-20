@@ -31,10 +31,13 @@ export function RichTextRenderer({
   inline?: boolean;
 }): ReactNode {
   const normalized = useMemo(() => normalizeRichText(value), [value]);
+  const text = normalized?.text ?? "";
+  // Hooks must be called at top level, not inside conditionals
+  const segments = useMemo(() => linkify(text), [text]);
 
   if (!normalized) return null;
 
-  const { text, format, href, tone } = normalized;
+  const { format, href, tone } = normalized;
 
   // Case 1: explicit href → render as link
   if (href) {
@@ -57,7 +60,6 @@ export function RichTextRenderer({
 
   // Case 3 & 4: markdown or auto format → linkify
   if (format === "markdown" || format === "auto") {
-    const segments = useMemo(() => linkify(text), [text]);
     const nodes = linkifyToNodes(segments);
 
     const content = <>{nodes}</>;

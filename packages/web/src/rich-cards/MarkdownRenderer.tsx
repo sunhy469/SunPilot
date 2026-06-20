@@ -162,7 +162,7 @@ function Image({ src, alt, ...props }: ComponentProps<"img">) {
   );
 }
 
-// ── Task List Item ────────────────────────────────────────────────────
+// ── Task List Item (read-only, no interactive checkbox) ───────────────
 function TaskListItem({
   children,
   checked,
@@ -182,6 +182,15 @@ function TaskListItem({
   );
 }
 
+// ── Read-only list item (for non-task lists, no checkbox) ────────────
+function ListItem({ children, ...props }: ComponentProps<"li">) {
+  return (
+    <li className="md-list-item" {...props}>
+      {children}
+    </li>
+  );
+}
+
 // ── Horizontal Rule ───────────────────────────────────────────────────
 function HorizontalRule(props: ComponentProps<"hr">) {
   return <hr className="md-hr" {...props} />;
@@ -195,7 +204,14 @@ const markdownComponents: Components = {
   table: TableWrapper as any,
   a: Anchor as any,
   img: Image as any,
-  li: TaskListItem as any,
+  li: (({ checked, ...props }: ComponentProps<"li"> & { checked?: boolean }) => {
+    // Only use TaskListItem for GFM task lists (where checked is defined)
+    // This renders a read-only indicator, not an interactive checkbox
+    if (checked !== undefined) {
+      return <TaskListItem checked={checked} {...props} />;
+    }
+    return <ListItem {...props} />;
+  }) as any,
   hr: HorizontalRule as any,
 };
 
@@ -250,5 +266,3 @@ export const MarkdownRenderer = memo(function MarkdownRenderer({
     </div>
   );
 });
-
-export default MarkdownRenderer;
