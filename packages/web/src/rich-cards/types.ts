@@ -8,19 +8,12 @@ export type {
 } from "@sunpilot/protocol";
 import type {
   RichCardType,
+  RichCardAction,
   RichCardInteraction,
   RichCardView,
 } from "@sunpilot/protocol";
-
-export interface ProgressStep {
-  title: string;
-  description?: string;
-  status: "done" | "active" | "pending" | "error";
-}
-
-export interface ProgressCardData {
-  steps: ProgressStep[];
-}
+export type { ToolStatus, SkillStatus, StatusTone } from "./components/IconStatusWidget";
+import type { ToolStatus, SkillStatus, StatusTone } from "./components/IconStatusWidget";
 
 export interface ChartCardItem {
   label: string;
@@ -33,46 +26,10 @@ export interface ChartCardData {
   items: ChartCardItem[];
 }
 
-export interface TableCardData {
-  columns: Array<{
-    key: string;
-    label: RichTextValue;
-    type?: "text" | "number" | "link" | "markdown" | "badge" | "image" | "actions";
-    width?: number;
-    sortable?: boolean;
-  }>;
-  rows: Array<Record<string, RichTextValue | number | boolean | null>>;
-  pagination?: false | { pageSize?: number };
-}
-
 export interface VideoCardData {
   src: string;
   poster?: string;
   caption?: string;
-}
-
-export interface MetricCardData {
-  metrics: Array<{
-    label: string;
-    value: string | number;
-    change?: string;
-    tone?: "blue" | "green" | "yellow" | "pink";
-  }>;
-}
-
-export interface TimelineCardData {
-  items: Array<{
-    title: string;
-    time?: string;
-    description?: RichTextValue;
-    status?: "done" | "active" | "pending" | "error";
-  }>;
-}
-
-export interface CodeCardData {
-  language?: string;
-  fileName?: string;
-  code: string;
 }
 
 export interface GalleryCardData {
@@ -84,10 +41,6 @@ export interface GalleryCardData {
 }
 
 // ── New card types ────────────────────────────────────────────────────
-
-export type ToolStatus = "running" | "completed" | "failed" | "pending";
-export type SkillStatus = "running" | "completed" | "failed" | "pending";
-export type StatusTone = "success" | "warning" | "error" | "info" | "neutral";
 
 export interface ToolResultCardData {
   toolName: string;
@@ -138,15 +91,6 @@ export interface ImageCardData {
   src: string;
   alt?: string;
   caption?: string;
-}
-
-export interface LinkPreviewCardData {
-  url: string;
-  title?: string;
-  description?: string;
-  image?: string;
-  domain?: string;
-  favicon?: string;
 }
 
 // ── Chart cards ──────────────────────────────────────────────────────
@@ -235,63 +179,7 @@ export interface PdfPreviewCardData {
   title?: RichTextValue;
 }
 
-// ── Text & knowledge cards ────────────────────────────────────────────
-
-export interface RichTextCardData {
-  content: string;
-  format?: "plain" | "markdown" | "auto";
-}
-
-export interface DefinitionListCardData {
-  items: Array<{
-    term: string;
-    description: string;
-  }>;
-}
-
-export interface QuoteCardData {
-  quote: string;
-  source?: string;
-  url?: string;
-}
-
-export interface CitationListCardData {
-  items: Array<{
-    title: string;
-    url?: string;
-    snippet?: string;
-  }>;
-}
-
-export interface CodeDiffCardData {
-  language?: string;
-  diff: string;
-  fileName?: string;
-}
-
-export interface JsonViewerCardData {
-  value: unknown;
-  collapsedDepth?: number;
-  rootName?: string;
-}
-
-// ── List & task cards ─────────────────────────────────────────────────
-
-export interface ChecklistCardData {
-  items: Array<{
-    id: string;
-    label: RichTextValue;
-    description?: RichTextValue;
-    checked?: boolean;
-    required?: boolean;
-    disabled?: boolean;
-    evidence?: RichTextValue;
-  }>;
-  mode?: "local" | "submit";
-  submitLabel?: string;
-  requireAll?: boolean;
-  confirmationText?: RichTextValue;
-}
+// ── Interaction cards ─────────────────────────────────────────────────
 
 export interface ActionListCardData {
   items: Array<{
@@ -300,23 +188,6 @@ export interface ActionListCardData {
     description?: string;
     action?: { label: string; type: string; payload?: Record<string, unknown> };
     completed?: boolean;
-  }>;
-}
-
-export interface RankedListCardData {
-  items: Array<{
-    title: string;
-    score?: number | string;
-    description?: string;
-    badge?: string;
-  }>;
-}
-
-export interface StepsCardData {
-  steps: Array<{
-    title: string;
-    description?: string;
-    status: "done" | "active" | "pending" | "error";
   }>;
 }
 
@@ -332,13 +203,6 @@ export interface ApprovalSummaryCardData {
 }
 
 // ── Table & data collection cards ─────────────────────────────────────
-
-export interface ComparisonTableCardData {
-  subjects: Array<{ name: string; description?: string }>;
-  criteria: Array<{ key: string; label: string }>;
-  values: Array<Array<string | number | boolean | null>>;
-  highlight?: "differences" | "best";
-}
 
 export interface ProductGridCardData {
   items: Array<{

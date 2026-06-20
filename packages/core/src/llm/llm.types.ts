@@ -71,9 +71,6 @@ export interface ChatCompletionRequest {
   modelId?: "dp" | "seed";
 }
 
-/** User-selectable chat model identifier. */
-export type ChatModelId = "dp" | "seed";
-
 export interface ChatCompletionDelta {
   /** Text content delta. Empty string when the chunk contains only tool calls. */
   delta: string;

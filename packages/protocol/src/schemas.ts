@@ -1,16 +1,16 @@
 import { z } from "zod";
 import { AuditActor } from "./audit.js";
 
-export const runModeSchema = z.enum(["chat", "agent"]);
+const runModeSchema = z.enum(["chat", "agent"]);
 
 export const approvalDecisionSchema = z.object({
   reason: z.string().optional(),
   actor: z.string().default(AuditActor.LocalUser),
 });
 
-export const skillRiskSchema = z.enum(["low", "medium", "high", "critical"]);
+const skillRiskSchema = z.enum(["low", "medium", "high", "critical"]);
 
-export const permissionDeclarationSchema = z.object({
+const permissionDeclarationSchema = z.object({
   filesystem: z
     .object({
       read: z.array(z.string()).default([]),

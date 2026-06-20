@@ -16,11 +16,11 @@
   "dependencies": {
     "@sunpilot/protocol": "workspace:*",
     "@sunpilot/skill-sdk": "workspace:*",
-    "@sunpilot/storage": "workspace:*",
-    "zod": "^3.25.48"
+    "@sunpilot/storage": "workspace:*"
   },
   "devDependencies": {
     "typescript": "^5.8.3",
-    "vitest": "^3.2.1"
+    "vitest": "^3.2.1",
+    "zod": "^3.25.48"
   }
 }

@@ -1,43 +1,7 @@
 import type { FastifyInstance } from "fastify";
-import type { RunMode, RunRecord, RunStatus } from "@sunpilot/protocol";
-import {
-  DEFAULT_LLM_MODEL,
-  DEEPSEEK_API_KEY_ENV,
-  LLM_API_KEY_ENV,
-  LLM_MODEL_ENV,
-} from "@sunpilot/core";
+import { AGENT_ACTIVE_STATUSES, RUN_MODES, RUN_STATUSES, type RunMode, type RunRecord, type RunStatus } from "@sunpilot/protocol";
 import type { DatabaseContext } from "@sunpilot/storage";
 
-const AGENT_ACTIVE_STATUSES: RunStatus[] = [
-  "created",
-  "context_building",
-  "intent_routing",
-  "planning",
-  "tool_deciding",
-  "executing",
-  "observing",
-  "reflecting",
-  "responding",
-];
-
-const RUN_STATUSES: RunStatus[] = [
-  "created",
-  "context_building",
-  "intent_routing",
-  "planning",
-  "tool_deciding",
-  "waiting_approval",
-  "executing",
-  "observing",
-  "reflecting",
-  "responding",
-  "completed",
-  "failed",
-  "cancelled",
-  "interrupted",
-];
-
-const RUN_MODES: RunMode[] = ["chat", "agent"];
 const METRIC_BUCKETS_MS = [100, 250, 500, 1000, 2500, 5000, 10_000, 30_000];
 
 function metricLabel(value: unknown): string {

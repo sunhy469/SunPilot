@@ -19,24 +19,23 @@ export type RichTextValue =
 // ── Rich Card Type Registry ──────────────────────────────────────────
 
 export type RichCardType =
-  | "progress"
-  | "chart"
-  | "summary"
-  | "file"
-  | "info"
-  | "error"
-  | "table"
+  // ── Media & file cards ─────────────────────────────────────────────
   | "video"
-  | "metric"
-  | "timeline"
-  | "code"
-  | "gallery"
-  | "tool_result"
-  | "skill_result"
-  | "diagnostic"
-  | "status"
-  | "link_preview"
+  | "audio"
   | "image"
+  | "gallery"
+  | "file"
+  | "file_bundle"
+  | "pdf_preview"
+  // ── Interactive cards ──────────────────────────────────────────────
+  | "approval_summary"
+  | "form_card"
+  | "choice_group"
+  | "rating_card"
+  | "date_picker_card"
+  | "action_list"
+  // ── Chart / data visualization ────────────────────────────────────
+  | "chart"
   | "bar_chart"
   | "pie_chart"
   | "line_chart"
@@ -46,28 +45,14 @@ export type RichCardType =
   | "heatmap"
   | "stat_grid"
   | "kpi_card"
-  | "audio"
-  | "file_bundle"
-  | "pdf_preview"
-  | "rich_text"
-  | "definition_list"
-  | "quote_card"
-  | "citation_list"
-  | "code_diff"
-  | "json_viewer"
-  | "checklist"
-  | "action_list"
-  | "ranked_list"
-  | "steps"
-  | "approval_summary"
-  | "comparison_table"
   | "product_grid"
   | "record_card"
   | "kanban"
-  | "choice_group"
-  | "form_card"
-  | "rating_card"
-  | "date_picker_card";
+  // ── System / tool cards ───────────────────────────────────────────
+  | "tool_result"
+  | "skill_result"
+  | "diagnostic"
+  | "status";
 
 // ── Rich Card View ───────────────────────────────────────────────────
 

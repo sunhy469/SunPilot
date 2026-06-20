@@ -11,7 +11,7 @@ export interface AttachmentRef {
   checksum?: string;
 }
 
-export type ChatModelId = "dp" | "seed";
+type ChatModelId = "dp" | "seed";
 
 export interface ChatSendParams {
   conversationId?: string;
@@ -27,7 +27,7 @@ export interface ChatSendParams {
 // ── Wire event types (what comes over WebSocket) ────────────────────
 
 /** Raw wire envelope metadata carried in every WebSocket notification. */
-export interface AgentWireEnvelope<TPayload = Record<string, unknown>> {
+interface AgentWireEnvelope<TPayload = Record<string, unknown>> {
   eventId: string;
   sequence: number;
   runId?: string;
@@ -37,7 +37,7 @@ export interface AgentWireEnvelope<TPayload = Record<string, unknown>> {
 }
 
 /** Wire-level event as received from the WebSocket. */
-export type AgentWireEvent = {
+type AgentWireEvent = {
   jsonrpc: "2.0";
   method: string;
   params: AgentWireEnvelope;
@@ -46,7 +46,7 @@ export type AgentWireEvent = {
 // ── UI event types (consumed by React components) ───────────────────
 
 /** Metadata extracted from the wire envelope for UI consumption. */
-export interface AgentSocketEnvelopeMetadata {
+interface AgentSocketEnvelopeMetadata {
   id?: string;
   sequence?: number;
   runId?: string;
@@ -67,6 +67,15 @@ export type AgentUiEvent = AgentSocketEnvelopeMetadata &
           conversationId: string;
           mode: string;
           goal?: string;
+        };
+      }
+    | {
+        method: "agent.run.started";
+        params: {
+          runId: string;
+          conversationId?: string;
+          originalRunId?: string;
+          attemptAction?: string;
         };
       }
     | {
@@ -244,6 +253,7 @@ export type AgentUiEvent = AgentSocketEnvelopeMetadata &
           approvalId: string;
           decidedBy?: string;
           reason?: string;
+          strategy?: string;
         };
       }
     | {

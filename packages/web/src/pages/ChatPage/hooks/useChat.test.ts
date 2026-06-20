@@ -32,7 +32,19 @@ function assistantMessageReducer(
     if (items.some((m) => m.id === msgParams.messageId)) {
       return items.map((m) =>
         m.id === msgParams.messageId
-          ? { ...m, status: "streaming" as const, parts: m.parts ?? [] }
+          ? {
+              ...m,
+              status: "streaming" as const,
+              parts: (m.parts ?? []).length > 0 ? m.parts : [{
+                id: "__local_pending",
+                type: "status",
+                label: "正在理解需求...",
+                status: "running",
+                runId: "",
+                createdAt: "",
+                metadata: { phase: "local_pending" },
+              }],
+            }
           : m,
       );
     }
@@ -54,7 +66,15 @@ function assistantMessageReducer(
               id: msgParams.messageId,
               conversationId: msgParams.conversationId ?? conversationId,
               status: "streaming" as const,
-              parts: [],
+              parts: [{
+                id: "__local_pending",
+                type: "status",
+                label: "正在理解需求...",
+                status: "running",
+                runId: "",
+                createdAt: "",
+                metadata: { phase: "local_pending" },
+              }],
             }
           : m,
       );
@@ -70,7 +90,15 @@ function assistantMessageReducer(
         createdAt: new Date().toISOString(),
         status: "streaming" as const,
         activities: [],
-        parts: [],
+        parts: [{
+          id: "__local_pending",
+          type: "status",
+          label: "正在理解需求...",
+          status: "running",
+          runId: "",
+          createdAt: "",
+          metadata: { phase: "local_pending" },
+        }],
       },
     ];
   }
@@ -86,16 +114,18 @@ function assistantMessageReducer(
     return items.map((item) => {
       if (item.id !== partParams.messageId) return item;
       const parts = item.parts ?? [];
+      // Remove local pending placeholder when the first real part arrives
+      const withoutLocal = parts.filter((p) => p.id !== "__local_pending");
       const existingIdx =
-        partId != null ? parts.findIndex((p) => p.id === partId) : -1;
+        partId != null ? withoutLocal.findIndex((p) => p.id === partId) : -1;
       const nextParts =
         existingIdx >= 0
-          ? parts.map((p, i) =>
+          ? withoutLocal.map((p, i) =>
               i === existingIdx
                 ? ({ ...p, ...incomingPart } as AssistantMessagePart)
                 : p,
             )
-          : [...parts, incomingPart as AssistantMessagePart];
+          : [...withoutLocal, incomingPart as AssistantMessagePart];
       return { ...item, parts: nextParts };
     });
   }
@@ -166,6 +196,26 @@ function assistantMessageReducer(
         parts: [],
       }),
     ];
+  }
+
+  if (event.method === "agent.message.part.updated") {
+    const updateParams = event.params as {
+      messageId: string;
+      partId: string;
+      patch: Record<string, unknown>;
+    };
+    return items.map((item) =>
+      item.id === updateParams.messageId
+        ? {
+            ...item,
+            parts: (item.parts ?? []).map((part) =>
+              part.id === updateParams.partId
+                ? { ...part, ...updateParams.patch }
+                : part,
+            ),
+          }
+        : item,
+    );
   }
 
   if (event.method === "agent.message.completed") {
@@ -871,5 +921,390 @@ describe("mergeMessagesById", () => {
     expect(result).toHaveLength(2);
     // Only one assistant message
     expect(result.filter((m) => m.role === "assistant")).toHaveLength(1);
+  });
+});
+
+// ── §P1-4: AGENT_EVENT_VISIBILITY classification tests ──────────────
+
+describe("AGENT_EVENT_VISIBILITY", () => {
+  // Re-implement the visibility map for testing (mirrors useChat.ts)
+  const AGENT_EVENT_VISIBILITY: Record<string, string> = {
+    "agent.tool.started": "visible",
+    "agent.tool.delta": "visible",
+    "agent.tool.completed": "visible",
+    "agent.tool.failed": "visible",
+    "agent.error": "visible",
+    "agent.run.created": "status",
+    "agent.run.started": "status",
+    "agent.run.completed": "status",
+    "agent.run.failed": "status",
+    "agent.run.cancelled": "status",
+    "agent.run.interrupted": "status",
+    "agent.message.started": "status",
+    "agent.message.part.started": "status",
+    "agent.message.part.delta": "status",
+    "agent.message.part.updated": "status",
+    "agent.message.completed": "status",
+    "agent.approval.required": "status",
+    "agent.approval.approved": "status",
+    "agent.approval.rejected": "status",
+    "agent.approval.expired": "status",
+    "agent.artifact.created": "status",
+    "agent.memory.written": "status",
+    "agent.context.started": "debug",
+    "agent.context.completed": "debug",
+    "agent.intent.detected": "debug",
+    "agent.plan.created": "debug",
+    "agent.tool.selected": "debug",
+    "agent.model.started": "debug",
+    "agent.model.delta": "debug",
+    "agent.model.completed": "debug",
+    "agent.model.failed": "debug",
+    "agent.clarification.requested": "debug",
+    "pong": "ignored",
+  };
+
+  test("all known events are classified", () => {
+    const knownEvents = [
+      "agent.run.created", "agent.run.started", "agent.run.completed",
+      "agent.run.failed", "agent.run.cancelled", "agent.run.interrupted",
+      "agent.context.started", "agent.context.completed",
+      "agent.intent.detected", "agent.plan.created",
+      "agent.clarification.requested",
+      "agent.model.started", "agent.model.delta", "agent.model.completed",
+      "agent.model.failed",
+      "agent.tool.selected", "agent.tool.started", "agent.tool.delta",
+      "agent.tool.completed", "agent.tool.failed",
+      "agent.approval.required", "agent.approval.approved",
+      "agent.approval.rejected", "agent.approval.expired",
+      "agent.artifact.created", "agent.memory.written",
+      "agent.message.started", "agent.message.part.started",
+      "agent.message.part.delta", "agent.message.part.updated",
+      "agent.message.completed",
+      "agent.error",
+      "pong",
+    ];
+
+    for (const event of knownEvents) {
+      expect(
+        AGENT_EVENT_VISIBILITY[event],
+        `Event "${event}" must be in AGENT_EVENT_VISIBILITY`,
+      ).toBeDefined();
+    }
+  });
+
+  test("only 'visible' events produce activities", () => {
+    const visibleEvents = Object.entries(AGENT_EVENT_VISIBILITY)
+      .filter(([, v]) => v === "visible")
+      .map(([k]) => k);
+
+    expect(visibleEvents).toEqual([
+      "agent.tool.started",
+      "agent.tool.delta",
+      "agent.tool.completed",
+      "agent.tool.failed",
+      "agent.error",
+    ]);
+  });
+
+  test("terminal events are classified as 'status'", () => {
+    const terminalEvents = [
+      "agent.run.completed",
+      "agent.run.failed",
+      "agent.run.cancelled",
+      "agent.run.interrupted",
+    ];
+    for (const event of terminalEvents) {
+      expect(AGENT_EVENT_VISIBILITY[event]).toBe("status");
+    }
+  });
+
+  test("agent.run.started is classified as 'status' (not debug)", () => {
+    expect(AGENT_EVENT_VISIBILITY["agent.run.started"]).toBe("status");
+  });
+});
+
+// ── §P0-2 / §P1-1: assistantMessageReducer approval & status part tests ──
+
+describe("assistantMessageReducer — approval status part updates", () => {
+  test("agent.message.part.updated patches status part from running to failed", () => {
+    const items: ChatMessage[] = [
+      makeStreamingAssistant({
+        id: "msg_1",
+        parts: [
+          {
+            id: "status_1",
+            type: "status",
+            label: "等待确认: searchTool",
+            status: "running",
+            runId: "run_1",
+            createdAt: "",
+            metadata: { phase: "queued" },
+          },
+        ],
+      }),
+    ];
+
+    const result = assistantMessageReducer(
+      items,
+      {
+        method: "agent.message.part.updated",
+        params: {
+          messageId: "msg_1",
+          partId: "status_1",
+          patch: {
+            status: "failed",
+            label: "已拒绝: searchTool",
+          },
+        },
+      },
+      "conv_1",
+    );
+
+    const patched = result[0]!.parts!.find((p) => p.id === "status_1");
+    expect(patched).toMatchObject({
+      status: "failed",
+      label: "已拒绝: searchTool",
+    });
+  });
+
+  test("agent.message.part.updated patches status part from running to completed", () => {
+    const items: ChatMessage[] = [
+      makeStreamingAssistant({
+        id: "msg_1",
+        parts: [
+          {
+            id: "status_1",
+            type: "status",
+            label: "等待确认: searchTool",
+            status: "running",
+            runId: "run_1",
+            createdAt: "",
+            metadata: { phase: "queued" },
+          },
+        ],
+      }),
+    ];
+
+    const result = assistantMessageReducer(
+      items,
+      {
+        method: "agent.message.part.updated",
+        params: {
+          messageId: "msg_1",
+          partId: "status_1",
+          patch: {
+            status: "completed",
+            label: "已确认: searchTool",
+          },
+        },
+      },
+      "conv_1",
+    );
+
+    const patched = result[0]!.parts!.find((p) => p.id === "status_1");
+    expect(patched).toMatchObject({
+      status: "completed",
+      label: "已确认: searchTool",
+    });
+  });
+
+  test("agent.message.part.updated only patches the specified part", () => {
+    const items: ChatMessage[] = [
+      makeStreamingAssistant({
+        id: "msg_1",
+        parts: [
+          {
+            id: "status_1",
+            type: "status",
+            label: "等待确认: toolA",
+            status: "running",
+            runId: "run_1",
+            createdAt: "",
+            metadata: {},
+          },
+          {
+            id: "status_2",
+            type: "status",
+            label: "等待确认: toolB",
+            status: "running",
+            runId: "run_1",
+            createdAt: "",
+            metadata: {},
+          },
+        ],
+      }),
+    ];
+
+    const result = assistantMessageReducer(
+      items,
+      {
+        method: "agent.message.part.updated",
+        params: {
+          messageId: "msg_1",
+          partId: "status_1",
+          patch: { status: "completed", label: "已确认: toolA" },
+        },
+      },
+      "conv_1",
+    );
+
+    const part1 = result[0]!.parts!.find((p) => p.id === "status_1");
+    const part2 = result[0]!.parts!.find((p) => p.id === "status_2");
+    expect(part1).toMatchObject({ status: "completed" });
+    expect(part2).toMatchObject({ status: "running" });
+  });
+
+  // ── §Status gap fix: local pending status part ─────────────────
+
+  test("agent.message.started inserts local pending status part", () => {
+    const items: ChatMessage[] = [];
+
+    const result = assistantMessageReducer(
+      items,
+      {
+        method: "agent.message.started",
+        params: {
+          runId: "run_1",
+          conversationId: "conv_1",
+          messageId: "msg_1",
+        },
+      },
+      "conv_1",
+    );
+
+    expect(result).toHaveLength(1);
+    expect(result[0]!.status).toBe("streaming");
+    expect(result[0]!.parts).toHaveLength(1);
+    expect(result[0]!.parts![0]).toMatchObject({
+      id: "__local_pending",
+      type: "status",
+      label: "正在理解需求...",
+      status: "running",
+    });
+  });
+
+  test("agent.message.started inserts local pending part only when no parts exist", () => {
+    const items: ChatMessage[] = [
+      makeStreamingAssistant({
+        id: "msg_1",
+        parts: [
+          {
+            id: "status_real",
+            type: "status",
+            label: "正在思考",
+            status: "running",
+            runId: "run_1",
+            createdAt: "",
+            metadata: {},
+          },
+        ],
+      }),
+    ];
+
+    const result = assistantMessageReducer(
+      items,
+      {
+        method: "agent.message.started",
+        params: {
+          runId: "run_1",
+          conversationId: "conv_1",
+          messageId: "msg_1",
+        },
+      },
+      "conv_1",
+    );
+
+    // Should NOT insert local pending part when parts already exist
+    expect(result[0]!.parts).toHaveLength(1);
+    expect(result[0]!.parts![0]!.id).toBe("status_real");
+  });
+
+  test("agent.message.part.started removes local pending part and adds real part", () => {
+    const items: ChatMessage[] = [
+      makeStreamingAssistant({
+        id: "msg_1",
+        parts: [
+          {
+            id: "__local_pending",
+            type: "status",
+            label: "正在理解需求...",
+            status: "running",
+            runId: "",
+            createdAt: "",
+            metadata: { phase: "local_pending" },
+          },
+        ],
+      }),
+    ];
+
+    const result = assistantMessageReducer(
+      items,
+      {
+        method: "agent.message.part.started",
+        params: {
+          messageId: "msg_1",
+          part: {
+            id: "status_1",
+            type: "status",
+            label: "正在理解需求",
+            status: "running",
+            runId: "run_1",
+            createdAt: "",
+            metadata: { phase: "intent_routing" },
+          },
+        },
+      },
+      "conv_1",
+    );
+
+    // Local pending part should be removed
+    expect(result[0]!.parts!.find((p) => p.id === "__local_pending")).toBeUndefined();
+    // Real part should be present
+    expect(result[0]!.parts).toHaveLength(1);
+    expect(result[0]!.parts![0]).toMatchObject({
+      id: "status_1",
+      label: "正在理解需求",
+    });
+  });
+
+  test("agent.message.completed removes local pending part via full parts replacement", () => {
+    const items: ChatMessage[] = [
+      makeStreamingAssistant({
+        id: "msg_1",
+        parts: [
+          {
+            id: "__local_pending",
+            type: "status",
+            label: "正在理解需求...",
+            status: "running",
+            runId: "",
+            createdAt: "",
+            metadata: { phase: "local_pending" },
+          },
+        ],
+      }),
+    ];
+
+    const result = assistantMessageReducer(
+      items,
+      {
+        method: "agent.message.completed",
+        params: {
+          runId: "run_1",
+          conversationId: "conv_1",
+          messageId: "msg_1",
+          content: "Hello!",
+          parts: [
+            { id: "text_1", type: "text", content: "Hello!", runId: "run_1", createdAt: "" },
+          ],
+        },
+      },
+      "conv_1",
+    );
+
+    // Completed message replaces all parts, so local pending is gone
+    expect(result[0]!.parts!.find((p) => p.id === "__local_pending")).toBeUndefined();
+    expect(result[0]!.status).toBe("completed");
   });
 });

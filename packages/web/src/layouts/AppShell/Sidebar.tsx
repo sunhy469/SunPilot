@@ -6,7 +6,7 @@ import { RecentConversations } from "./RecentConversations";
 import { UserFooter } from "./UserFooter";
 import { useResponsive } from "../../shared/hooks/useResponsive";
 import { Layout } from "antd";
-import "./Sidebar.css";
+import "./Sidebar.scss";
 
 const { Sider } = Layout;
 

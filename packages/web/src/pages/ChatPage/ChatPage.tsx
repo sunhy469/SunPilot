@@ -4,18 +4,19 @@ import { AppShell } from "../../layouts/AppShell/AppShell";
 import { Sidebar } from "../../layouts/AppShell/Sidebar";
 import { useChat } from "./hooks/useChat";
 import { useConversations } from "./hooks/useConversations";
-import { ChatHeader } from "./components/ChatHeader";
-import { WelcomeView } from "./components/WelcomeView";
-import { MessageList } from "./components/MessageList";
-import { ChatComposer } from "./components/ChatComposer";
-import { ArtifactPanel } from "./components/ArtifactPanel";
-import { ApprovalStrip } from "./components/ApprovalStrip";
-import { OfflineBanner } from "./components/OfflineBanner";
-import { ErrorMessageCard } from "./components/ErrorMessageCard";
-import { PluginsEmptyView } from "./components/PluginsEmptyView";
+import { ChatHeader } from "./components/ChatHeader/ChatHeader";
+import { WelcomeView } from "./components/WelcomeView/WelcomeView";
+import { MessageList } from "./components/MessageList/MessageList";
+import { ChatComposer } from "./components/ChatComposer/ChatComposer";
+import { ArtifactPanel } from "./components/ArtifactPanel/ArtifactPanel";
+import { ApprovalStrip } from "./components/ApprovalStrip/ApprovalStrip";
+import { OfflineBanner } from "./components/OfflineBanner/OfflineBanner";
+import { ErrorMessageCard } from "./components/ErrorMessageCard/ErrorMessageCard";
+import { PluginsEmptyView } from "./components/PluginsEmptyView/PluginsEmptyView";
 import { RunDebugPanel } from "../../features/agent-runtime/RunDebugPanel";
 import { SettingsPage } from "../SettingsPage";
 import { conversationTitle } from "../../features/conversations/model";
+import { collectAiOutputs } from "./utils/collectAiOutputs";
 import "./ChatPage.scss";
 
 export function ChatPage() {
@@ -39,6 +40,11 @@ export function ChatPage() {
   const isWelcome =
     !hasMessages && chat.chatViewState !== "loadingConversation";
   const isOffline = chat.chatViewState === "offline";
+
+  const aiOutputs = useMemo(
+    () => collectAiOutputs(conversations.messages),
+    [conversations.messages],
+  );
 
   return (
     <AppShell
@@ -81,6 +87,12 @@ export function ChatPage() {
                     ? conversationTitle(active.title)
                     : ""
           }
+          conversation={activePanel === "chat" ? active : undefined}
+          showConversationActions={activePanel === "chat" && !!active}
+          onRename={(id, title) => { void conversations.renameConversation(id, title); }}
+          onTogglePin={(id, pinned) => { void conversations.togglePin(id, pinned); }}
+          outputCount={aiOutputs.length}
+          outputs={aiOutputs}
         />
 
         {activePanel === "automation" ? (
