@@ -24,6 +24,7 @@
     "@sunpilot/web": "workspace:*",
     "@sunpilot/api": "workspace:*",
     "@sunpilot/core": "workspace:*",
+    "@sunpilot/platform": "workspace:*",
     "@sunpilot/protocol": "workspace:*",
     "@sunpilot/skill-runner": "workspace:*",
     "@sunpilot/storage": "workspace:*",
