@@ -1,0 +1,28 @@
+.artifact-box-panel {
+  .artifact-box-panel__item {
+    width: 100%;
+  }
+
+  .artifact-box-panel__item-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+
+  .artifact-box-panel__item-title {
+    font-size: 13px;
+    font-weight: 500;
+  }
+
+  .artifact-box-panel__item-meta {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 4px;
+  }
+
+  .artifact-box-panel__item-time {
+    font-size: 11px;
+    color: #9ca3af;
+  }
+}

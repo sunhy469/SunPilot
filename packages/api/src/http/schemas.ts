@@ -97,3 +97,27 @@ export const updateConversationBodySchema = z.object({
 }).refine((d) => d.title !== undefined || d.pinned !== undefined, {
   message: "At least one of title or pinned must be provided",
 });
+
+export const createDigitalBeingBodySchema = z.object({
+  name: z.string().min(1),
+  description: z.string().optional(),
+  homeNodeId: z.string().min(1),
+  conversationId: z.string().optional(),
+});
+
+export const updateDigitalBeingBodySchema = z.object({
+  name: z.string().optional(),
+  description: z.string().optional(),
+  status: z.string().optional(),
+  statusText: z.string().optional(),
+});
+
+export const createTaskBodySchema = z.object({
+  type: z.string().min(1),
+  title: z.string().min(1),
+  input: z.record(z.unknown()).optional(),
+});
+
+export const sleepBeingBodySchema = z.object({
+  reason: z.string().optional(),
+});

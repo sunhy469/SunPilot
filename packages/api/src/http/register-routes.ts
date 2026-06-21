@@ -27,6 +27,7 @@ import {
   updateConversationBodySchema,
 } from "./schemas.js";
 import { registerMemoryRoutes } from "./routes/memory.js";
+import { registerDigitalWorldRoutes } from "./routes/digital-world.js";
 import { formatZodIssues, paginationCursor } from "./routes/shared.js";
 
 function chatHttpStatus(error: unknown): number {
@@ -572,6 +573,7 @@ export function registerSunPilotApiRoutes(
 
   // ── Memory (see routes/memory.ts) ──────────────────────────────────
   registerMemoryRoutes(app, deps);
+  registerDigitalWorldRoutes(app, deps);
 
   // ── Skills ─────────────────────────────────────────────────────────
   app.get("/v1/skills", async () => database.skills.list());

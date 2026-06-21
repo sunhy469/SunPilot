@@ -3,6 +3,7 @@ import { PostgresApprovalRepository } from "./postgres.approval.repository.js";
 import { PostgresArtifactRepository } from "./postgres.artifact.repository.js";
 import { PostgresAuditRepository } from "./postgres.audit.repository.js";
 import { PostgresConversationRepository } from "./postgres.conversation.repository.js";
+import { PostgresDigitalBeingRepository } from "./postgres.digital-being.repository.js";
 import type { PostgresPool } from "./postgres.client.js";
 import { withPostgresTransaction } from "./postgres.transaction.js";
 import { PostgresEventRepository } from "./postgres.event.repository.js";
@@ -16,6 +17,12 @@ import { PostgresSettingRepository } from "./postgres.setting.repository.js";
 import { PostgresSkillRepository } from "./postgres.skill.repository.js";
 import { PostgresStepRepository } from "./postgres.step.repository.js";
 import { PostgresToolCallRepository } from "./postgres.tool-call.repository.js";
+import { PostgresWorldActionRepository } from "./postgres.world-action.repository.js";
+import { PostgresWorldActionLogRepository } from "./postgres.world-action-log.repository.js";
+import { PostgresWorldArtifactRepository } from "./postgres.world-artifact.repository.js";
+import { PostgresWorldEdgeRepository } from "./postgres.world-edge.repository.js";
+import { PostgresWorldNodeRepository } from "./postgres.world-node.repository.js";
+import { PostgresWorldTaskRepository } from "./postgres.world-task.repository.js";
 import { AgentTraceRepository } from "../repositories/agent-trace.repository.js";
 import { PlanSnapshotRepository } from "../repositories/plan-snapshot.repository.js";
 
@@ -35,6 +42,13 @@ export class PostgresDatabaseContext implements DatabaseContext {
   readonly audit: PostgresAuditRepository;
   readonly idempotency: PostgresIdempotencyRepository;
   readonly skills: PostgresSkillRepository;
+  readonly digitalBeings: PostgresDigitalBeingRepository;
+  readonly worldNodes: PostgresWorldNodeRepository;
+  readonly worldEdges: PostgresWorldEdgeRepository;
+  readonly worldTasks: PostgresWorldTaskRepository;
+  readonly worldActions: PostgresWorldActionRepository;
+  readonly worldActionLogs: PostgresWorldActionLogRepository;
+  readonly worldArtifacts: PostgresWorldArtifactRepository;
   readonly agentTraces: AgentTraceRepository;
   readonly planSnapshots: PlanSnapshotRepository;
 
@@ -57,6 +71,13 @@ export class PostgresDatabaseContext implements DatabaseContext {
     this.audit = new PostgresAuditRepository(pool);
     this.idempotency = new PostgresIdempotencyRepository(pool);
     this.skills = new PostgresSkillRepository(pool);
+    this.digitalBeings = new PostgresDigitalBeingRepository(pool);
+    this.worldNodes = new PostgresWorldNodeRepository(pool);
+    this.worldEdges = new PostgresWorldEdgeRepository(pool);
+    this.worldTasks = new PostgresWorldTaskRepository(pool);
+    this.worldActions = new PostgresWorldActionRepository(pool);
+    this.worldActionLogs = new PostgresWorldActionLogRepository(pool);
+    this.worldArtifacts = new PostgresWorldArtifactRepository(pool);
     this.agentTraces = new AgentTraceRepository(pool);
     this.planSnapshots = new PlanSnapshotRepository(pool);
   }
