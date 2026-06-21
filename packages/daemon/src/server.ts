@@ -178,9 +178,10 @@ export async function createDaemon(options: DaemonOptions = {}) {
     }
   });
 
+  const platform = createPlatformServices({ database, getAgent: getChatAgent });
   const apiDeps: SunPilotApiDeps = {
     database,
-    platform: createPlatformServices({ database }),
+    platform,
     paths,
     getChatAgent,
     skills: {
@@ -221,6 +222,45 @@ export async function createDaemon(options: DaemonOptions = {}) {
     },
   };
   registerSunPilotApiRoutes(app, apiDeps);
+
+  // Subscribe to Agent Run events and forward to TaskExecutor
+  // so that work_on actions complete when the Agent Run finishes.
+  const PLATFORM_CTX = { actorType: "service" as const, clientType: "api" as const };
+  liveEventBus.subscribe(async (event) => {
+    if (
+      event.type === "agent.run.completed" ||
+      event.type === "agent.run.failed" ||
+      event.type === "agent.run.cancelled"
+    ) {
+      const runId = event.runId;
+      if (!runId) return;
+
+      const runStatus =
+        event.type === "agent.run.completed" ? "completed" :
+        event.type === "agent.run.failed" ? "failed" : "cancelled";
+
+      // Collect artifacts from the run if completed
+      const artifacts: Array<{ type: string; title: string; uri?: string }> = [];
+      if (runStatus === "completed" && event.payload) {
+        const payload = event.payload as Record<string, unknown>;
+        if (Array.isArray(payload["artifacts"])) {
+          for (const a of payload["artifacts"] as Array<Record<string, unknown>>) {
+            artifacts.push({
+              type: (a["type"] as string) ?? "unknown",
+              title: (a["title"] as string) ?? (a["name"] as string) ?? "产物",
+              uri: a["uri"] as string | undefined,
+            });
+          }
+        }
+      }
+
+      try {
+        await platform.executor.onAgentRunCompleted(PLATFORM_CTX, runId, runStatus, artifacts);
+      } catch (err) {
+        app.log.warn({ err, runId }, "Failed to handle agent run completion in TaskExecutor");
+      }
+    }
+  });
 
   const ws = setupDaemonWebSocket({
     getChatAgent,
@@ -269,6 +309,15 @@ export async function createDaemon(options: DaemonOptions = {}) {
       await app.listen({ host, port });
       writeFileSync(paths.pidFile, String(process.pid), { mode: 0o600 });
       ws.attach(app.server);
+
+      // Seed default world nodes/edges if database is empty
+      try {
+        await platform.world.seedDefaultWorld({ actorType: "service", clientType: "api" });
+        app.log.info("Default world seed completed");
+      } catch (err) {
+        app.log.warn({ err }, "Default world seed failed (may already exist)");
+      }
+
       appendFileSync(
         paths.logs + "/daemon.log",
         JSON.stringify({

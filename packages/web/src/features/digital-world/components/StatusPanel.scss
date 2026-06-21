@@ -1,0 +1,19 @@
+.status-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.status-panel__action-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 4px 0;
+}
+
+.status-panel__empty {
+  text-align: center;
+  color: #9ca3af;
+  padding: 12px 0;
+  font-size: 13px;
+}
