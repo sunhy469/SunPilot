@@ -1,0 +1,34 @@
+.action-log-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.action-log-panel__item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.action-log-panel__event {
+  font-size: 13px;
+  font-weight: 500;
+  color: #374151;
+}
+
+.action-log-panel__detail {
+  font-size: 11px;
+  color: #6b7280;
+}
+
+.action-log-panel__time {
+  font-size: 11px;
+  color: #9ca3af;
+}
+
+.action-log-panel__empty {
+  text-align: center;
+  color: #9ca3af;
+  padding: 24px 0;
+  font-size: 13px;
+}

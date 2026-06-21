@@ -37,31 +37,6 @@ importers:
         specifier: ^3.2.1
         version: 3.2.6(@types/debug@4.1.13)(@types/node@22.19.19)(jsdom@26.1.0)(sass@1.100.0)(tsx@4.22.4)
 
-  evals:
-    dependencies:
-      '@sunpilot/core':
-        specifier: workspace:*
-        version: link:../packages/core
-      '@sunpilot/daemon':
-        specifier: workspace:*
-        version: link:../packages/daemon
-      '@sunpilot/protocol':
-        specifier: workspace:*
-        version: link:../packages/protocol
-      '@sunpilot/skill-runner':
-        specifier: workspace:*
-        version: link:../packages/skill-runner
-      '@sunpilot/storage':
-        specifier: workspace:*
-        version: link:../packages/storage
-    devDependencies:
-      typescript:
-        specifier: ^5.8.3
-        version: 5.8.3
-      vitest:
-        specifier: ^3.2.1
-        version: 3.2.6(@types/debug@4.1.13)(@types/node@22.19.19)(jsdom@26.1.0)(sass@1.100.0)(tsx@4.22.4)
-
   packages/api:
     dependencies:
       '@sunpilot/core':

@@ -4,6 +4,7 @@ import type {
   ArtifactRepository,
   AuditRepository,
   ConversationRepository,
+  DigitalBeingRepository,
   EventRepository,
   IdempotencyRepository,
   MemoryRepository,
@@ -16,6 +17,12 @@ import type {
   SettingRepository,
   StepRepository,
   ToolCallRepository,
+  WorldActionLogRepository,
+  WorldActionRepository,
+  WorldArtifactRepository,
+  WorldEdgeRepository,
+  WorldNodeRepository,
+  WorldTaskRepository,
 } from "../repositories/index.js";
 
 export interface DatabaseContext {
@@ -34,6 +41,13 @@ export interface DatabaseContext {
   audit: AuditRepository;
   idempotency: IdempotencyRepository;
   skills: SkillRepository;
+  digitalBeings: DigitalBeingRepository;
+  worldNodes: WorldNodeRepository;
+  worldEdges: WorldEdgeRepository;
+  worldTasks: WorldTaskRepository;
+  worldActions: WorldActionRepository;
+  worldActionLogs: WorldActionLogRepository;
+  worldArtifacts: WorldArtifactRepository;
   /** Optional — agent trace persistence (§P0-2). */
   agentTraces?: AgentTraceRepository;
   /** Optional — plan snapshot persistence (§P0-2). */
