@@ -1,0 +1,45 @@
+.being-chat-panel {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.being-chat-panel__messages {
+  flex: 1;
+  overflow-y: auto;
+  padding-bottom: 12px;
+}
+
+.being-chat-panel__empty {
+  text-align: center;
+  color: #9ca3af;
+  padding: 24px 0;
+  font-size: 13px;
+}
+
+.being-chat-panel__msg {
+  padding: 8px 12px;
+  border-radius: 8px;
+  margin-bottom: 8px;
+  font-size: 13px;
+  max-width: 80%;
+  word-break: break-word;
+}
+
+.being-chat-panel__msg--user {
+  background: #1677ff;
+  color: #fff;
+  margin-left: auto;
+}
+
+.being-chat-panel__msg--assistant {
+  background: #f5f5f5;
+  color: #333;
+}
+
+.being-chat-panel__input {
+  display: flex;
+  gap: 8px;
+  padding-top: 12px;
+  border-top: 1px solid #f0f0f0;
+}

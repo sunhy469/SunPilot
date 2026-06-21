@@ -46,12 +46,51 @@ import type {
   IdempotencyStatus,
   ReserveIdempotencyInput,
 } from "../repositories/idempotency.repository.js";
+import type {
+  DigitalBeingRecord,
+  CreateDigitalBeingInput,
+  UpdateDigitalBeingPatch,
+} from "../repositories/digital-being.repository.js";
+import type {
+  WorldNodeRecord,
+  CreateWorldNodeInput,
+} from "../repositories/world-node.repository.js";
+import type {
+  WorldEdgeRecord,
+  CreateWorldEdgeInput,
+} from "../repositories/world-edge.repository.js";
+import type {
+  WorldTaskRecord,
+  CreateWorldTaskInput,
+  UpdateWorldTaskPatch,
+} from "../repositories/world-task.repository.js";
+import type {
+  WorldActionRecord,
+  CreateWorldActionInput,
+  UpdateWorldActionPatch,
+} from "../repositories/world-action.repository.js";
+import type {
+  WorldArtifactRecord,
+  CreateWorldArtifactInput,
+  UpdateWorldArtifactPatch,
+} from "../repositories/world-artifact.repository.js";
+import type {
+  WorldActionLogRecord,
+  CreateWorldActionLogInput,
+} from "../repositories/world-action-log.repository.js";
 
 function byCreatedAt<T extends { createdAt: string }>(
   left: T,
   right: T,
 ): number {
   return left.createdAt.localeCompare(right.createdAt);
+}
+
+function byCreatedAtDesc<T extends { createdAt: string }>(
+  left: T,
+  right: T,
+): number {
+  return right.createdAt.localeCompare(left.createdAt);
 }
 
 function byUpdatedAtDesc<T extends { updatedAt: string }>(
@@ -87,6 +126,13 @@ export class InMemoryDatabaseContext implements DatabaseContext {
   private readonly auditRecords: AuditRecord[] = [];
   private readonly idempotencyRecords = new Map<string, IdempotencyRecord>();
   private readonly skillRecords = new Map<string, InstalledSkillRecord>();
+  private readonly digitalBeingRecords = new Map<string, DigitalBeingRecord>();
+  private readonly worldNodeRecords = new Map<string, WorldNodeRecord>();
+  private readonly worldEdgeRecords = new Map<string, WorldEdgeRecord>();
+  private readonly worldTaskRecords = new Map<string, WorldTaskRecord>();
+  private readonly worldActionRecords = new Map<string, WorldActionRecord>();
+  private readonly worldActionLogRecords: WorldActionLogRecord[] = [];
+  private readonly worldArtifactRecords = new Map<string, WorldArtifactRecord>();
 
   readonly conversations = {
     create: async (
@@ -745,6 +791,228 @@ export class InMemoryDatabaseContext implements DatabaseContext {
     },
   };
 
+  readonly digitalBeings = {
+    create: async (input: CreateDigitalBeingInput): Promise<DigitalBeingRecord> => {
+      const now = new Date().toISOString();
+      const record: DigitalBeingRecord = {
+        id: input.id ?? `being_${crypto.randomUUID()}`,
+        name: input.name,
+        description: input.description,
+        bodyType: input.bodyType ?? "tracked_worker",
+        color: input.color,
+        icon: input.icon,
+        status: "idle",
+        currentNodeId: input.currentNodeId ?? input.homeNodeId,
+        homeNodeId: input.homeNodeId,
+        conversationId: input.conversationId,
+        usedRuns: 0,
+        usedSkillCalls: 0,
+        createdAt: now,
+        updatedAt: now,
+      };
+      this.digitalBeingRecords.set(record.id, record);
+      return record;
+    },
+    findById: async (id: string): Promise<DigitalBeingRecord | null> =>
+      this.digitalBeingRecords.get(id) ?? null,
+    list: async (): Promise<DigitalBeingRecord[]> =>
+      [...this.digitalBeingRecords.values()].sort(byCreatedAt),
+    update: async (id: string, patch: UpdateDigitalBeingPatch): Promise<DigitalBeingRecord | null> => {
+      const existing = this.digitalBeingRecords.get(id);
+      if (!existing) return null;
+      const updated: DigitalBeingRecord = {
+        ...existing,
+        ...Object.fromEntries(Object.entries(patch).filter(([, v]) => v !== undefined)),
+        updatedAt: new Date().toISOString(),
+      };
+      this.digitalBeingRecords.set(id, updated);
+      return updated;
+    },
+    delete: async (id: string): Promise<boolean> =>
+      this.digitalBeingRecords.delete(id),
+  };
+
+  readonly worldNodes = {
+    create: async (input: CreateWorldNodeInput): Promise<WorldNodeRecord> => {
+      const now = new Date().toISOString();
+      const record: WorldNodeRecord = {
+        id: input.id ?? `node_${crypto.randomUUID()}`,
+        type: input.type,
+        name: input.name,
+        posX: input.posX,
+        posY: input.posY,
+        sizeWidth: input.sizeWidth,
+        sizeHeight: input.sizeHeight,
+        icon: input.icon,
+        logo: input.logo,
+        enabled: input.enabled ?? true,
+        createdAt: now,
+      };
+      this.worldNodeRecords.set(record.id, record);
+      return record;
+    },
+    findById: async (id: string): Promise<WorldNodeRecord | null> =>
+      this.worldNodeRecords.get(id) ?? null,
+    list: async (): Promise<WorldNodeRecord[]> =>
+      [...this.worldNodeRecords.values()].sort(byCreatedAt),
+    update: async (id: string, patch: Partial<CreateWorldNodeInput>): Promise<WorldNodeRecord | null> => {
+      const existing = this.worldNodeRecords.get(id);
+      if (!existing) return null;
+      const updated = { ...existing, ...patch, id: existing.id, createdAt: existing.createdAt };
+      this.worldNodeRecords.set(id, updated);
+      return updated;
+    },
+    delete: async (id: string): Promise<boolean> =>
+      this.worldNodeRecords.delete(id),
+  };
+
+  readonly worldEdges = {
+    create: async (input: CreateWorldEdgeInput): Promise<WorldEdgeRecord> => {
+      const record: WorldEdgeRecord = {
+        id: input.id ?? `edge_${crypto.randomUUID()}`,
+        fromNodeId: input.fromNodeId,
+        toNodeId: input.toNodeId,
+        distance: input.distance ?? 1,
+        bidirectional: input.bidirectional ?? true,
+        locked: input.locked ?? false,
+      };
+      this.worldEdgeRecords.set(record.id, record);
+      return record;
+    },
+    findById: async (id: string): Promise<WorldEdgeRecord | null> =>
+      this.worldEdgeRecords.get(id) ?? null,
+    list: async (): Promise<WorldEdgeRecord[]> =>
+      [...this.worldEdgeRecords.values()],
+    delete: async (id: string): Promise<boolean> =>
+      this.worldEdgeRecords.delete(id),
+  };
+
+  readonly worldTasks = {
+    create: async (input: CreateWorldTaskInput): Promise<WorldTaskRecord> => {
+      const now = new Date().toISOString();
+      const record: WorldTaskRecord = {
+        id: input.id ?? `task_${crypto.randomUUID()}`,
+        beingId: input.beingId,
+        type: input.type,
+        status: "queued",
+        title: input.title,
+        input: input.input ?? {},
+        createdAt: now,
+      };
+      this.worldTaskRecords.set(record.id, record);
+      return record;
+    },
+    findById: async (id: string): Promise<WorldTaskRecord | null> =>
+      this.worldTaskRecords.get(id) ?? null,
+    listByBeingId: async (beingId: string): Promise<WorldTaskRecord[]> =>
+      [...this.worldTaskRecords.values()]
+        .filter((t) => t.beingId === beingId)
+        .sort(byCreatedAtDesc),
+    update: async (id: string, patch: UpdateWorldTaskPatch): Promise<WorldTaskRecord | null> => {
+      const existing = this.worldTaskRecords.get(id);
+      if (!existing) return null;
+      const updated = { ...existing, ...patch, id: existing.id };
+      this.worldTaskRecords.set(id, updated);
+      return updated;
+    },
+  };
+
+  readonly worldActions = {
+    create: async (input: CreateWorldActionInput): Promise<WorldActionRecord> => {
+      const now = new Date().toISOString();
+      const record: WorldActionRecord = {
+        id: input.id ?? `action_${crypto.randomUUID()}`,
+        taskId: input.taskId,
+        beingId: input.beingId,
+        type: input.type,
+        status: "pending",
+        fromNodeId: input.fromNodeId,
+        toNodeId: input.toNodeId,
+        routeNodeIds: input.routeNodeIds,
+        statusText: input.statusText ?? "",
+        params: input.params ?? {},
+        createdAt: input.createdAt ?? now,
+      };
+      this.worldActionRecords.set(record.id, record);
+      return record;
+    },
+    findById: async (id: string): Promise<WorldActionRecord | null> =>
+      this.worldActionRecords.get(id) ?? null,
+    listByTaskId: async (taskId: string): Promise<WorldActionRecord[]> =>
+      [...this.worldActionRecords.values()]
+        .filter((a) => a.taskId === taskId)
+        .sort(byCreatedAt),
+    listByBeingId: async (beingId: string): Promise<WorldActionRecord[]> =>
+      [...this.worldActionRecords.values()]
+        .filter((a) => a.beingId === beingId)
+        .sort(byCreatedAtDesc),
+    update: async (id: string, patch: UpdateWorldActionPatch): Promise<WorldActionRecord | null> => {
+      const existing = this.worldActionRecords.get(id);
+      if (!existing) return null;
+      const updated = { ...existing, ...patch, id: existing.id };
+      this.worldActionRecords.set(id, updated);
+      return updated;
+    },
+  };
+
+  readonly worldActionLogs = {
+    create: async (input: CreateWorldActionLogInput): Promise<WorldActionLogRecord> => {
+      const record: WorldActionLogRecord = {
+        id: input.id ?? `wal_${crypto.randomUUID()}`,
+        actionId: input.actionId,
+        beingId: input.beingId,
+        eventType: input.eventType,
+        payload: input.payload ?? {},
+        createdAt: new Date().toISOString(),
+      };
+      this.worldActionLogRecords.push(record);
+      return record;
+    },
+    listByActionId: async (actionId: string): Promise<WorldActionLogRecord[]> =>
+      this.worldActionLogRecords
+        .filter((log) => log.actionId === actionId)
+        .sort(byCreatedAtDesc),
+    listByBeingId: async (beingId: string): Promise<WorldActionLogRecord[]> =>
+      this.worldActionLogRecords
+        .filter((log) => log.beingId === beingId)
+        .sort(byCreatedAtDesc),
+  };
+
+  readonly worldArtifacts = {
+    create: async (input: CreateWorldArtifactInput): Promise<WorldArtifactRecord> => {
+      const now = new Date().toISOString();
+      const record: WorldArtifactRecord = {
+        id: input.id ?? `wart_${crypto.randomUUID()}`,
+        beingId: input.beingId,
+        taskId: input.taskId,
+        runId: input.runId,
+        type: input.type,
+        title: input.title,
+        uri: input.uri,
+        thumbnailUri: input.thumbnailUri,
+        locationNodeId: input.locationNodeId,
+        status: input.status ?? "created",
+        metadata: input.metadata ?? {},
+        createdAt: now,
+      };
+      this.worldArtifactRecords.set(record.id, record);
+      return record;
+    },
+    findById: async (id: string): Promise<WorldArtifactRecord | null> =>
+      this.worldArtifactRecords.get(id) ?? null,
+    listByBeingId: async (beingId: string): Promise<WorldArtifactRecord[]> =>
+      [...this.worldArtifactRecords.values()]
+        .filter((a) => a.beingId === beingId)
+        .sort(byCreatedAtDesc),
+    update: async (id: string, patch: UpdateWorldArtifactPatch): Promise<WorldArtifactRecord | null> => {
+      const existing = this.worldArtifactRecords.get(id);
+      if (!existing) return null;
+      const updated = { ...existing, ...patch, id: existing.id };
+      this.worldArtifactRecords.set(id, updated);
+      return updated;
+    },
+  };
+
   reset(): void {
     this.conversationRecords.clear();
     this.messageRecords.clear();
@@ -761,6 +1029,13 @@ export class InMemoryDatabaseContext implements DatabaseContext {
     this.auditRecords.length = 0;
     this.idempotencyRecords.clear();
     this.skillRecords.clear();
+    this.digitalBeingRecords.clear();
+    this.worldNodeRecords.clear();
+    this.worldEdgeRecords.clear();
+    this.worldTaskRecords.clear();
+    this.worldActionRecords.clear();
+    this.worldActionLogRecords.length = 0;
+    this.worldArtifactRecords.clear();
   }
 
   async close(): Promise<void> {

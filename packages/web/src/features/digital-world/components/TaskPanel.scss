@@ -1,0 +1,43 @@
+.task-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.task-panel__actions {
+  padding-bottom: 16px;
+  border-bottom: 1px solid #f0f0f0;
+}
+
+.task-panel__list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.task-panel__item {
+  padding: 8px 12px;
+  border-radius: 8px;
+  background: #fafafa;
+}
+
+.task-panel__item-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.task-panel__item-time {
+  font-size: 11px;
+  color: #9ca3af;
+  margin-top: 4px;
+}
+
+.task-panel__empty {
+  text-align: center;
+  color: #9ca3af;
+  padding: 24px 0;
+  font-size: 13px;
+}
