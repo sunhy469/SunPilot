@@ -17,6 +17,7 @@ import {
 import type { AttachmentRef } from "../../../../features/chat/types";
 import { validateAttachmentsForSend } from "../../../../features/chat/attachment-utils";
 import { useFileAttachments } from "../../hooks/useFileAttachments";
+import { useModels } from "../../hooks/useModels";
 import { AttachmentPreview } from "../AttachmentPreview/AttachmentPreview";
 import type { LocalSendState } from "../../types";
 import "./ChatComposer.scss";
@@ -85,13 +86,6 @@ const PERMISSION_OPTIONS: PermissionOption[] = [
   },
 ];
 
-// ── Model options ─────────────────────────────────────────────────────
-
-const MODEL_OPTIONS = [
-  { value: "dp", label: "DeepSeek-4.0-flash" },
-  { value: "seed", label: "Seed-lite" },
-];
-
 // ── Component ─────────────────────────────────────────────────────────
 
 export function ChatComposer({
@@ -121,7 +115,14 @@ export function ChatComposer({
 }) {
   const [internalValue, setInternalValue] = useState("");
   const [permission, setPermission] = useState("auto");
-  const [model, setModel] = useState("seed");
+  const { options: modelOptions, defaultModelId } = useModels();
+  const [model, setModel] = useState(defaultModelId);
+
+  // Sync model when defaultModelId is loaded from API
+  useEffect(() => {
+    setModel(defaultModelId);
+  }, [defaultModelId]);
+
   // Track queued send when user clicks send while uploads are in progress
   const [queuedSend, setQueuedSend] = useState(false);
   const [uploadFailed, setUploadFailed] = useState(false);
@@ -469,7 +470,7 @@ export function ChatComposer({
             variant="borderless"
             value={model}
             onChange={setModel}
-            options={MODEL_OPTIONS}
+            options={modelOptions}
             size="small"
             className="chat-composer__select"
             popupMatchSelectWidth={false}

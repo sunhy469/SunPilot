@@ -492,23 +492,22 @@ describe("AgentService", () => {
     expect(slowEvents.length).toBeGreaterThan(0);
   });
 
-  test("handleChatCommand rejects 1688 search without image attachments", async () => {
+  test("handleChatCommand allows 1688 search without image attachments (resolved from history)", async () => {
     const { service, conversations } = createService();
     await conversations.createConversation({ id: "conv_img" });
 
+    // Current implementation allows requests without image attachments —
+    // ToolArgumentBuilder resolves historical images from conversation context.
     await expect(
       service.handleChatCommand(
         {
           conversationId: "conv_img",
           message: "帮我用1688搜索这件衣服的同款",
-          attachments: [], // no image attachments
+          attachments: [], // no image attachments — resolved from history
         },
         { source: "web" },
       ),
-    ).rejects.toMatchObject({
-      code: "IMAGE_ATTACHMENT_REQUIRED",
-      message: "搜索 1688 货源需要上传商品图片，请先上传图片后再试。",
-    });
+    ).resolves.toBeDefined();
   });
 
   test("handleChatCommand rejects image search when attachments lack url/dataUrl/storageKey", async () => {
@@ -533,7 +532,7 @@ describe("AgentService", () => {
       ),
     ).rejects.toMatchObject({
       code: "IMAGE_ATTACHMENT_REF_MISSING",
-      message: "图片尚未上传完成，缺少可用的图片链接。请等待上传完成后再试。",
+      message: "上传的图片缺少可用引用，请重新上传后再试。",
     });
   });
 

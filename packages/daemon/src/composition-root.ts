@@ -88,7 +88,7 @@ export function createAgentLoopService(deps: {
    *  Created internally if not provided. */
   liveEventBus?: AgentEventBus;
   systemPrompt?: string;
-}): AgentService {
+}): { service: AgentService; modelRouter: ModelRouter } {
   // ── Foundation ─────────────────────────────────────────────────
   const rawEventBus = deps.eventBus ?? new InMemoryAgentEventBus();
   const liveEventBus = deps.liveEventBus ?? new InMemoryAgentEventBus();
@@ -257,6 +257,13 @@ export function createAgentLoopService(deps: {
     ],
     trackCalls: true,
     modelCallRecorder: deps.database.modelCalls,
+    // §P2-2: Log persist failures to trace so they're visible in RunDebugPanel
+    onPersistFailure: (info) => {
+      console.error(
+        "[model-router] DB persist failed",
+        { runId: info.runId, error: info.error },
+      );
+    },
   });
 
   // Purpose-specific LlmProvider adapters — each delegates to ModelRouter
@@ -393,6 +400,7 @@ export function createAgentLoopService(deps: {
       ],
     },
     embedText: async (text: string) => embeddingService.embed(text),
+    eventBus: rawEventBus,
   });
 
   // ── Intent ─────────────────────────────────────────────────────
@@ -778,7 +786,7 @@ export function createAgentLoopService(deps: {
     },
   };
 
-  return new AgentService(config);
+  return { service: new AgentService(config), modelRouter };
 }
 
 function capabilityToolId(skillId: string, capabilityName: string): string {

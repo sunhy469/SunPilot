@@ -51,3 +51,43 @@ export function sendChatStop(socket: WebSocket, params: ChatStopParams) {
     }),
   );
 }
+
+/**
+ * Subscribe to WebSocket events for a conversation.
+ * Enables real-time updates for other windows/debug panels viewing the same conversation.
+ */
+export function sendConversationSubscribe(
+  socket: WebSocket,
+  conversationId: string,
+  lastSeenSequence?: number,
+): string {
+  const id = crypto.randomUUID();
+  socket.send(
+    JSON.stringify({
+      jsonrpc: "2.0",
+      id,
+      method: "conversation.subscribe",
+      params: { conversationId, lastSeenSequence },
+    }),
+  );
+  return id;
+}
+
+/**
+ * Unsubscribe from WebSocket events for a conversation.
+ */
+export function sendConversationUnsubscribe(
+  socket: WebSocket,
+  conversationId: string,
+): string {
+  const id = crypto.randomUUID();
+  socket.send(
+    JSON.stringify({
+      jsonrpc: "2.0",
+      id,
+      method: "conversation.unsubscribe",
+      params: { conversationId },
+    }),
+  );
+  return id;
+}
