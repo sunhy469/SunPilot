@@ -110,6 +110,7 @@ export class JsonRpcRouter {
                           messageId: delta.messageId,
                           partId: delta.partId,
                           delta: delta.delta,
+                          deltaIndex: delta.deltaIndex,
                         }
                       : {
                           runId: delta.runId,

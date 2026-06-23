@@ -219,6 +219,11 @@ describe("daemon Agent runtime REST routes", () => {
       websocket: {
         connections: 0,
       },
+      modelRouter: expect.objectContaining({
+        persistFailures: expect.any(Number),
+        totalCalls: expect.any(Number),
+        fallbackCount: expect.any(Number),
+      }),
     });
 
     const metrics = await daemon.app.inject({

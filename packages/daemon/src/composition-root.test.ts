@@ -72,7 +72,7 @@ const highRiskSkill: InstalledSkillRecord = {
 describe("createAgentLoopService", () => {
   test("creates new conversations with the Agent-assigned id", async () => {
     const db = new InMemoryDatabaseContext();
-    const service = createAgentLoopService({
+    const { service } = createAgentLoopService({
       database: db,
       skillRegistry: {
         list: () => [],
@@ -111,7 +111,7 @@ describe("createAgentLoopService", () => {
   test("executes matched skill capabilities through SkillRunner and persists agent events", async () => {
     const db = new InMemoryDatabaseContext();
     const executedSteps: StepRecord[] = [];
-    const service = createAgentLoopService({
+    const { service } = createAgentLoopService({
       database: db,
       skillRegistry: {
         list: () => [installedSkill],
@@ -226,7 +226,7 @@ describe("createAgentLoopService", () => {
   test("resumes approved tool calls and completes the run", async () => {
     const db = new InMemoryDatabaseContext();
     const executedSteps: StepRecord[] = [];
-    const service = createAgentLoopService({
+    const { service } = createAgentLoopService({
       database: db,
       skillRegistry: {
         list: () => [highRiskSkill],
@@ -402,7 +402,7 @@ describe("createAgentLoopService", () => {
       installedAt: "2026-06-06T00:00:00.000Z",
       updatedAt: "2026-06-06T00:00:00.000Z",
     };
-    const service = createAgentLoopService({
+    const { service } = createAgentLoopService({
       database: db,
       skillRegistry: {
         list: () => [automationSkill],

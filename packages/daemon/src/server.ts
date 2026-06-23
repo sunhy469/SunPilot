@@ -135,11 +135,12 @@ export async function createDaemon(options: DaemonOptions = {}) {
   let chatAgent = options.chatAgent;
   const liveEventBus = new InMemoryAgentEventBus();
   let chatAgentInit: Promise<AgentService> | undefined;
+  let modelRouterRef: { getStats(): { persistFailures: number; totalCalls: number; fallbackCount: number } } | undefined;
   const getChatAgent = async (): Promise<AgentService> => {
     if (chatAgent) return chatAgent as AgentService;
     chatAgentInit ??= (async () => {
       const llmProvider = createDefaultLlmProvider();
-      chatAgent = createAgentLoopService({
+      const { service, modelRouter } = createAgentLoopService({
         database,
         skillRegistry,
         skillRunner,
@@ -148,6 +149,8 @@ export async function createDaemon(options: DaemonOptions = {}) {
         liveEventBus,
         systemPrompt: "You are SunPilot, a concise business agent assistant.",
       });
+      chatAgent = service;
+      modelRouterRef = modelRouter;
       return chatAgent as AgentService;
     })();
     return chatAgentInit;
@@ -208,6 +211,15 @@ export async function createDaemon(options: DaemonOptions = {}) {
         provider: "openai-compatible",
         model: process.env["SUNPILOT_LLM_MODEL"] ?? process.env["SUNPILOT_DP_LLM_MODEL"] ?? "deepseek-v4-flash",
       }),
+      getModelRouterStats: () => {
+        if (!modelRouterRef) return { persistFailures: 0, totalCalls: 0, fallbackCount: 0 };
+        const stats = modelRouterRef.getStats();
+        return {
+          persistFailures: stats.persistFailures,
+          totalCalls: stats.totalCalls,
+          fallbackCount: stats.fallbackCount,
+        };
+      },
     },
     getModels: () => {
       const hasSeed = !!(

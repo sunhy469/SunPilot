@@ -250,7 +250,9 @@ export function useConversations(request: Request, enabled: boolean) {
       const ap = a.pinned ? 1 : 0;
       const bp = b.pinned ? 1 : 0;
       if (bp !== ap) return bp - ap;
-      return b.updatedAt.localeCompare(a.updatedAt);
+      const aTime = a.updatedAt ?? a.createdAt ?? "";
+      const bTime = b.updatedAt ?? b.createdAt ?? "";
+      return bTime.localeCompare(aTime);
     });
   }, [conversations]);
 
