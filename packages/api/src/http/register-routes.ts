@@ -92,6 +92,7 @@ export function registerSunPilotApiRoutes(
       model: "unknown",
       configured: false,
     };
+    const modelRouterStats = diagnostics?.getModelRouterStats?.();
     return {
       daemon: { status: "ok", uptimeSec: Math.floor(process.uptime()), pid: process.pid },
       database: { status: "ok", latencyMs: databaseLatencyMs },
@@ -102,6 +103,7 @@ export function registerSunPilotApiRoutes(
       },
       runs: { active: activeCount, waitingApproval: waitingApproval.length },
       websocket: { connections: diagnostics?.websocketConnections?.() ?? 0 },
+      modelRouter: modelRouterStats,
     };
   });
 

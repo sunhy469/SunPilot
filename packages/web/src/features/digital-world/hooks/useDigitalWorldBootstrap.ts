@@ -4,6 +4,8 @@ import { getWorldState, type WorldStateResponse } from "../api";
 import { mockNodes, mockEdges, mockBeing } from "../mock/mockWorld";
 import type { WorldNodeData, WorldEdgeData, DigitalBeingData } from "../types";
 
+const IS_DEV = import.meta.env.DEV ?? false;
+
 export interface BootstrapData {
   nodes: WorldNodeData[];
   edges: WorldEdgeData[];
@@ -74,7 +76,25 @@ export function useDigitalWorldBootstrap(): BootstrapData {
         if (nodes.length > 0 && being) {
           setData({ nodes, edges, being, loaded: true, isMock: false });
         } else {
-          // Fallback to mock if no data — development mode indicator
+          // Fallback to mock data only in DEV mode.
+          // In production, show empty state to avoid masking backend issues.
+          if (IS_DEV) {
+            setData({
+              nodes: mockNodes,
+              edges: mockEdges,
+              being: { ...mockBeing },
+              loaded: true,
+              isMock: true,
+            });
+          } else {
+            setData((prev) => ({ ...prev, loaded: true, isMock: false }));
+          }
+        }
+      })
+      .catch(() => {
+        if (cancelled) return;
+        // API unavailable — use mock only in DEV mode
+        if (IS_DEV) {
           setData({
             nodes: mockNodes,
             edges: mockEdges,
@@ -82,18 +102,9 @@ export function useDigitalWorldBootstrap(): BootstrapData {
             loaded: true,
             isMock: true,
           });
+        } else {
+          setData((prev) => ({ ...prev, loaded: true, isMock: false }));
         }
-      })
-      .catch(() => {
-        if (cancelled) return;
-        // API unavailable, use mock — development mode indicator
-        setData({
-          nodes: mockNodes,
-          edges: mockEdges,
-          being: { ...mockBeing },
-          loaded: true,
-          isMock: true,
-        });
       });
 
     return () => {

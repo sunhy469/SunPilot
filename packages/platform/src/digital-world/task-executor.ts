@@ -23,6 +23,11 @@ interface WorldAgent {
   ) => Promise<{ runId: string; conversationId: string }>;
 }
 
+type ExecuteActionResult =
+  | { status: "completed" }
+  | { status: "waiting_agent"; runId: string }
+  | { status: "failed"; error: string };
+
 export class TaskExecutor {
   constructor(
     private readonly deps: {
@@ -78,7 +83,19 @@ export class TaskExecutor {
       try {
         // Sync being's currentActionId before each action
         await this.deps.database.digitalBeings.update(beingId, { currentActionId: action.id });
-        await this.executeAction(ctx, action.id, beingId);
+        const actionResult = await this.executeAction(ctx, action.id, beingId);
+
+        if (actionResult.status === "waiting_agent") {
+          // The action started an async Agent Run. Stop executing further actions
+          // — the task will be resumed by onAgentRunCompleted() when the run finishes.
+          return;
+        }
+
+        if (actionResult.status === "failed") {
+          throw new Error(actionResult.error);
+        }
+
+        // actionResult.status === "completed": continue to next action
       } catch (err) {
         const errorMessage = err instanceof Error ? err.message : String(err);
 
@@ -140,9 +157,9 @@ export class TaskExecutor {
     }
   }
 
-  private async executeAction(ctx: PlatformRequestContext, actionId: string, beingId: string): Promise<void> {
+  private async executeAction(ctx: PlatformRequestContext, actionId: string, beingId: string): Promise<ExecuteActionResult> {
     const action = await this.deps.database.worldActions.findById(actionId);
-    if (!action) return;
+    if (!action) return { status: "failed", error: "Action not found" } as ExecuteActionResult;
 
     // Update action to running
     await this.deps.database.worldActions.update(actionId, {
@@ -217,9 +234,9 @@ export class TaskExecutor {
             statusText: `正在${this.getWorkLabel(workType)}（Agent 运行中）`,
           });
 
-          // Do NOT mark the action as completed; return early so the
-          // sequential executor stops here until the run completes.
-          return;
+          // Do NOT mark the action as completed; return waiting_agent so the
+          // sequential executor stops here until the Agent Run completes.
+          return { status: "waiting_agent", runId: result.runId };
         } else {
           // Phase 4 fallback: mock work with clear mock marking
           await this.deps.database.digitalBeings.update(beingId, {
@@ -269,6 +286,8 @@ export class TaskExecutor {
       status: "completed",
       completedAt: new Date().toISOString(),
     });
+
+    return { status: "completed" };
   }
 
   /**

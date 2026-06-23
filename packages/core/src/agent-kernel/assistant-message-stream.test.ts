@@ -420,4 +420,64 @@ describe("AssistantMessageStream", () => {
     expect(result.content).toContain("DELETE 请求缺少 body");
     expect(result.content).not.toContain("搜索代码");
   });
+
+  // ── deltaIndex correctness (§P0-3 end-to-end coverage) ────────────
+  it("appendText emits sequential deltaIndex values for dedup protection", () => {
+    const part = stream.startTextPart();
+
+    stream.appendText(part.id, "chunk1");
+    stream.appendText(part.id, "chunk2");
+    stream.appendText(part.id, "chunk3");
+
+    // Collect deltaIndex values from all agent.message.part.delta emits
+    const deltaCalls = (
+      eventBus.emit as ReturnType<typeof vi.fn>
+    ).mock.calls.filter((c: unknown[]) => c[0] === "agent.message.part.delta");
+
+    expect(deltaCalls.length).toBeGreaterThanOrEqual(3);
+
+    const indices = deltaCalls.map((c) => {
+      const payload = c[1] as { deltaIndex?: number };
+      return payload.deltaIndex;
+    });
+
+    // deltaIndex should be strictly increasing: 0, 1, 2, ...
+    for (let i = 1; i < indices.length; i++) {
+      expect(indices[i]).toBeGreaterThan(indices[i - 1]!);
+    }
+
+    // First deltaIndex should be a non-negative number
+    expect(indices[0]).toBeGreaterThanOrEqual(0);
+
+    // All indices should be sequential (no gaps)
+    for (let i = 0; i < indices.length; i++) {
+      expect(indices[i]).toBe(i);
+    }
+  });
+
+  it("appendText resets deltaIndex per part (different parts have independent counters)", () => {
+    const partA = stream.startTextPart();
+    const partB = stream.startTextPart();
+
+    stream.appendText(partA.id, "A1");
+    stream.appendText(partA.id, "A2");
+    stream.appendText(partB.id, "B1");
+    stream.appendText(partB.id, "B2");
+
+    const deltaCalls = (
+      eventBus.emit as ReturnType<typeof vi.fn>
+    ).mock.calls.filter((c: unknown[]) => c[0] === "agent.message.part.delta");
+
+    // Find deltas for partA and partB
+    const partAIndices = deltaCalls
+      .filter((c) => (c[1] as { partId: string }).partId === partA.id)
+      .map((c) => (c[1] as { deltaIndex?: number }).deltaIndex);
+    const partBIndices = deltaCalls
+      .filter((c) => (c[1] as { partId: string }).partId === partB.id)
+      .map((c) => (c[1] as { deltaIndex?: number }).deltaIndex);
+
+    // Each part should have its own independent 0-based sequence
+    expect(partAIndices).toEqual([0, 1]);
+    expect(partBIndices).toEqual([0, 1]);
+  });
 });

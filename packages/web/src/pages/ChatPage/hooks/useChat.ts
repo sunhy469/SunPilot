@@ -22,6 +22,8 @@ import {
   createChatSocket,
   sendChatMessage,
   sendChatStop,
+  sendConversationSubscribe,
+  sendConversationUnsubscribe,
 } from "../../../features/chat/ws";
 import { validateAttachmentRefsForSend } from "../../../features/chat/attachment-utils";
 import type {
@@ -1347,6 +1349,35 @@ export function useChat(
     };
   }, [applyAgentEvent, conversationId]);
 
+  // §P1-4: Subscribe to conversation events via WebSocket for real-time
+  // multi-window support. When conversationId changes, unsubscribe from
+  // the old conversation and subscribe to the new one.
+  const subscribedConversationRef = useRef<string | null>(null);
+  useEffect(() => {
+    const socket = socketRef.current;
+    if (!socket || socket.readyState !== WebSocket.OPEN) return;
+
+    const prev = subscribedConversationRef.current;
+    if (prev && prev !== conversationId) {
+      sendConversationUnsubscribe(socket, prev);
+    }
+
+    if (conversationId && conversationId !== prev) {
+      sendConversationSubscribe(socket, conversationId, lastSequenceRef.current);
+      subscribedConversationRef.current = conversationId;
+    }
+
+    return () => {
+      if (subscribedConversationRef.current) {
+        const s = socketRef.current;
+        if (s && s.readyState === WebSocket.OPEN) {
+          sendConversationUnsubscribe(s, subscribedConversationRef.current);
+        }
+        subscribedConversationRef.current = null;
+      }
+    };
+  }, [conversationId]);
+
   const send = useCallback(
     (
       message: string,
@@ -1430,7 +1461,7 @@ export function useChat(
           message: text,
           mode: "agent",
           permissionMode: permissionMode ?? "auto",
-          modelId: modelId ?? "seed",
+          modelId,
           clientRequestId,
           attachments,
         });

@@ -78,6 +78,8 @@ export interface ModelRouterConfig {
   trackCalls?: boolean;
   /** Optional DB recorder for persisting model calls (§P1-5). */
   modelCallRecorder?: ModelCallRecorder;
+  /** §P2-2: Callback invoked when a model call DB persist fails. */
+  onPersistFailure?: (info: { runId?: string; error: string }) => void;
 }
 
 // ── Model Call Record ───────────────────────────────────────────────────
@@ -144,6 +146,7 @@ export class ModelRouter {
   private readonly trackCalls: boolean;
   private readonly callRecords: ModelCallRecord[] = [];
   private readonly modelCallRecorder?: ModelCallRecorder;
+  private readonly onPersistFailure?: ModelRouterConfig["onPersistFailure"];
   private persistFailures = 0;
 
   constructor(config: ModelRouterConfig) {
@@ -152,6 +155,7 @@ export class ModelRouter {
     this.fallback = config.fallback;
     this.trackCalls = config.trackCalls ?? true;
     this.modelCallRecorder = config.modelCallRecorder;
+    this.onPersistFailure = config.onPersistFailure;
   }
 
   /**
@@ -255,7 +259,7 @@ export class ModelRouter {
             status: "completed",
             metadata: request.metadata,
             createdAt: startedAt,
-          }).catch(() => { this.persistFailures++; });
+          }).catch(() => { this.persistFailures++; this.onPersistFailure?.({ runId: request.runId, error: "DB persist failed for completed model call" }); });
         }
         return;
       } catch (error) {
@@ -305,7 +309,7 @@ export class ModelRouter {
         error: lastError,
         metadata: request.metadata,
         createdAt: startedAt,
-      }).catch(() => { this.persistFailures++; });
+      }).catch(() => { this.persistFailures++; this.onPersistFailure?.({ runId: request.runId, error: "DB persist failed for failed model call" }); });
     }
 
     throw new Error(
