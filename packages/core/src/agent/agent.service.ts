@@ -33,6 +33,7 @@ export type AgentStreamDelta = {
   messageId: string;
   partId: string;
   delta: string;
+  deltaIndex?: number;
 };
 
 export interface AgentLoopServiceConfig {
@@ -259,6 +260,7 @@ export class AgentService {
           messageId: string;
           partId: string;
           delta: string;
+          deltaIndex?: number;
         };
         streamHooks.onDelta({
           type: "agent.message.part.delta",
@@ -267,6 +269,7 @@ export class AgentService {
           messageId: payload.messageId,
           partId: payload.partId,
           delta: payload.delta,
+          deltaIndex: payload.deltaIndex,
         });
       }
     });
@@ -497,6 +500,7 @@ export class AgentService {
           messageId: string;
           partId: string;
           delta: string;
+          deltaIndex?: number;
         };
         streamHooks.onDelta({
           type: "agent.message.part.delta",
@@ -505,6 +509,7 @@ export class AgentService {
           messageId: payload.messageId,
           partId: payload.partId,
           delta: payload.delta,
+          deltaIndex: payload.deltaIndex,
         });
       }
     });

@@ -329,6 +329,12 @@ export interface AgentContextSnapshot {
   }>;
   totalTokens: number;
   droppedCount: number;
+  /** §P2-1: Source fetch failures recorded for debugging and UI visibility. */
+  sourceFailures?: Array<{
+    source: string;
+    critical: boolean;
+    error: string;
+  }>;
 }
 
 // ── Plan ──────────────────────────────────────────────────────────────

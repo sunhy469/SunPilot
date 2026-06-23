@@ -40,6 +40,8 @@ export interface SunPilotApiDeps {
     websocketConnections(): number;
     /** Get current LLM config for diagnostics. */
     getLlmConfig(): { provider: string; model: string; configured: boolean };
+    /** Get model router stats including persist failure count. */
+    getModelRouterStats?(): { persistFailures: number; totalCalls: number; fallbackCount: number };
   };
   /** Model catalog for the /v1/models API. */
   getModels?(): Array<{

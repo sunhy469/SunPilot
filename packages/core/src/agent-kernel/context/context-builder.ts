@@ -4,6 +4,7 @@ import type {
   AttachmentRef,
   ContextBuilder as ContextBuilderInterface,
 } from "../loop-types.js";
+import type { AgentEventBus } from "../agent-event-bus.js";
 import { ContextChunk, estimateTokens } from "./context-types.js";
 import { TokenBudgeter } from "./context-budgeter.js";
 import {
@@ -97,6 +98,8 @@ export interface ContextBuilderDeps {
   embedText?: (text: string) => Promise<number[]>;
   /** Summary stale detector — checks if conversation summaries need regeneration. */
   staleDetector?: SummaryStaleDetector;
+  /** §P2-1: Event bus for emitting agent.error on critical source failures. */
+  eventBus?: AgentEventBus;
 }
 
 /**
@@ -223,6 +226,11 @@ export class ContextBuilder implements ContextBuilderInterface {
       0,
     );
 
+    // §P2-1: Source fetch failures collected for the context snapshot
+    // so they appear in the RunDebugPanel. Declared here (outside the
+    // try block) so the contextSnapshot construction below can access them.
+    const sourceFailures: Array<{ source: string; critical: boolean; error: string }> = [];
+
     try {
       // ── Parallel IO Group A: all independent data fetches ─────────
       // Launch all IO operations that have no inter-dependencies in parallel.
@@ -273,26 +281,55 @@ export class ContextBuilder implements ContextBuilderInterface {
           : Promise.resolve([] as Awaited<ReturnType<NonNullable<typeof this.deps.listSkills>>>),
       ]);
 
-      // §P2: Unwrap settled results — log failures to console.error for
-      // production visibility. Future: emit via event bus for trace integration.
+      // §P2-1: Unwrap settled results — log failures to console.error for
+      // production visibility. Messages history is critical (user sees wrong
+      // answers without history); other sources are non-critical.
+      // Source failures are collected for the context snapshot so they appear
+      // in the RunDebugPanel.
+
+      const recordFailure = (source: string, critical: boolean, error: string) => {
+        sourceFailures.push({ source, critical, error });
+      };
+
       const messages = messagesSettled.status === "fulfilled"
         ? messagesSettled.value
-        : (() => { console.error("[ContextBuilder] listMessages FAILED", { runId: input.runId, reason: String(messagesSettled.reason) }); return [] as Awaited<ReturnType<typeof this.deps.listMessages>>; })();
+        : (() => {
+            const reason = String(messagesSettled.reason);
+            console.error(
+              "[ContextBuilder] CRITICAL: listMessages FAILED — agent may answer with missing context.",
+              { runId: input.runId, conversationId: input.conversationId, reason },
+            );
+            recordFailure("messages", true, reason);
+            // §P2-1: Emit agent.error so the UI can surface this critical failure
+            this.deps.eventBus?.emit(
+              "agent.error",
+              {
+                runId: input.runId,
+                conversationId: input.conversationId,
+                code: "CONTEXT_MESSAGES_LOAD_FAILED",
+                message: "对话历史加载失败，回答可能缺少上下文。",
+                category: "internal",
+                retryable: true,
+              },
+              { runId: input.runId, conversationId: input.conversationId },
+            );
+            return [] as Awaited<ReturnType<typeof this.deps.listMessages>>;
+          })();
       const summaryMemoriesResult = summaryMemoriesSettled.status === "fulfilled"
         ? summaryMemoriesSettled.value
-        : (() => { console.error("[ContextBuilder] searchMemories(summary) FAILED", { runId: input.runId, reason: String(summaryMemoriesSettled.reason) }); return [] as Awaited<ReturnType<NonNullable<typeof this.deps.searchMemories>>>; })();
+        : (() => { const reason = String(summaryMemoriesSettled.reason); console.error("[ContextBuilder] searchMemories(summary) FAILED", { runId: input.runId, reason }); recordFailure("summaryMemories", false, reason); return [] as Awaited<ReturnType<NonNullable<typeof this.deps.searchMemories>>>; })();
       const queryEmbedding = queryEmbeddingSettled.status === "fulfilled"
         ? queryEmbeddingSettled.value
-        : (() => { console.error("[ContextBuilder] embedText FAILED", { runId: input.runId, reason: String(queryEmbeddingSettled.reason) }); return undefined as number[] | undefined; })();
+        : (() => { const reason = String(queryEmbeddingSettled.reason); console.error("[ContextBuilder] embedText FAILED", { runId: input.runId, reason }); recordFailure("embedText", false, reason); return undefined as number[] | undefined; })();
       const artifactsResult = artifactsSettled.status === "fulfilled"
         ? artifactsSettled.value
-        : (() => { console.error("[ContextBuilder] listArtifacts FAILED", { runId: input.runId, reason: String(artifactsSettled.reason) }); return [] as Awaited<ReturnType<NonNullable<typeof this.deps.listArtifacts>>>; })();
+        : (() => { const reason = String(artifactsSettled.reason); console.error("[ContextBuilder] listArtifacts FAILED", { runId: input.runId, reason }); recordFailure("artifacts", false, reason); return [] as Awaited<ReturnType<NonNullable<typeof this.deps.listArtifacts>>>; })();
       const toolResultsResult = toolResultsSettled.status === "fulfilled"
         ? toolResultsSettled.value
-        : (() => { console.error("[ContextBuilder] listToolResults FAILED", { runId: input.runId, reason: String(toolResultsSettled.reason) }); return [] as Awaited<ReturnType<NonNullable<typeof this.deps.listToolResults>>>; })();
+        : (() => { const reason = String(toolResultsSettled.reason); console.error("[ContextBuilder] listToolResults FAILED", { runId: input.runId, reason }); recordFailure("toolResults", false, reason); return [] as Awaited<ReturnType<NonNullable<typeof this.deps.listToolResults>>>; })();
       const skillsResult = skillsSettled.status === "fulfilled"
         ? skillsSettled.value
-        : (() => { console.error("[ContextBuilder] listSkills FAILED", { runId: input.runId, reason: String(skillsSettled.reason) }); return [] as Awaited<ReturnType<NonNullable<typeof this.deps.listSkills>>>; })();
+        : (() => { const reason = String(skillsSettled.reason); console.error("[ContextBuilder] listSkills FAILED", { runId: input.runId, reason }); recordFailure("skills", false, reason); return [] as Awaited<ReturnType<NonNullable<typeof this.deps.listSkills>>>; })();
 
       // §P0-3: Always capture timing for trace observability
       groupAParallelMs = Date.now() - tGroupA;
@@ -842,6 +879,7 @@ export class ContextBuilder implements ContextBuilderInterface {
       ],
       totalTokens: budget.totalTokens,
       droppedCount: budget.excluded.length,
+      sourceFailures: sourceFailures.length > 0 ? sourceFailures : undefined,
     };
 
     // ── Pack into AgentContext ────────────────────────────────────
