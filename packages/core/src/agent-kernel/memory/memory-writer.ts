@@ -135,6 +135,52 @@ export class DefaultMemoryWriter {
     return { written, rejected, superseded };
   }
 
+  /**
+   * Update an existing memory with optional re-embedding.
+   * When content, title, or summary change, the embedding is regenerated
+   * to keep semantic search accurate.
+   */
+  async updateMemory(
+    id: string,
+    input: {
+      content?: string;
+      title?: string;
+      summary?: string;
+      confidence?: number;
+      importance?: number;
+    },
+  ): Promise<MemoryRecord | null> {
+    const updateInput: Record<string, unknown> = {};
+    if (input.content !== undefined) updateInput["content"] = input.content;
+    if (input.title !== undefined) updateInput["title"] = input.title;
+    if (input.summary !== undefined) updateInput["summary"] = input.summary;
+    if (input.confidence !== undefined) updateInput["confidence"] = input.confidence;
+    if (input.importance !== undefined) updateInput["importance"] = input.importance;
+
+    // Re-embed when content, title, or summary changes
+    const textChanged =
+      input.content !== undefined ||
+      input.title !== undefined ||
+      input.summary !== undefined;
+    if (textChanged && this.deps.embeddingService) {
+      try {
+        const textToEmbed =
+          input.content ??
+          input.title ??
+          input.summary ??
+          "";
+        if (textToEmbed.trim()) {
+          const embedding = await this.deps.embeddingService.embed(textToEmbed);
+          updateInput["embedding"] = embedding;
+        }
+      } catch {
+        // Best effort — semantic search degrades gracefully
+      }
+    }
+
+    return this.deps.repository.update(id, updateInput);
+  }
+
   extractCandidates(input: MemoryWriteInput): MemoryCandidate[] {
     const candidates: MemoryCandidate[] = [];
     const message = input.input.message.trim();

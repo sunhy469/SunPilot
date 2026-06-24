@@ -44,6 +44,20 @@ export function registerMemoryRoutes(app: FastifyInstance, deps: SunPilotApiDeps
   app.patch<{ Params: { id: string } }>("/v1/memory/:id", async (request, reply) => {
     try {
       const body = memoryUpdateBodySchema.parse(request.body ?? {});
+      // Use updateMemory callback (with re-embedding) when content fields change,
+      // otherwise fall back to direct repository update
+      const hasContentChange = body.content !== undefined || body.title !== undefined || body.summary !== undefined;
+      if (hasContentChange && deps.updateMemory) {
+        const updated = await deps.updateMemory(request.params.id, {
+          content: body.content,
+          title: body.title,
+          summary: body.summary,
+          confidence: body.confidence,
+          importance: body.importance,
+        });
+        if (!updated) return reply.code(404).send({ error: "not_found" });
+        return { item: updated };
+      }
       const updated = await database.memory.update(request.params.id, {
         key: body.key, value: body.value, scope: body.scope, scopeId: body.scopeId,
         type: body.type, title: body.title, content: body.content, summary: body.summary,

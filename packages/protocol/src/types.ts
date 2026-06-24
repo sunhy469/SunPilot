@@ -255,6 +255,7 @@ export type MemoryType = (typeof MEMORY_TYPES)[number];
 export interface MemorySearchInput {
   query?: string;
   runId?: string;
+  stepId?: string;
   key?: string;
   userId?: string;
   projectId?: string;

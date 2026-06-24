@@ -67,6 +67,10 @@ import {
   TraceManager,
   RepositoryTraceManager,
   SummaryStaleDetector,
+  MemoryRetryWrapper,
+  MmrMemoryReranker,
+  MultiHopRetriever,
+  SimpleQueryExpander,
   type ModelPurpose,
 } from "@sunpilot/core";
 import type { DatabaseContext } from "@sunpilot/storage";
@@ -88,7 +92,7 @@ export function createAgentLoopService(deps: {
    *  Created internally if not provided. */
   liveEventBus?: AgentEventBus;
   systemPrompt?: string;
-}): { service: AgentService; modelRouter: ModelRouter } {
+}): { service: AgentService; modelRouter: ModelRouter; updateMemory: (id: string, input: { content?: string; title?: string; summary?: string; confidence?: number; importance?: number }) => Promise<{ id: string } | null> } {
   // ── Foundation ─────────────────────────────────────────────────
   const rawEventBus = deps.eventBus ?? new InMemoryAgentEventBus();
   const liveEventBus = deps.liveEventBus ?? new InMemoryAgentEventBus();
@@ -139,6 +143,7 @@ export function createAgentLoopService(deps: {
   const embeddingService = new LlmEmbeddingService({
     llm: deps.llmProvider,
     embeddingProvider,
+    dimension: Number(process.env["SUNPILOT_EMBEDDING_DIMENSIONS"] ?? 1536),
   });
 
   const saveMessage = async (input: { id: string; conversationId: string; role: string; content: string; metadata?: Record<string, unknown> }) => {
@@ -401,6 +406,28 @@ export function createAgentLoopService(deps: {
     },
     embedText: async (text: string) => embeddingService.embed(text),
     eventBus: rawEventBus,
+    // ── Memory RAG enhancements (Phase 2) ──────────────────────────
+    memoryReranker: new MmrMemoryReranker({ lambda: 0.7 }),
+    multiHopRetriever: new MultiHopRetriever({ maxHops: 2, topKPerHop: 5 }),
+    queryExpander: new SimpleQueryExpander(),
+    findRelatedMemories: async (memoryId, relation, limit) => {
+      try {
+        const related = await deps.database.memory.findRelated(memoryId, relation, limit);
+        return related.map((rm) => ({
+          id: rm.id,
+          type: rm.type ?? "manual_note",
+          title: rm.title ?? "",
+          content: rm.content ?? "",
+          source: rm.source ?? "relation",
+          confidence: rm.confidence ?? 0.5,
+          scope: rm.scope,
+          scopeId: rm.scopeId,
+          score: rm.score,
+        }));
+      } catch {
+        return [];
+      }
+    },
   });
 
   // ── Intent ─────────────────────────────────────────────────────
@@ -614,9 +641,15 @@ export function createAgentLoopService(deps: {
   });
 
   // ── Memory ────────────────────────────────────────────────────
-  const memoryWriter = new DefaultMemoryWriter({
+  const rawMemoryWriter = new DefaultMemoryWriter({
     repository: deps.database.memory,
     embeddingService,
+  });
+
+  // Wrap with retry — max 2 retries with 500ms/2000ms backoff.
+  const memoryWriter = new MemoryRetryWrapper(rawMemoryWriter, rawEventBus, {
+    maxRetries: 2,
+    baseDelayMs: 500,
   });
 
   // ── Safety Hardening (§3, §4 of architecture next steps) ───────
@@ -786,7 +819,13 @@ export function createAgentLoopService(deps: {
     },
   };
 
-  return { service: new AgentService(config), modelRouter };
+  return {
+    service: new AgentService(config),
+    modelRouter,
+    /** Expose updateMemory for API layer to trigger re-embedding on PATCH. */
+    updateMemory: (id: string, input: { content?: string; title?: string; summary?: string; confidence?: number; importance?: number }) =>
+      rawMemoryWriter.updateMemory(id, input),
+  };
 }
 
 function capabilityToolId(skillId: string, capabilityName: string): string {

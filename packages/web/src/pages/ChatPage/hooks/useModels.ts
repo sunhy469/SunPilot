@@ -22,10 +22,10 @@ export interface ModelOption {
 }
 
 const FALLBACK_MODELS: ModelOption[] = [
-  { value: "dp", label: "DeepSeek-4.0-flash", disabled: false },
-  { value: "seed", label: "Seed-lite", disabled: false },
+  { value: "dp", label: "Deepseek-v4-flash", disabled: false },
+  { value: "seed", label: "Seed-2.0-lite", disabled: false },
 ];
-const FALLBACK_DEFAULT = "dp";
+const FALLBACK_DEFAULT = "seed";
 
 export function useModels(): {
   options: ModelOption[];

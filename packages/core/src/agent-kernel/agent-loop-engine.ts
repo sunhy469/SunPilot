@@ -844,31 +844,34 @@ Keep your response to the JSON object ONLY — no preamble, no explanation.`;
       // Complete the stream (saves message, emits completion events)
       const completed = await stream.complete();
 
-      // §Write memories — non-blocking, don't let it delay message completion
+      // §Write memories — await with retry from the wrapper, don't block response
       const tokenRatio = context.limits.usedTokensEstimate / Math.max(1, context.limits.maxTokens);
-      this.writeMemories({
-        input,
-        context,
-        intent,
-        plan,
-        responseMessageId: messageId,
-        observation: toolCalls.length > 0
-          ? { runId, toolCalls, artifacts, summary: toolCalls.map((t) => t.summary).join("\n") }
-          : undefined,
-        forceSummary: tokenRatio > 0.4 || toolCalls.length >= 15,
-      }).catch((err) => {
+      try {
+        await this.writeMemories({
+          input,
+          context,
+          intent,
+          plan,
+          responseMessageId: messageId,
+          observation: toolCalls.length > 0
+            ? { runId, toolCalls, artifacts, summary: toolCalls.map((t) => t.summary).join("\n") }
+            : undefined,
+          forceSummary: tokenRatio > 0.4 || toolCalls.length >= 15,
+        });
+      } catch (err) {
+        // Memory write failed even after retries — logged by MemoryRetryWrapper
         this.deps.eventBus.emit(
           "agent.error",
           {
             runId,
             code: "AGENT_MEMORY_WRITE_FAILED",
-            message: `Memory write failed (non-blocking): ${err instanceof Error ? err.message : String(err)}`,
+            message: `Memory write failed: ${err instanceof Error ? err.message : String(err)}`,
             category: "memory",
-            retryable: true,
+            retryable: false,
           },
           { runId, conversationId },
         );
-      });
+      }
 
       // Mark run as completed
       await this.deps.runStateManager.markStatus(runId, "responding");
