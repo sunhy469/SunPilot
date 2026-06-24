@@ -34,10 +34,7 @@ export interface EmbeddingProvider {
  */
 export class LlmEmbeddingService implements EmbeddingService {
   /** Default embedding dimension (OpenAI text-embedding-3-small). */
-  private static readonly DIM = 1536;
-
-  /** Vocabulary size for keyword fallback. */
-  private static readonly VOCAB_SIZE = 1536;
+  private static readonly DEFAULT_DIM = 1536;
 
   /** Cache: text → embedding vector. Shared across all callers. */
   private readonly cache = new Map<string, number[]>();
@@ -53,13 +50,20 @@ export class LlmEmbeddingService implements EmbeddingService {
    */
   private _degraded = false;
 
+  /** Configured embedding dimension. */
+  readonly dimension: number;
+
   constructor(
     private readonly deps: {
       llm: LlmProvider;
       /** Optional real embedding provider. When absent, falls back to keyword hashing. */
       embeddingProvider?: EmbeddingProvider;
+      /** Embedding dimension. Defaults to 1536 (OpenAI text-embedding-3-small). */
+      dimension?: number;
     },
-  ) {}
+  ) {
+    this.dimension = deps.dimension ?? LlmEmbeddingService.DEFAULT_DIM;
+  }
 
   async embed(text: string): Promise<number[]> {
     // Check cache first
@@ -220,12 +224,12 @@ export class LlmEmbeddingService implements EmbeddingService {
    * configured.
    */
   private keywordEmbed(text: string): number[] {
-    const vec = new Array<number>(LlmEmbeddingService.DIM).fill(0);
+    const vec = new Array<number>(this.dimension).fill(0);
     const tokens = this.tokenize(text);
     if (tokens.length === 0) return vec;
 
     for (const token of tokens) {
-      const idx = this.hashToken(token) % LlmEmbeddingService.DIM;
+      const idx = this.hashToken(token) % this.dimension;
       const current = vec[idx];
       if (current !== undefined) vec[idx] = current + 1;
     }
