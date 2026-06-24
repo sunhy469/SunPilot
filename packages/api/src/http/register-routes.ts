@@ -122,7 +122,7 @@ export function registerSunPilotApiRoutes(
   app.get("/v1/models", async () => {
     const models = deps.getModels?.() ?? [];
     return {
-      defaultModelId: "dp",
+      defaultModelId: "seed",
       items: models,
     };
   });

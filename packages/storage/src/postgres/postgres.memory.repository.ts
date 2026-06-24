@@ -1,5 +1,6 @@
 import type {
   MemoryRecord,
+  MemoryRelationEntry,
   MemoryScope,
   MemorySearchInput,
   RetrievedMemoryRecord,
@@ -13,8 +14,9 @@ import type { PostgresPool } from "./postgres.client.js";
 
 const MEMORY_COLUMNS = `
   id, run_id, step_id, key, value, scope, scope_id, type, title, content,
-  summary, source, confidence, importance, metadata, created_at, updated_at,
-  last_accessed_at, expires_at, superseded_by, deleted_at, stale_reason, stale_since
+  summary, source, confidence, importance, metadata, quality_score, quality_metadata,
+  created_at, updated_at, last_accessed_at, expires_at, superseded_by, deleted_at,
+  stale_reason, stale_since
 `;
 
 export class PostgresMemoryRepository implements MemoryRepository {
@@ -25,15 +27,18 @@ export class PostgresMemoryRepository implements MemoryRepository {
     const embeddingValue = normalized.embedding?.length
       ? formatVector(normalized.embedding)
       : null;
+    const qualityMetadata = normalized.quality
+      ? JSON.stringify(normalized.quality)
+      : null;
     const result = await this.pool.query(
       `INSERT INTO memory_metadata (
          id, run_id, step_id, key, value, scope, scope_id, type, title, content,
-         summary, source, confidence, importance, metadata, embedding, created_at, updated_at,
-         last_accessed_at, expires_at, superseded_by, deleted_at
+         summary, source, confidence, importance, metadata, quality_score, quality_metadata,
+         embedding, created_at, updated_at, last_accessed_at, expires_at, superseded_by, deleted_at
        ) VALUES (
          $1, $2, $3, $4, $5::jsonb, $6, $7, $8, $9, $10,
-         $11, $12, $13, $14, $15::jsonb, $16::vector, $17, $18,
-         $19, $20, $21, $22
+         $11, $12, $13, $14, $15::jsonb, $16, $17::jsonb,
+         $18::vector, $19, $20, $21, $22, $23, $24
        )
        RETURNING ${MEMORY_COLUMNS}`,
       [
@@ -52,6 +57,8 @@ export class PostgresMemoryRepository implements MemoryRepository {
         normalized.confidence,
         normalized.importance,
         JSON.stringify(normalized.metadata ?? {}),
+        normalized.quality?.score ?? null,
+        qualityMetadata,
         embeddingValue,
         normalized.createdAt,
         normalized.updatedAt,
@@ -61,6 +68,10 @@ export class PostgresMemoryRepository implements MemoryRepository {
         normalized.deletedAt ?? null,
       ],
     );
+    // Persist relations if present
+    if (normalized.relations?.length) {
+      await this.saveRelations(normalized.id, normalized.relations);
+    }
     return mapMemory(result.rows[0]);
   }
 
@@ -68,6 +79,9 @@ export class PostgresMemoryRepository implements MemoryRepository {
     id: string,
     input: UpdateMemoryInput,
   ): Promise<MemoryRecord | null> {
+    const embeddingValue = input.embedding?.length
+      ? formatVector(input.embedding)
+      : null;
     const result = await this.pool.query(
       `UPDATE memory_metadata
        SET key = COALESCE($2, key),
@@ -82,9 +96,12 @@ export class PostgresMemoryRepository implements MemoryRepository {
            confidence = COALESCE($11, confidence),
            importance = COALESCE($12, importance),
            metadata = COALESCE($13::jsonb, metadata),
-           expires_at = COALESCE($14, expires_at),
-           stale_reason = COALESCE($15, stale_reason),
-           stale_since = COALESCE($16, stale_since),
+           quality_score = COALESCE($14, quality_score),
+           quality_metadata = COALESCE($15::jsonb, quality_metadata),
+           embedding = COALESCE($16::vector, embedding),
+           expires_at = COALESCE($17, expires_at),
+           stale_reason = COALESCE($18, stale_reason),
+           stale_since = COALESCE($19, stale_since),
            updated_at = NOW()
        WHERE id = $1
        RETURNING ${MEMORY_COLUMNS}`,
@@ -102,6 +119,9 @@ export class PostgresMemoryRepository implements MemoryRepository {
         input.confidence ?? null,
         input.importance ?? null,
         input.metadata === undefined ? null : JSON.stringify(input.metadata),
+        input.qualityScore ?? null,
+        input.qualityMetadata === undefined ? null : JSON.stringify(input.qualityMetadata),
+        embeddingValue,
         input.expiresAt ?? null,
         input.staleReason ?? null,
         input.staleSince ?? null,
@@ -156,11 +176,31 @@ export class PostgresMemoryRepository implements MemoryRepository {
           CASE WHEN content ILIKE '%' || $${queryParamIndex} || '%' ESCAPE '\\' THEN 0.10 ELSE 0 END
         )`
       : `0`;
-    // Quality score: importance + confidence + recency decay (§P2-8).
-    // Recency: ~30-day half-life, weight decays linearly.
+    // Quality score: importance + confidence + recency decay + access decay + scope boost (§P2-8).
+    // Recency: ~30-day half-life on content age, weight decays linearly.
+    // Access recency: ~10-day half-life on last_accessed_at, boosts frequently-used memories.
+    // Scope boost: step-scope +0.15, run-scope +0.10, conversation-scope +0.05.
     // Contradicted/superseded memories are filtered by WHERE, so no penalty needed here.
+    // Uses bind parameters to prevent SQL injection (§security-review).
+    let scopeBoostSql = "0";
+    // Track additional bind param indices for scope boost
+    let stepIdParamIdx = -1;
+    let runIdParamIdx = -1;
+    if (input.stepId) {
+      stepIdParamIdx = values.length + (hasEmbedding ? 1 : 0) + (hasQuery ? 1 : 0) + 1;
+      runIdParamIdx = stepIdParamIdx + 1;
+      scopeBoostSql = `CASE WHEN step_id = $${stepIdParamIdx} THEN 0.15 WHEN run_id = $${runIdParamIdx} THEN 0.10 WHEN scope = 'conversation' THEN 0.05 ELSE 0 END`;
+    } else if (input.runId) {
+      runIdParamIdx = values.length + (hasEmbedding ? 1 : 0) + (hasQuery ? 1 : 0) + 1;
+      scopeBoostSql = `CASE WHEN run_id = $${runIdParamIdx} THEN 0.10 WHEN scope = 'conversation' THEN 0.05 ELSE 0 END`;
+    } else if (input.conversationId) {
+      scopeBoostSql = `CASE WHEN scope = 'conversation' THEN 0.05 ELSE 0 END`;
+    }
     const qualitySql =
-      `(COALESCE(importance, 0) * 0.15 + COALESCE(confidence, 0) * 0.10 + GREATEST(0, 1 - EXTRACT(EPOCH FROM (NOW() - COALESCE(updated_at, created_at))) / 2592000) * 0.10)`;
+      `(COALESCE(importance, 0) * 0.15 + COALESCE(confidence, 0) * 0.10 + ` +
+      `GREATEST(0, 1 - EXTRACT(EPOCH FROM (NOW() - COALESCE(updated_at, created_at))) / 2592000) * 0.05 + ` +
+      `GREATEST(0, 1 - EXTRACT(EPOCH FROM (NOW() - COALESCE(last_accessed_at, updated_at, created_at))) / 864000) * 0.05 + ` +
+      `${scopeBoostSql})`;
     const scoreSql = `(${keywordSql} + ${semanticSql} + ${qualitySql})`;
 
     // ── Query filtering ─────────────────────────────────────────────
@@ -181,6 +221,14 @@ export class PostgresMemoryRepository implements MemoryRepository {
     }
     // When only embedding (no text query), no ILIKE pre-filter —
     // pure vector recall based on cosine similarity.
+
+    // Push scope boost bind parameters (if any)
+    if (stepIdParamIdx > 0) {
+      params.push(input.stepId ?? null);
+      params.push(input.runId ?? null);
+    } else if (runIdParamIdx > 0) {
+      params.push(input.runId ?? null);
+    }
 
     // ── Relevance (for display/debug) ───────────────────────────────
     const relevanceSql = hasQuery
@@ -239,6 +287,129 @@ export class PostgresMemoryRepository implements MemoryRepository {
       [deletedAt, reason, id],
     );
   }
+
+  // ── Relations ─────────────────────────────────────────────────────
+
+  async saveRelations(
+    memoryId: string,
+    relations: MemoryRelationEntry[],
+  ): Promise<void> {
+    if (!relations.length) return;
+    // Batch insert — skip duplicates via ON CONFLICT DO NOTHING
+    const values: string[] = [];
+    const params: unknown[] = [];
+    for (let i = 0; i < relations.length; i++) {
+      const r = relations[i]!;
+      const base = i * 7;
+      values.push(
+        `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6}, $${base + 7})`,
+      );
+      params.push(
+        memoryId,
+        r.targetId,
+        r.relation,
+        new Date().toISOString(),
+        r.reason ?? null,
+        r.confidence ?? null,
+        new Date().toISOString(),
+      );
+    }
+    await this.pool.query(
+      `INSERT INTO memory_relations (source_memory_id, target_memory_id, relation, established_at, reason, confidence, created_at)
+       VALUES ${values.join(", ")}
+       ON CONFLICT (source_memory_id, target_memory_id, relation) DO NOTHING`,
+      params,
+    );
+  }
+
+  async findRelated(
+    memoryId: string,
+    relation?: string,
+    limit = 10,
+  ): Promise<RetrievedMemoryRecord[]> {
+    // Accept comma-separated relations for multi-type filtering
+    const relationFilter = relation
+      ? `AND mr.relation = ANY($2::text[])`
+      : `AND mr.relation != 'contradicts'`; // Exclude negative relations by default
+    const params: unknown[] = [memoryId];
+    if (relation) {
+      params.push(relation.split(",").map((r) => r.trim()).filter(Boolean));
+    }
+    params.push(limit);
+
+    const result = await this.pool.query(
+      `SELECT DISTINCT m.*, 0.5 AS score, 0.5 AS relevance
+       FROM memory_metadata m
+       JOIN memory_relations mr ON (
+         (mr.source_memory_id = $1 AND mr.target_memory_id = m.id)
+         OR (mr.target_memory_id = $1 AND mr.source_memory_id = m.id)
+       )
+       WHERE m.deleted_at IS NULL
+         AND (m.expires_at IS NULL OR m.expires_at > NOW())
+         AND m.superseded_by IS NULL
+         ${relationFilter}
+       ORDER BY mr.established_at DESC
+       LIMIT $${params.length}`,
+      params,
+    );
+    return result.rows.map(mapRetrievedMemory);
+  }
+
+  // ── Pruning ───────────────────────────────────────────────────────
+
+  async hardDeleteOlderThan(
+    column: string,
+    before: string,
+  ): Promise<number> {
+    // Validate column to prevent SQL injection
+    const allowedColumns = ["deleted_at", "expires_at"];
+    if (!allowedColumns.includes(column)) {
+      throw new Error(`Invalid pruning column: ${column}`);
+    }
+
+    // Delete relations first (CASCADE handles most, but explicit is safer)
+    await this.pool.query(
+      `DELETE FROM memory_relations
+       WHERE source_memory_id IN (
+         SELECT id FROM memory_metadata WHERE ${column} IS NOT NULL AND ${column} < $1
+       )
+       OR target_memory_id IN (
+         SELECT id FROM memory_metadata WHERE ${column} IS NOT NULL AND ${column} < $1
+       )`,
+      [before],
+    );
+
+    const result = await this.pool.query(
+      `DELETE FROM memory_metadata
+       WHERE ${column} IS NOT NULL AND ${column} < $1`,
+      [before],
+    );
+    return result.rowCount ?? 0;
+  }
+
+  async hardDeleteSupersededOlderThan(before: string): Promise<number> {
+    // superseded_by stores a UUID, so we prune by updated_at when superseded_by IS NOT NULL
+    // Delete relations first
+    await this.pool.query(
+      `DELETE FROM memory_relations
+       WHERE source_memory_id IN (
+         SELECT id FROM memory_metadata
+         WHERE superseded_by IS NOT NULL AND updated_at < $1
+       )
+       OR target_memory_id IN (
+         SELECT id FROM memory_metadata
+         WHERE superseded_by IS NOT NULL AND updated_at < $1
+       )`,
+      [before],
+    );
+
+    const result = await this.pool.query(
+      `DELETE FROM memory_metadata
+       WHERE superseded_by IS NOT NULL AND updated_at < $1`,
+      [before],
+    );
+    return result.rowCount ?? 0;
+  }
 }
 
 function buildMemoryWhere(input: MemorySearchInput): {
@@ -255,6 +426,10 @@ function buildMemoryWhere(input: MemorySearchInput): {
   if (input.runId) {
     values.push(input.runId);
     clauses.push(`run_id = $${values.length}`);
+  }
+  if (input.stepId) {
+    values.push(input.stepId);
+    clauses.push(`step_id = $${values.length}`);
   }
   if (input.key) {
     values.push(input.key);
@@ -288,21 +463,37 @@ function visibleScopeClauses(
   const clauses: string[] = [];
 
   if (scopes.has("global")) clauses.push("scope = 'global'");
-  if (scopes.has("user") && input.userId) {
-    values.push(input.userId);
-    clauses.push(`(scope = 'user' AND scope_id = $${values.length})`);
+  if (scopes.has("user")) {
+    if (input.userId) {
+      values.push(input.userId);
+      clauses.push(`(scope = 'user' AND scope_id = $${values.length})`);
+    } else {
+      clauses.push("scope = 'user'");
+    }
   }
-  if (scopes.has("project") && input.projectId) {
-    values.push(input.projectId);
-    clauses.push(`(scope = 'project' AND scope_id = $${values.length})`);
+  if (scopes.has("project")) {
+    if (input.projectId) {
+      values.push(input.projectId);
+      clauses.push(`(scope = 'project' AND scope_id = $${values.length})`);
+    } else {
+      clauses.push("scope = 'project'");
+    }
   }
-  if (scopes.has("conversation") && input.conversationId) {
-    values.push(input.conversationId);
-    clauses.push(`(scope = 'conversation' AND scope_id = $${values.length})`);
+  if (scopes.has("conversation")) {
+    if (input.conversationId) {
+      values.push(input.conversationId);
+      clauses.push(`(scope = 'conversation' AND scope_id = $${values.length})`);
+    } else {
+      clauses.push("scope = 'conversation'");
+    }
   }
-  if (scopes.has("run") && input.runId) {
-    values.push(input.runId);
-    clauses.push(`(scope = 'run' AND scope_id = $${values.length})`);
+  if (scopes.has("run")) {
+    if (input.runId) {
+      values.push(input.runId);
+      clauses.push(`(scope = 'run' AND scope_id = $${values.length})`);
+    } else {
+      clauses.push("scope = 'run'");
+    }
   }
 
   return clauses;
@@ -363,6 +554,11 @@ function mapMemory(row: any): MemoryRecord {
         ? undefined
         : Number(row.importance),
     metadata: row.metadata ?? {},
+    quality: row.quality_metadata != null
+      ? (typeof row.quality_metadata === "object"
+          ? (row.quality_metadata as MemoryRecord["quality"])
+          : undefined)
+      : undefined,
     createdAt: toIsoRequired(row.created_at),
     updatedAt: toIso(row.updated_at),
     lastAccessedAt: toIso(row.last_accessed_at),

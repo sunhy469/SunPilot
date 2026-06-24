@@ -58,6 +58,7 @@ export interface MemoryWriteResult {
 
 export interface MemoryRepositoryPort {
   create(input: MemoryRecord): Promise<MemoryRecord>;
+  update(id: string, input: Record<string, unknown>): Promise<MemoryRecord | null>;
   search(input?: MemorySearchInput): Promise<RetrievedMemoryRecord[]>;
   supersede(id: string, supersededBy: string): Promise<void>;
 }
