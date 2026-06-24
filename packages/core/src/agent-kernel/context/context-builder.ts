@@ -11,6 +11,7 @@ import {
   SummaryStaleDetector,
   type StaleDetectionInput,
 } from "./summary-stale-detector.js";
+import { MemoryCompressor } from "./memory-compressor.js";
 
 export interface ContextBuilderDeps {
   /** Fetch conversation messages for the given conversation. */
@@ -39,6 +40,8 @@ export interface ContextBuilderDeps {
     types?: string[];
     /** Filter by scopes (e.g. ["conversation"]). */
     scopes?: string[];
+    /** Current step ID for scope-aware search. */
+    stepId?: string;
   }) => Promise<
     Array<{
       id: string;
@@ -100,6 +103,16 @@ export interface ContextBuilderDeps {
   staleDetector?: SummaryStaleDetector;
   /** §P2-1: Event bus for emitting agent.error on critical source failures. */
   eventBus?: AgentEventBus;
+  /** Optional memory re-ranker for improving retrieval quality (MMR / LLM). */
+  memoryReranker?: import("./memory-reranker.js").MemoryReranker;
+  /** Optional multi-hop retriever for relation-based memory expansion. */
+  multiHopRetriever?: import("./multi-hop-retriever.js").MultiHopRetriever;
+  /** Optional query expander for improving recall on short queries. */
+  queryExpander?: import("./query-expander.js").QueryExpander;
+  /** Callback for finding related memories (used by multi-hop). */
+  findRelatedMemories?: (memoryId: string, relation?: string, limit?: number) => Promise<Array<{ id: string; type?: string; title?: string; content?: string; source?: string; confidence?: number; scope?: string; scopeId?: string; score?: number }>>;
+  /** Current step ID for scope-aware retrieval. */
+  stepId?: string;
 }
 
 /**
@@ -577,6 +590,7 @@ export class ContextBuilder implements ContextBuilderInterface {
                 userId: input.userId,
                 limit: 10,
                 embedding: queryEmbedding,
+                stepId: this.deps.stepId,
               }),
               new Promise<Awaited<ReturnType<NonNullable<typeof this.deps.searchMemories>>>>((resolve) =>
                 setTimeout(() => resolve([]), MEMORY_BUDGET_MS),
@@ -614,7 +628,133 @@ export class ContextBuilder implements ContextBuilderInterface {
           // Sort by score descending
           allMemories.sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
 
-          for (const mem of allMemories.slice(0, 15)) {
+          // §Multi-hop retrieval: expand via memory_relations when initial results are sparse.
+          if (
+            this.deps.multiHopRetriever &&
+            this.deps.findRelatedMemories &&
+            allMemories.length < 5 &&
+            allMemories.length > 0
+          ) {
+            try {
+              const hopResult = await Promise.race([
+                this.deps.multiHopRetriever.retrieve({
+                  seedMemories: allMemories.slice(0, 3) as any[],
+                  findRelated: this.deps.findRelatedMemories as any,
+                }),
+                new Promise<null>((resolve) =>
+                  setTimeout(() => resolve(null), 800),
+                ),
+              ]);
+              if (hopResult && hopResult.memories.length > allMemories.length) {
+                const seenIds = new Set(allMemories.map((m) => m.id));
+                for (const rm of hopResult.memories) {
+                  if (!seenIds.has(rm.id)) {
+                    seenIds.add(rm.id);
+                    allMemories.push({
+                      id: rm.id,
+                      type: rm.type ?? "manual_note",
+                      title: rm.title ?? "",
+                      content: rm.content ?? "",
+                      source: rm.source ?? "multi-hop",
+                      confidence: rm.confidence ?? 0.5,
+                      score: rm.score,
+                    });
+                  }
+                }
+              }
+            } catch {
+              // Multi-hop failed — continue with original results
+            }
+          }
+
+          // §Query expansion: fallback when initial retrieval returns too few results.
+          if (
+            this.deps.queryExpander &&
+            this.deps.searchMemories &&
+            allMemories.length < 3
+          ) {
+            try {
+              const expansions = await Promise.race([
+                this.deps.queryExpander.expand(input.message),
+                new Promise<string[]>((resolve) =>
+                  setTimeout(() => resolve([]), 1000),
+                ),
+              ]);
+              if (expansions.length > 0) {
+                const expandedResults = await Promise.allSettled(
+                  expansions.slice(0, 3).map((q) =>
+                    this.deps.searchMemories!({
+                      query: q,
+                      runId: input.runId,
+                      conversationId: input.conversationId,
+                      userId: input.userId,
+                      limit: 5,
+                      embedding: queryEmbedding,
+                    }),
+                  ),
+                );
+                const seenIds = new Set(allMemories.map((m) => m.id));
+                for (const r of expandedResults) {
+                  if (r.status === "fulfilled") {
+                    for (const mem of r.value) {
+                      if (!seenIds.has(mem.id)) {
+                        seenIds.add(mem.id);
+                        allMemories.push(mem);
+                      }
+                    }
+                  }
+                }
+                // Re-sort after expansion
+                allMemories.sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
+              }
+            } catch {
+              // Query expansion failed — continue with original results
+            }
+          }
+
+          // Re-rank: apply MMR or pairwise re-ranking if configured.
+          // Only re-rank when we have more than 5 candidates — for small sets
+          // the SQL scoring is sufficient.
+          let topMemories = allMemories.slice(0, 15);
+          if (this.deps.memoryReranker && topMemories.length > 5) {
+            try {
+              const candidates = topMemories.map((m) => ({
+                id: m.id,
+                score: m.score ?? 0,
+                title: (m as any).title as string,
+                content: m.content,
+              }));
+              const reranked = await Promise.race([
+                this.deps.memoryReranker.rerank(
+                  input.message,
+                  candidates,
+                  Math.min(15, topMemories.length),
+                ),
+                // 500ms timeout — fall back to original order if reranker is slow
+                new Promise<typeof candidates>((resolve) =>
+                  setTimeout(() => resolve(candidates), 500),
+                ),
+              ]);
+              // Reorder topMemories by reranker output order
+              const rerankedIds = new Set(reranked.map((r) => r.id));
+              const lookupMap = new Map<string, (typeof topMemories)[number]>();
+              for (const m of topMemories) lookupMap.set(m.id, m);
+              const reordered: typeof topMemories = [];
+              for (const r of reranked) {
+                const orig = lookupMap.get(r.id);
+                if (orig) reordered.push(orig);
+              }
+              // Append any that were in original but not in reranker output
+              for (const m of topMemories) {
+                if (!rerankedIds.has(m.id)) reordered.push(m);
+              }
+              if (reordered.length > 0) topMemories = reordered;
+            } catch {
+              // Reranker failed — use original order (already sorted by score)
+            }
+          }
+
+          for (const mem of topMemories) {
             const content = `[${mem.type}] ${mem.title}: ${mem.content}`;
             chunks.push({
               id: `memory_${mem.id}`,
@@ -642,8 +782,16 @@ export class ContextBuilder implements ContextBuilderInterface {
               ).toISOString(),
             });
           }
-        } catch {
-          // Memory store not available
+        } catch (err) {
+          // Memory store not available — continue without memories
+          if (this.deps.eventBus) {
+            this.deps.eventBus.emit("agent.error" as any, {
+              code: "CONTEXT_MEMORY_SEARCH_FAILED",
+              message: `Memory search failed: ${err instanceof Error ? err.message : String(err)}`,
+              category: "context",
+              retryable: true,
+            } as any, {} as any);
+          }
         }
       }
       // §P0-3: Always capture timing for trace observability
@@ -758,8 +906,16 @@ export class ContextBuilder implements ContextBuilderInterface {
       if (ContextBuilder.DEBUG_TIMING) {
         console.debug(`[ContextBuilder] skill_catalog_ms=${Date.now() - tSkills}`);
       }
-    } catch {
-      // Parallel IO or context processing failed — skip context enrichment
+    } catch (err) {
+      // Parallel IO or context processing failed — emit diagnostic, continue with partial context
+      if (this.deps.eventBus) {
+        this.deps.eventBus.emit("agent.error" as any, {
+          code: "CONTEXT_BUILD_FAILED",
+          message: `Context building failed: ${err instanceof Error ? err.message : String(err)}`,
+          category: "context",
+          retryable: true,
+        } as any, {} as any);
+      }
     }
 
     // ── Run state ─────────────────────────────────────────────────
@@ -786,6 +942,7 @@ export class ContextBuilder implements ContextBuilderInterface {
     const MAX_ARTIFACT_CHARS = 1000;
     const MAX_MEMORY_CHARS = 800;
     const MAX_HISTORY_MSG_CHARS = 4000;
+    const memoryCompressor = new MemoryCompressor({ maxCharsPerMemory: MAX_MEMORY_CHARS });
     for (const chunk of chunks) {
       if (chunk.content.length <= 500) continue; // skip already-short chunks
 
@@ -819,10 +976,18 @@ export class ContextBuilder implements ContextBuilderInterface {
         case "memory": {
           if (chunk.content.length > MAX_MEMORY_CHARS) {
             const originalLength = chunk.content.length;
-            const truncated = chunk.content.slice(0, MAX_MEMORY_CHARS);
-            chunk.content =
-              truncated +
-              `…[truncated ${originalLength - MAX_MEMORY_CHARS} chars]`;
+            // Use MemoryCompressor for intelligent first-N-sentence extraction
+            const result = memoryCompressor.compress([{
+              id: chunk.id.replace("memory_", ""),
+              type: "manual_note",
+              title: chunk.title ?? "",
+              content: chunk.content,
+              confidence: 0.8,
+              importance: 0.5,
+              createdAt: new Date().toISOString(),
+            }]);
+            const compressed = result[0]?.memory.content ?? chunk.content.slice(0, MAX_MEMORY_CHARS - 3) + "...";
+            chunk.content = compressed;
             chunk.tokenEstimate = estimateTokens(chunk.content);
             chunk.metadata.truncated = true;
             chunk.metadata.originalLength = originalLength;

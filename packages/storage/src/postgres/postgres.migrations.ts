@@ -24,6 +24,8 @@ const migrationFiles = [
   "017_agent_trace_plan.sql",
   "018_memory_stale_columns.sql",
   "019_add_conversations_pinned.sql",
+  "020_digital_world.sql",
+  "021_memory_quality_relations.sql",
 ];
 const migrationLockKey = 7_290_317_373_001;
 

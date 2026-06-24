@@ -122,6 +122,7 @@ export class InMemoryDatabaseContext implements DatabaseContext {
   private readonly approvalRecords = new Map<string, ApprovalRecord>();
   private readonly artifactRecords = new Map<string, ArtifactRecord>();
   private readonly memoryRecords: MemoryRecord[] = [];
+  private readonly memoryRelationsMap = new Map<string, Array<{ sourceMemoryId?: string; targetMemoryId: string; relation: string; reason?: string; confidence?: number; establishedAt: string; createdAt: string }>>();
   private readonly settingRecords = new Map<string, SettingRecord>();
   private readonly auditRecords: AuditRecord[] = [];
   private readonly idempotencyRecords = new Map<string, IdempotencyRecord>();
@@ -670,6 +671,89 @@ export class InMemoryDatabaseContext implements DatabaseContext {
           metadata: { ...existing.metadata, deleteReason: reason },
         };
       }
+    },
+    saveRelations: async (
+      memoryId: string,
+      relations: Array<{ targetId: string; relation: string; reason?: string; confidence?: number }>,
+    ): Promise<void> => {
+      const existing = this.memoryRelationsMap.get(memoryId) ?? [];
+      for (const r of relations) {
+        existing.push({ targetMemoryId: r.targetId, relation: r.relation, reason: r.reason, confidence: r.confidence, establishedAt: new Date().toISOString(), createdAt: new Date().toISOString() });
+      }
+      this.memoryRelationsMap.set(memoryId, existing);
+    },
+    findRelated: async (
+      memoryId: string,
+      relation?: string,
+      limit = 10,
+    ): Promise<ReturnType<typeof scoreMemory>[]> => {
+      // Support comma-separated relation types (matching Postgres implementation)
+      const relationSet = relation
+        ? new Set(relation.split(",").map((r) => r.trim()).filter(Boolean))
+        : null;
+      const defaultExclude = relationSet ? false : true; // Exclude contradicts when no filter
+
+      const allRelated: Array<{ sourceMemoryId: string; targetMemoryId: string }> = [];
+      // From source
+      const fromSource = this.memoryRelationsMap.get(memoryId) ?? [];
+      for (const r of fromSource) {
+        const matches = relationSet
+          ? relationSet.has(r.relation)
+          : r.relation !== "contradicts";
+        if (matches) allRelated.push({ sourceMemoryId: memoryId, targetMemoryId: r.targetMemoryId });
+      }
+      // From target (inverse lookup)
+      for (const [srcId, rels] of this.memoryRelationsMap.entries()) {
+        for (const r of rels) {
+          if (r.targetMemoryId === memoryId) {
+            const matches = relationSet
+              ? relationSet.has(r.relation)
+              : r.relation !== "contradicts";
+            if (matches) allRelated.push({ sourceMemoryId: srcId, targetMemoryId: r.targetMemoryId });
+          }
+        }
+      }
+      const memoryIds = [...new Set(allRelated.flatMap((r) => [r.targetMemoryId, r.sourceMemoryId]).filter((id) => id !== memoryId))];
+      const records: MemoryRecord[] = this.memoryRecords
+        .filter((m) => memoryIds.includes(m.id) && !m.deletedAt && !m.supersededBy && (!m.expiresAt || m.expiresAt > new Date().toISOString()))
+        .slice(0, limit);
+      return records.map((m) => scoreMemory(m, ""));
+    },
+    hardDeleteOlderThan: async (
+      column: string,
+      before: string,
+    ): Promise<number> => {
+      let count = 0;
+      const kept: MemoryRecord[] = [];
+      for (const m of this.memoryRecords) {
+        const val = (m as unknown as Record<string, unknown>)[column];
+        if (val && typeof val === "string" && val < before) {
+          count++;
+        } else {
+          kept.push(m);
+        }
+      }
+      this.memoryRecords.length = 0;
+      this.memoryRecords.push(...kept);
+      return count;
+    },
+    hardDeleteSupersededOlderThan: async (before: string): Promise<number> => {
+      let count = 0;
+      const kept: MemoryRecord[] = [];
+      for (const m of this.memoryRecords) {
+        if (
+          m.supersededBy &&
+          m.updatedAt &&
+          m.updatedAt < before
+        ) {
+          count++;
+        } else {
+          kept.push(m);
+        }
+      }
+      this.memoryRecords.length = 0;
+      this.memoryRecords.push(...kept);
+      return count;
     },
   };
 

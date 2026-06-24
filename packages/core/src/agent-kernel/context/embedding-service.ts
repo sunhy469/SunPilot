@@ -15,6 +15,9 @@ export interface EmbeddingService {
   /** Generate embeddings for a batch of texts (more efficient). */
   embedBatch(texts: string[]): Promise<number[][]>;
 
+  /** The embedding vector dimension (e.g. 1536 for text-embedding-3-small). */
+  readonly dimension: number;
+
   /**
    * Whether a real semantic embedding provider is active AND has not
    * degraded to fallback. When false, similarity scores are lexical

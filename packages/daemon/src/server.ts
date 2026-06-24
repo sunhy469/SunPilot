@@ -11,6 +11,7 @@ import {
   InMemoryAgentEventBus,
   RepositoryApprovalExpiryService,
   RuntimeError,
+  SummaryStaleDetector,
   type AgentEventBus,
 } from "@sunpilot/core";
 import { SkillRegistry, SkillRunner } from "@sunpilot/skill-runner";
@@ -32,6 +33,8 @@ import { recoverAgentRuntimeRuns } from "./recovery.js";
 import { setupDaemonWebSocket } from "./ws.js";
 import { readSunPilotConfig, updateSunPilotConfig } from "@sunpilot/storage";
 import { AuditActor } from "@sunpilot/protocol";
+import { StaleDetectionWorker } from "./stale-detection-worker.js";
+import { MemoryPruningWorker } from "./memory-pruning-worker.js";
 
 export interface DaemonOptions {
   port?: number;
@@ -136,11 +139,12 @@ export async function createDaemon(options: DaemonOptions = {}) {
   const liveEventBus = new InMemoryAgentEventBus();
   let chatAgentInit: Promise<AgentService> | undefined;
   let modelRouterRef: { getStats(): { persistFailures: number; totalCalls: number; fallbackCount: number } } | undefined;
+  let _updateMemory: ((id: string, input: { content?: string; title?: string; summary?: string; confidence?: number; importance?: number }) => Promise<{ id: string } | null>) | undefined;
   const getChatAgent = async (): Promise<AgentService> => {
     if (chatAgent) return chatAgent as AgentService;
     chatAgentInit ??= (async () => {
       const llmProvider = createDefaultLlmProvider();
-      const { service, modelRouter } = createAgentLoopService({
+      const { service, modelRouter, updateMemory } = createAgentLoopService({
         database,
         skillRegistry,
         skillRunner,
@@ -151,6 +155,7 @@ export async function createDaemon(options: DaemonOptions = {}) {
       });
       chatAgent = service;
       modelRouterRef = modelRouter;
+      _updateMemory = updateMemory;
       return chatAgent as AgentService;
     })();
     return chatAgentInit;
@@ -228,9 +233,16 @@ export async function createDaemon(options: DaemonOptions = {}) {
       const dpModel = process.env["SUNPILOT_DP_LLM_MODEL"] ?? process.env["SUNPILOT_LLM_MODEL"] ?? "deepseek-v4-flash";
       const seedModel = process.env["SUNPILOT_SEED_LLM_MODEL"] ?? "doubao-seed-2-0-lite-260428";
       return [
-        { id: "dp", label: "DP", provider: "deepseek", model: dpModel, available: true },
-        { id: "seed", label: "Seed", provider: "volcengine-ark", model: seedModel, available: hasSeed },
+        { id: "dp", label: "Deepseek-v4-flash", provider: "deepseek", model: dpModel, available: true },
+        { id: "seed", label: "Seed-2.0-lite", provider: "volcengine-ark", model: seedModel, available: hasSeed },
       ];
+    },
+    updateMemory: async (id, input) => {
+      if (!_updateMemory) {
+        // Agent loop not yet initialized — fall back to direct update
+        return database.memory.update(id, input as Parameters<typeof database.memory.update>[1]);
+      }
+      return _updateMemory(id, input);
     },
   };
   registerSunPilotApiRoutes(app, apiDeps);
@@ -314,6 +326,17 @@ export async function createDaemon(options: DaemonOptions = {}) {
     }));
   }
 
+  // ── Background workers ──────────────────────────────────────────
+  const staleDetectionWorker = new StaleDetectionWorker({
+    database,
+    staleDetector: new SummaryStaleDetector(),
+    intervalMs: 300_000, // 5 min
+  });
+  const pruningWorker = new MemoryPruningWorker({
+    database,
+    intervalMs: 3_600_000, // 1 hour
+  });
+
   return {
     app,
     paths,
@@ -321,6 +344,10 @@ export async function createDaemon(options: DaemonOptions = {}) {
       await app.listen({ host, port });
       writeFileSync(paths.pidFile, String(process.pid), { mode: 0o600 });
       ws.attach(app.server);
+
+      // Start background workers
+      staleDetectionWorker.start();
+      pruningWorker.start();
 
       // Seed default world nodes/edges if database is empty
       try {
@@ -350,6 +377,9 @@ export async function createDaemon(options: DaemonOptions = {}) {
       app.log.info({ host, port }, "SunPilot daemon started");
     },
     async stop() {
+      staleDetectionWorker.stop();
+      pruningWorker.stop();
+
       await database.audit.create({
         actor: AuditActor.Daemon,
         action: "daemon.stop",
