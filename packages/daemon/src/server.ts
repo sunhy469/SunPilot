@@ -281,9 +281,13 @@ export async function createDaemon(options: DaemonOptions = {}) {
       const presented = extractBearerToken(request.headers.authorization);
       const tokenOk = presented && localToken ? safeEqual(presented, localToken) : false;
       if (!tokenOk) {
-        // Fall back to Origin check for browser clients (which always send
-        // Origin but may not forward the bearer token for same-origin calls).
-        if (!isAllowedLocalOrigin(request.headers.origin, port)) {
+        // Fall back to Origin check for browser clients. Same-origin
+        // navigations (typing the URL in the address bar) don't send an
+        // Origin header; use the Host header as a fallback so the first
+        // page load works without a token.
+        const clientOrigin =
+          request.headers.origin ?? `https://${request.hostname}`;
+        if (!isAllowedLocalOrigin(clientOrigin, port)) {
           await reply
             .code(401)
             .send({ error: "unauthorized", message: "Missing or invalid token." });
@@ -452,6 +456,9 @@ export async function createDaemon(options: DaemonOptions = {}) {
     database,
     intervalMs: 3_600_000, // 1 hour
   });
+  // §F5: periodic idempotency key cleanup — removes expired in-flight
+  // reservations so they don't block retries indefinitely.
+  let idempotencyCleanupTimer: ReturnType<typeof setInterval> | null = null;
 
   return {
     app,
@@ -464,6 +471,20 @@ export async function createDaemon(options: DaemonOptions = {}) {
       // Start background workers
       staleDetectionWorker.start();
       pruningWorker.start();
+      // §F5: clean up expired idempotency keys every 10 minutes
+      idempotencyCleanupTimer = setInterval(async () => {
+        try {
+          const count = await database.idempotency.cleanupExpired();
+          if (count > 0) {
+            app.log.info({ count }, "Cleaned up expired idempotency keys");
+          }
+        } catch (err) {
+          app.log.warn({ err }, "Idempotency cleanup failed");
+        }
+      }, 600_000);
+      if (idempotencyCleanupTimer && typeof (idempotencyCleanupTimer as { unref?: () => void }).unref === "function") {
+        (idempotencyCleanupTimer as { unref: () => void }).unref();
+      }
 
       // Seed default world nodes/edges if database is empty
       try {
@@ -485,6 +506,10 @@ export async function createDaemon(options: DaemonOptions = {}) {
     async stop() {
       staleDetectionWorker.stop();
       pruningWorker.stop();
+      if (idempotencyCleanupTimer) {
+        clearInterval(idempotencyCleanupTimer);
+        idempotencyCleanupTimer = null;
+      }
 
       await database.audit.create({
         actor: AuditActor.Daemon,

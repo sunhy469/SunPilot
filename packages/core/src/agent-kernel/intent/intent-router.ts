@@ -28,6 +28,13 @@ export interface IntentRouterDeps {
   skillEmbeddingCache?: SkillEmbeddingCache;
   /** Custom intent rules to prepend before defaults. */
   rules?: IntentRule[];
+  /**
+   * §P3 opt: Minimum cosine similarity to short-circuit the Layer 1
+   * embedding pass and skip the Layer 2 LLM call. Default: 0.95.
+   * Lower values (≥ 0.75) reduce latency but increase false-positive risk.
+   * Set via SUNPILOT_INTENT_EMBEDDING_THRESHOLD env var.
+   */
+  embeddingShortCircuitThreshold?: number;
 }
 
 /**
@@ -41,7 +48,7 @@ export interface IntentRouterDeps {
  * Layer 1: Embedding semantic matching (~50-200ms)
  *   - Embeds user query and computes cosine similarity against skill
  *     name+description embeddings
- *   - Short-circuits ONLY at ≥0.95 confidence (extremely clear matches)
+ *   - Short-circuits ONLY at ≥threshold confidence (configurable, default 0.95)
  *   - Below threshold, generates Top-5 hints for Layer 2 LLM classification
  *   - Short-circuit rate: ~5% (was higher before responsibility convergence)
  *
@@ -49,6 +56,7 @@ export interface IntentRouterDeps {
  *   - Lightweight model classifies intent AND selects specific skill
  *   - Only invoked when embedding confidence is insufficient
  *   - Handles ~15% of ambiguous or complex requests
+ *   - §P3 opt: SKIPPED when pre-inference already classified at confidence ≥ 0.7
  *
  * Layer 3: Default 'unknown' (instant)
  *   - Confidence 0.3, no tools — falls through to pure LLM response
@@ -57,21 +65,53 @@ export interface IntentRouterDeps {
  */
 export class IntentRouter implements IntentRouterInterface {
   private readonly rules: IntentRule[];
+  /** §P3 opt: Layer 1 short-circuit threshold. Default 0.95. */
+  private readonly embeddingThreshold: number;
 
   constructor(private readonly deps: IntentRouterDeps = {}) {
     this.rules = [...(deps.rules ?? []), ...DEFAULT_INTENT_RULES];
+    this.embeddingThreshold = clampThreshold(deps.embeddingShortCircuitThreshold ?? 0.95);
   }
 
   async route(
     context: AgentContext,
     _signal: AbortSignal,
   ): Promise<RoutedIntent> {
+    return this._routeImpl(context, _signal, undefined);
+  }
+
+  /**
+   * §P3 opt: Route with pre-inference result already available.
+   * When pre-inference classified the intent at high confidence (≥ 0.7),
+   * skip the Layer 2 LLM call and build the intent directly from the
+   * pre-inference result, augmented with Layer 1 embedding skill hints.
+   */
+  async routeWithPreInference(
+    context: AgentContext,
+    _signal: AbortSignal,
+    preInference: { intentType?: string; intentConfidence?: number },
+  ): Promise<RoutedIntent> {
+    return this._routeImpl(context, _signal, preInference);
+  }
+
+  /**
+   * Shared routing implementation.
+   * @param preInference — optional pre-inference result that can bypass Layer 2
+   */
+  private async _routeImpl(
+    context: AgentContext,
+    _signal: AbortSignal,
+    preInference?: { intentType?: string; intentConfidence?: number },
+  ): Promise<RoutedIntent> {
     const message = context.currentMessage.content.trim();
+    // §P3: Track which layer decided the intent for trace observability
+    let routingLayer: "form_match" | "embedding_short_circuit" | "llm" | "pre_inference" | "default" = "default";
 
     // ── Layer 0: Form-match rules (slash commands + formulaic) ──────
     for (const rule of this.rules) {
       for (const pattern of rule.patterns) {
         if (pattern.test(message)) {
+          routingLayer = "form_match";
           return {
             type: rule.type,
             confidence: rule.type === "casual_chat" ? 0.9 : 0.85,
@@ -81,7 +121,7 @@ export class IntentRouter implements IntentRouterInterface {
             riskLevel: rule.riskLevel,
             candidateSkills: rule.candidateSkills,
             reason: `Form-match: ${pattern.source}`,
-            trace: { formMatch: true },
+            trace: { formMatch: true, routingLayer: routingLayer },
           };
         }
       }
@@ -108,10 +148,10 @@ export class IntentRouter implements IntentRouterInterface {
           // hasRealProvider returns false — we won't short-circuit on
           // lexical scores.
           const isRealEmbedding = this.deps.embeddingService.hasRealProvider;
-          // Only short-circuit at ≥0.95 confidence (tightened from 0.85).
-          // The LLM layer always runs for intermediate-confidence cases.
-          if (isRealEmbedding && embeddingResult.confidence >= 0.95) {
-            return embeddingResult;
+          // §P3 opt: Use configurable threshold (default 0.95)
+          if (isRealEmbedding && embeddingResult.confidence >= this.embeddingThreshold) {
+            routingLayer = "embedding_short_circuit";
+            return { ...embeddingResult, trace: { ...embeddingResult.trace, routingLayer } };
           }
           // Save hints for Layer 2 even when below threshold or in fallback mode
           embeddingHints = embeddingResult;
@@ -121,17 +161,52 @@ export class IntentRouter implements IntentRouterInterface {
       }
     }
 
+    // §P3 opt: Check if pre-inference already classified the intent.
+    // When confidence ≥ 0.7, skip Layer 2 LLM and build intent directly.
+    const preIntentType = preInference?.intentType;
+    const preConfidence = preInference?.intentConfidence;
+    if (preIntentType && preConfidence !== undefined && preConfidence >= 0.7) {
+      const validTypes = [
+        "casual_chat", "question_answering", "project_analysis",
+        "code_generation", "code_modification", "file_operation",
+        "shell_operation", "automation_execution", "artifact_generation",
+        "memory_update", "diagnostics", "use_skill",
+      ];
+      if (validTypes.includes(preIntentType)) {
+        routingLayer = "pre_inference";
+        const intent = this.defaultsForType(preIntentType as RoutedIntent["type"]);
+        // Merge embedding skill hints when available
+        if (embeddingHints?.candidateSkills?.length) {
+          intent.candidateSkills = embeddingHints.candidateSkills;
+          intent.reason = `Pre-inference: ${preIntentType} (conf=${preConfidence.toFixed(2)}) + embedding hints`;
+          intent.trace = {
+            ...embeddingHints.trace,
+            routingLayer,
+          };
+        } else {
+          intent.reason = `Pre-inference: ${preIntentType} (conf=${preConfidence.toFixed(2)})`;
+          intent.trace = { routingLayer };
+        }
+        intent.confidence = preConfidence;
+        return intent;
+      }
+    }
+
     // ── Layer 2: LLM classification + skill selection ───────────────
     if (this.deps.llm) {
       try {
         const intent = await this.classifyWithLlm(context, embeddingHints);
-        if (intent) return intent;
+        if (intent) {
+          routingLayer = "llm";
+          return { ...intent, trace: { ...intent.trace, routingLayer } };
+        }
       } catch {
         // LLM unavailable — fall through to default
       }
     }
 
     // ── Layer 3: Default 'unknown' intent ───────────────────────────
+    routingLayer = "default";
     return {
       type: "unknown",
       confidence: 0.3,
@@ -141,6 +216,7 @@ export class IntentRouter implements IntentRouterInterface {
       riskLevel: "low",
       candidateSkills: [],
       reason: "No form-match, embedding, or LLM match — defaulting to unknown",
+      trace: { routingLayer },
     };
   }
 
@@ -212,11 +288,12 @@ export class IntentRouter implements IntentRouterInterface {
     const best = scored[0]!;
     const runnerUp = scored.length > 1 ? scored[1]! : { similarity: 0 };
 
-    // High-confidence gate: similarity ≥ 0.95 AND gap > 0.3.
+    // High-confidence gate: similarity ≥ threshold AND gap > 0.3.
+    // Threshold is configurable (default 0.95) via embeddingShortCircuitThreshold.
     // Tightened from 0.85/0.2 per architecture review — IntentRouter
     // should only short-circuit in extremely clear cases. The primary
     // tool selection authority is ToolRetriever/ToolDecisionEngine.
-    if (best.similarity >= 0.95 && (best.similarity - runnerUp.similarity) > 0.3) {
+    if (best.similarity >= this.embeddingThreshold && (best.similarity - runnerUp.similarity) > 0.3) {
       return {
         type: "use_skill",
         confidence: best.similarity,
@@ -252,7 +329,7 @@ export class IntentRouter implements IntentRouterInterface {
         candidateSkills: scored
           .slice(0, 5)
           .map((s) => s.skillId),
-        reason: `Embedding hints (top sim=${best.similarity.toFixed(3)} < 0.95) — escalate to LLM`,
+        reason: `Embedding hints (top sim=${best.similarity.toFixed(3)} < ${this.embeddingThreshold}) — escalate to LLM`,
         trace: {
           embeddingMode: this.deps.embeddingService?.hasRealProvider
             ? "real"
@@ -491,6 +568,14 @@ User message: "${message}"
         };
     }
   }
+}
+
+/**
+ * §P3: Clamp embedding short-circuit threshold to safe bounds [0.75, 0.98].
+ * Below 0.75: too many false positives; above 0.98: effectively never short-circuits.
+ */
+function clampThreshold(t: number): number {
+  return Math.max(0.75, Math.min(0.98, t));
 }
 
 /**
