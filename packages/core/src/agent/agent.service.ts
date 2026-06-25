@@ -427,6 +427,9 @@ export class AgentService {
       onDelta?: (delta: AgentStreamDelta) => void;
       onCompleted?: (result: AgentLoopResult) => void;
       onError?: (error: unknown) => void;
+      /** External abort signal (e.g., HTTP client disconnect). Aborting it
+       * triggers the run's internal abort so the agent loop stops promptly. */
+      signal?: AbortSignal;
     },
   ): Promise<AgentLoopResult & { conversationId: string; messageId: string }> {
     const { loopEngine, abortRegistry, runStateManager, eventBus, liveEventBus } =
@@ -476,6 +479,22 @@ export class AgentService {
 
     // 为本 run 创建 AbortSignal，用于用户取消或超时中断
     const signal = abortRegistry.create(runId);
+
+    // A5: Link an external abort signal (e.g., HTTP client disconnect on
+    // /v1/chat) to this run's internal abort so the agent loop stops
+    // instead of continuing LLM/skill work for a gone client.
+    const externalSignal = streamHooks?.signal;
+    if (externalSignal) {
+      if (externalSignal.aborted) {
+        abortRegistry.abort(runId);
+      } else {
+        externalSignal.addEventListener(
+          "abort",
+          () => abortRegistry.abort(runId),
+          { once: true },
+        );
+      }
+    }
 
     // ── Event subscriptions ────────────────────────────────────
     // liveEventBus carries only persisted events with real DB sequences.

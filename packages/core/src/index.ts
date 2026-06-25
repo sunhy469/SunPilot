@@ -10,7 +10,7 @@ export {
 } from "./agent-kernel/state/run-state-machine.js";
 export { AuditActor } from "./agent-kernel/audit/audit-actor.js";
 export { ContextBuilder } from "./agent-kernel/context/context-builder.js";
-export type { ContextBuilderDeps } from "./agent-kernel/context/context-builder.js";
+export type { ContextBuilderDeps, MemoryRetrievalMetrics } from "./agent-kernel/context/context-builder.js";
 export { TokenBudgeter } from "./agent-kernel/context/context-budgeter.js";
 export { MmrMemoryReranker, PairwiseMemoryReranker } from "./agent-kernel/context/memory-reranker.js";
 export type { MemoryReranker } from "./agent-kernel/context/memory-reranker.js";
@@ -18,6 +18,7 @@ export { MultiHopRetriever } from "./agent-kernel/context/multi-hop-retriever.js
 export { SimpleQueryExpander } from "./agent-kernel/context/query-expander.js";
 export type { QueryExpander } from "./agent-kernel/context/query-expander.js";
 export { MemoryCompressor } from "./agent-kernel/context/memory-compressor.js";
+export type { CompressedMemory, MemoryCompressorDeps } from "./agent-kernel/context/memory-compressor.js";
 export * from "./agent-kernel/context/context-types.js";
 export * from "./agent-kernel/context/embedding-service.js";
 export { LlmEmbeddingService } from "./agent-kernel/context/llm-embedding-service.js";
@@ -124,3 +125,4 @@ export type {
 export * from "./providers.js";
 export * from "./errors.js";
 export * from "./llm.js";
+export { envSchema, parseEnv, env, type Env } from "./config/env.js";

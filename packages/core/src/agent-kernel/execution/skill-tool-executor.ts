@@ -9,7 +9,7 @@ export interface SkillToolExecutorDeps {
   /** 获取已安装的 skill registry 列表 */
   listSkills(): InstalledSkillRecord[];
   /** 执行 skill（由 skill-runner 包提供） */
-  runSkill(step: StepRecord): Promise<unknown>;
+  runSkill(step: StepRecord, signal?: AbortSignal): Promise<unknown>;
   /** 创建 step 记录 */
   createStep(step: {
     id: string;
@@ -87,7 +87,8 @@ export class SkillToolExecutor implements ToolExecutor {
     });
 
     try {
-      const output = await this.deps.runSkill(step);
+      // §C2: Forward the abort signal so skill execution is cancellable.
+      const output = await this.deps.runSkill(step, input.signal);
       await this.deps.updateStepStatus(step.id, "completed", output);
       const artifacts = (await this.deps.listArtifacts(input.runId))
         .filter((a) => !beforeArtifacts.has(a.id))

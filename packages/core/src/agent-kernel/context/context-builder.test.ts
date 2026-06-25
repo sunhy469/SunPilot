@@ -490,4 +490,125 @@ describe("ContextBuilder", () => {
     // Must be marked stale because the current message is a goal-change
     expect(summaryMsg!.content).toContain("CRITICALLY OUTDATED");
   });
+
+  // ── §P3: Memory retrieval metrics & feature flags ─────────────────
+
+  test("scenario 8 — memory metrics: contextSnapshot includes memoryMetrics with all fields", async () => {
+    const builder = new ContextBuilder({
+      listMessages: async () => [],
+      searchMemories: async () => [
+        {
+          id: "memory_1",
+          type: "deployment_info",
+          title: "Deploy Config",
+          content: "Use docker compose.",
+          source: "manual",
+          confidence: 0.9,
+          score: 1.2,
+        },
+        {
+          id: "memory_2",
+          type: "error_solution",
+          title: "Fix build",
+          content: "Clear node_modules.",
+          source: "agent_task_summary",
+          confidence: 0.7,
+          score: 0.6,
+        },
+      ],
+      maxContextTokens: 2000,
+      reservedOutputTokens: 200,
+    });
+
+    const context = await builder.build(input, new AbortController().signal);
+    const metrics = context.contextSnapshot?.memoryMetrics;
+
+    expect(metrics).toBeDefined();
+    expect(metrics!.initialHybridCount).toBe(2);
+    expect(metrics!.initialTotalCount).toBe(2);
+    expect(metrics!.multiHopAttempted).toBe(false);
+    expect(metrics!.multiHopAddedCount).toBe(0);
+    expect(metrics!.multiHopDurationMs).toBe(0);
+    expect(metrics!.queryExpansionAttempted).toBe(false);
+    expect(metrics!.expansionAddedCount).toBe(0);
+    expect(metrics!.rerankApplied).toBe(false);
+    expect(metrics!.rerankCandidateCount).toBe(0);
+    expect(metrics!.finalCount).toBeGreaterThanOrEqual(0);
+    expect(metrics!.includedCount).toBeGreaterThanOrEqual(0);
+    expect(metrics!.totalMemorySearchMs).toBeGreaterThanOrEqual(0);
+    expect(metrics!.featureFlags).toBeDefined();
+    expect(typeof metrics!.featureFlags.multiHop).toBe("boolean");
+    expect(typeof metrics!.featureFlags.queryExpansion).toBe("boolean");
+    expect(typeof metrics!.featureFlags.mmrRerank).toBe("boolean");
+  });
+
+  test("scenario 9 — feature flags: multi-hop not triggered when disabled", async () => {
+    // We can't easily test env var toggling in unit tests, but we can verify
+    // that the metrics correctly reflect what was attempted.
+    // With only 2 memories (< 5) and no multiHopRetriever dep, multi-hop
+    // should not be attempted.
+    const builder = new ContextBuilder({
+      listMessages: async () => [],
+      searchMemories: async () => [
+        {
+          id: "memory_1",
+          type: "user_preference",
+          title: "Pref",
+          content: "User likes dark mode.",
+          source: "user_explicit",
+          confidence: 0.9,
+          score: 1.0,
+        },
+      ],
+      maxContextTokens: 2000,
+      reservedOutputTokens: 200,
+    });
+
+    const context = await builder.build(input, new AbortController().signal);
+    const metrics = context.contextSnapshot?.memoryMetrics!;
+
+    // With 1 memory (< 3), query expansion would be triggered only if
+    // a queryExpander dep was provided — since it wasn't, expansion is not attempted
+    expect(metrics.queryExpansionAttempted).toBe(false);
+    // Multi-hop also not attempted without the dep
+    expect(metrics.multiHopAttempted).toBe(false);
+    // Reranking not applied (1 < 5 candidates)
+    expect(metrics.rerankApplied).toBe(false);
+    // Included count should match what passed token budget
+    expect(metrics.includedCount).toBeGreaterThanOrEqual(0);
+    // Total search time should be recorded
+    expect(metrics.totalMemorySearchMs).toBeGreaterThanOrEqual(0);
+  });
+
+  test("scenario 10 — memory metrics: includedCount reflects token budget trimming", async () => {
+    // Create many memories to test that includedCount is accurate after budget trimming
+    const manyMemories = Array.from({ length: 20 }, (_, i) => ({
+      id: `memory_${i}`,
+      type: "manual_note" as const,
+      title: `Memory ${i}`,
+      content: `This is the content of memory ${i} with some additional text to consume tokens in the context window budget calculation for testing purposes.`,
+      source: "manual" as const,
+      confidence: 0.8,
+      score: 1.0 - i * 0.05,
+    }));
+
+    const builder = new ContextBuilder({
+      listMessages: async () => [],
+      searchMemories: async () => manyMemories,
+      maxContextTokens: 2000, // Tight budget to force trimming
+      reservedOutputTokens: 200,
+    });
+
+    const context = await builder.build(input, new AbortController().signal);
+    const metrics = context.contextSnapshot?.memoryMetrics!;
+
+    expect(metrics).toBeDefined();
+    expect(metrics.initialHybridCount).toBe(20);
+    expect(metrics.finalCount).toBe(15); // topMemories = allMemories.slice(0, 15)
+    // After token budget: includedCount should be <= finalCount
+    expect(metrics.includedCount).toBeLessThanOrEqual(metrics.finalCount);
+    // At least some memories should survive (mandatory chunks get priority, but
+    // memory chunks have priority 15 so they may be trimmed)
+    expect(metrics.includedCount).toBeGreaterThanOrEqual(0);
+  });
 });

@@ -22,4 +22,5 @@ export * from "./postgres.world-node.repository.js";
 export * from "./postgres.world-edge.repository.js";
 export * from "./postgres.world-task.repository.js";
 export * from "./postgres.world-action.repository.js";
+export * from "./postgres.world-action-log.repository.js";
 export * from "./postgres.world-artifact.repository.js";

@@ -15,11 +15,25 @@ export function buildGraph(
   for (const edge of edges) {
     const dist = edge.distance;
     const from = graph.get(edge.fromNodeId);
-    if (from) from.push({ nodeId: edge.toNodeId, distance: dist });
+    if (from) {
+      from.push({ nodeId: edge.toNodeId, distance: dist });
+    } else {
+      // W14: edge references a non-existent node — surface the drop instead
+      // of failing silently, so broken world data is easier to diagnose.
+      console.warn(
+        `[graph] edge "${edge.id}" references unknown fromNodeId "${edge.fromNodeId}" — discarded`,
+      );
+    }
 
     if (edge.bidirectional) {
       const to = graph.get(edge.toNodeId);
-      if (to) to.push({ nodeId: edge.fromNodeId, distance: dist });
+      if (to) {
+        to.push({ nodeId: edge.fromNodeId, distance: dist });
+      } else {
+        console.warn(
+          `[graph] edge "${edge.id}" references unknown toNodeId "${edge.toNodeId}" — discarded`,
+        );
+      }
     }
   }
 

@@ -124,10 +124,10 @@ export interface KeyMetrics {
   parameterRepairRate: number;
   /** Approval pass/reject rate. */
   approvalPassRate: number;
-  /** Early stop rate (tasks completed without all steps). */
-  earlyStopRate: number;
-  /** Memory hit rate (how often recalled memories were relevant). */
-  memoryHitRate: number;
+  /** Early stop rate (0–1), or null when no signal is available. */
+  earlyStopRate: number | null;
+  /** Memory hit rate (how often recalled memories were relevant), or null when no signal is available. */
+  memoryHitRate: number | null;
   /** Average latency per phase. */
   avgLatencyByPhase: Record<string, number>;
   /** Token usage by purpose. */
@@ -333,16 +333,22 @@ export class TraceManager {
         ? (approvalSpans.length - approvalsRequired) / approvalSpans.length
         : 1;
 
-    // Average latency by phase
-    const avgLatencyByPhase: Record<string, number> = {};
+    // Average latency by phase — §B5: track running sum and count so the
+    // average is exact rather than the previous (existing+new)/2 rolling
+    // average that over-weighted recent spans.
+    const latencySumByPhase: Record<string, number> = {};
+    const latencyCountByPhase: Record<string, number> = {};
     for (const span of allSpans) {
-      const existing = avgLatencyByPhase[span.kind];
-      if (existing === undefined) {
-        avgLatencyByPhase[span.kind] = span.timing.durationMs;
-      } else {
-        avgLatencyByPhase[span.kind] =
-          (existing + span.timing.durationMs) / 2;
-      }
+      latencySumByPhase[span.kind] =
+        (latencySumByPhase[span.kind] ?? 0) + span.timing.durationMs;
+      latencyCountByPhase[span.kind] =
+        (latencyCountByPhase[span.kind] ?? 0) + 1;
+    }
+    const avgLatencyByPhase: Record<string, number> = {};
+    for (const kind of Object.keys(latencySumByPhase)) {
+      const sum = latencySumByPhase[kind]!;
+      const count = latencyCountByPhase[kind]!;
+      avgLatencyByPhase[kind] = count > 0 ? sum / count : 0;
     }
 
     // Token usage by purpose
@@ -362,17 +368,16 @@ export class TraceManager {
         span.metrics.tokenOutput ?? 0;
     }
 
-    // Early stop rate (tasks completed without executing all planned tool steps)
-    const contextSpans = allSpans.filter(
-      (s) => s.kind === "context_building",
-    );
-    const earlyStopRate = 0; // Updated by AgentLoopEngine when it detects early stops
+    // Early stop rate (tasks completed without executing all planned tool steps).
+    // §B21: no span currently carries a "planned vs executed step" signal, so
+    // we cannot compute a real value. Return null to signal "unknown" rather
+    // than the misleading hardcoded 0 (which falsely reports 0% early stops).
+    const earlyStopRate: number | null = null;
 
-    // Memory hit rate
-    const memorySpans = allSpans.filter(
-      (s) => s.kind === "memory_writing",
-    );
-    const memoryHitRate = 0; // Updated by ContextBuilder when it evaluates memory recall
+    // Memory hit rate — how often recalled memories were relevant.
+    // §B21: requires a relevance signal from the context builder that is not
+    // recorded on any span today. Return null instead of a fake 0.
+    const memoryHitRate: number | null = null;
 
     return {
       toolCallSuccessRate,

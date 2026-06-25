@@ -25,6 +25,7 @@ export function useBeingMovement(worldAppRef: React.MutableRefObject<WorldApp | 
     if (animatorRef.current) {
       animatorRef.current.stop();
       animatorRef.current = null;
+      world.registerAnimator(null);
     }
 
     const graph = buildGraph(world.nodes, world.edges);
@@ -51,10 +52,14 @@ export function useBeingMovement(worldAppRef: React.MutableRefObject<WorldApp | 
       const targetNode = world.nodes.find((n) => n.id === targetNodeId);
       world.updateBeingStatus(`已到达${targetNode?.name ?? targetNodeId}`);
       world.updateBeingVisualStatus("idle");
+      world.registerAnimator(null);
       animatorRef.current = null;
     });
 
     animatorRef.current = animator;
+    // C19/W7: register so WorldApp knows an animation is running (skips
+    // polling position jumps) and can stop it cleanly on destroy.
+    world.registerAnimator(animator);
     animator.start();
   }, [worldAppRef]);
 

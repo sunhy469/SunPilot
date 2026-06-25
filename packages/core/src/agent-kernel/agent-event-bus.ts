@@ -110,7 +110,18 @@ export class InMemoryAgentEventBus implements AgentEventBus {
   async flush(): Promise<void> {
     // Drain all pending async listeners.  New listeners may be enqueued
     // while we drain, so loop until the set is truly empty.
+    // §B20: cap iterations to prevent an infinite loop when a listener
+    // synchronously re-emits events on each resolve.
+    const MAX_FLUSH_ITERATIONS = 50;
+    let iteration = 0;
     while (this.pending.size > 0) {
+      if (iteration >= MAX_FLUSH_ITERATIONS) {
+        console.warn(
+          `[AgentEventBus] flush exceeded ${MAX_FLUSH_ITERATIONS} iterations with ${this.pending.size} pending tasks; breaking to avoid infinite loop`,
+        );
+        break;
+      }
+      iteration++;
       const snapshot = Array.from(this.pending);
       await Promise.all(snapshot);
     }

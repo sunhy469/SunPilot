@@ -194,20 +194,9 @@ export class ExecutionOrchestrator implements ExecutionOrchestratorInterface {
 
         // If we have an argument builder, attempt repair
         if (this.deps.argumentBuilder && repairAttempt < MAX_REPAIR_ATTEMPTS) {
-          this.deps.eventBus.emit(
-            "agent.tool_argument.validation_failed",
-            {
-              runId,
-              toolCallId: call.id,
-              skillId: call.skillId,
-              name: call.name,
-              validationErrors,
-              failedArguments: { ...currentArgs },
-              schema: currentSchema,
-            },
-            { runId },
-          );
-
+          // §B15: the validation_failed event is emitted once at the final
+          // failure point below; don't duplicate it here before each repair
+          // attempt (the repairHistory array already records each attempt).
           try {
             const repairEntry: Record<string, unknown> = {
               attempt: repairAttempt,
@@ -227,8 +216,8 @@ export class ExecutionOrchestrator implements ExecutionOrchestratorInterface {
             repairEntry.afterArgs = { ...repaired.arguments };
             repairEntry.repairSource = "heuristic";
             repairHistory.push(repairEntry);
+            // §B15: don't mutate the input `call` object — track locally.
             currentArgs = repaired.arguments;
-            call.arguments = currentArgs;
             continue;
           } catch {
             // Repair failed — fall through to mark as failed
@@ -307,7 +296,10 @@ export class ExecutionOrchestrator implements ExecutionOrchestratorInterface {
       runId,
       skillId: call.skillId,
       name: call.name,
-      arguments: call.arguments,
+      // §B15: use the locally-tracked currentArgs (may differ from the
+      // original call.arguments if repair succeeded) instead of mutating
+      // the input call object.
+      arguments: currentArgs,
       status: "running",
       riskLevel: normalizeRiskLevel(call.riskLevel),
       startedAt: now,
@@ -321,14 +313,16 @@ export class ExecutionOrchestrator implements ExecutionOrchestratorInterface {
             : undefined,
         wasRepaired:
           repairHistory.length > 0
-            ? { originalArgs, repairedArgs: call.arguments }
+            ? { originalArgs, repairedArgs: currentArgs }
             : undefined,
       },
     });
 
     let lastError: Error | undefined;
 
-    for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    // §B15: `<=` would execute MAX_RETRIES+1 total attempts (off-by-one);
+    // use `<` so the loop runs exactly MAX_RETRIES times.
+    for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
       try {
         // Emit tool.started event for each attempt
         this.deps.eventBus.emit(

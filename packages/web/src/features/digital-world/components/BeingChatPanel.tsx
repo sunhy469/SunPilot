@@ -1,5 +1,5 @@
 import { Drawer, Input, Button, List } from "antd";
-import { useState, useMemo } from "react";
+import { useState, useEffect, useRef } from "react";
 import "./BeingChatPanel.scss";
 
 interface ChatMessage {
@@ -17,6 +17,18 @@ interface BeingChatPanelProps {
 export function BeingChatPanel({ open, beingName, onClose }: BeingChatPanelProps) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
+  // W2: track the pending assistant-response timer so it can be cleared on
+  // unmount (avoids setState-after-unmount and stray updates).
+  const replyTimerRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (replyTimerRef.current !== null) {
+        window.clearTimeout(replyTimerRef.current);
+        replyTimerRef.current = null;
+      }
+    };
+  }, []);
 
   const handleSend = () => {
     if (!input.trim()) return;
@@ -28,8 +40,12 @@ export function BeingChatPanel({ open, beingName, onClose }: BeingChatPanelProps
     setMessages((prev) => [...prev, userMsg]);
     setInput("");
 
-    // Phase 6: placeholder response
-    setTimeout(() => {
+    // Phase 6: placeholder mock response (TODO: replace with real being chat API)
+    if (replyTimerRef.current !== null) {
+      window.clearTimeout(replyTimerRef.current);
+    }
+    replyTimerRef.current = window.setTimeout(() => {
+      replyTimerRef.current = null;
       const assistantMsg: ChatMessage = {
         id: `msg_${Date.now()}_resp`,
         role: "assistant",

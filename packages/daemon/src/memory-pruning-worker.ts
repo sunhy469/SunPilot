@@ -31,6 +31,9 @@ export class MemoryPruningWorker {
     if (this.timer) return;
     const interval = this.deps.intervalMs ?? 3_600_000; // 1 hour default
     this.timer = setInterval(() => this.prune(), interval);
+    // A17: unref so the timer doesn't keep the event loop alive, allowing
+    // the daemon to exit gracefully during shutdown.
+    this.timer.unref();
     console.log(
       `[memory-pruning] Worker started — interval=${interval}ms ` +
       `softDeleteRetention=${this.deps.softDeleteRetentionDays ?? 30}d ` +

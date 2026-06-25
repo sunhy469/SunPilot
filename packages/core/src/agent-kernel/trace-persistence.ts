@@ -102,16 +102,14 @@ export class RepositoryTraceManager {
         ...(metrics.finalTokenMs !== undefined ? { finalTokenMs: metrics.finalTokenMs } : {}),
       };
 
-      // Update span in DB with completed data
+      // Obs6: UPDATE the existing span row (created by startSpan) instead of
+      // inserting a duplicate. createSpan's ON CONFLICT clause only refreshes
+      // a subset of columns (end_ms, duration_ms, summary, error, error_code,
+      // metadata), so token/tool/model counts would be silently dropped.
+      // updateSpan persists the full endSpan payload via a plain UPDATE.
       this.traceRepo
-        .createSpan({
-          id: span.spanId,
-          traceId: span.traceId,
-          parentSpanId: span.parentSpanId,
-          runId,
-          kind: span.kind,
+        .updateSpan(span.spanId, {
           summary: span.summary,
-          startMs: span.timing.startMs,
           endMs: span.timing.endMs,
           durationMs: span.timing.durationMs,
           tokenInput: metrics.tokenInput,

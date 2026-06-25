@@ -7,6 +7,9 @@ import type {
 } from './loop-types.js';
 import { isTerminal, LEGAL_TRANSITIONS } from './state/run-state-machine.js';
 
+/** §B8: cap in-memory status history to prevent unbounded growth. */
+const MAX_HISTORY = 1000;
+
 export interface RunState {
   runId: string;
   conversationId: string;
@@ -147,6 +150,25 @@ export class InMemoryRunStateManager implements RunStateManager {
       });
     }
 
+    // §B11: never bypass the state machine. If the current status is already
+    // terminal or cannot legally transition to `failed`, surface the conflict
+    // instead of silently writing a terminal state.
+    if (isTerminal(current.status as AgentLoopStatus)) {
+      console.warn(
+        `[RunStateManager] run ${runId} is already terminal (${current.status}), ignoring markFailed`,
+      );
+      return current;
+    }
+    const allowed = LEGAL_TRANSITIONS[current.status as AgentLoopStatus];
+    if (!allowed || !allowed.includes('failed')) {
+      throw Object.assign(
+        new Error(
+          `Illegal state transition: ${current.status} -> failed for run ${runId}`,
+        ),
+        { code: 'AGENT_RUN_STATE_CONFLICT' },
+      );
+    }
+
     const now = new Date().toISOString();
     const updated: RunState = {
       ...current,
@@ -198,6 +220,11 @@ export class InMemoryRunStateManager implements RunStateManager {
       actor: AuditActor.System,
       createdAt: new Date().toISOString(),
     });
+    // §B8: cap in-memory history to prevent unbounded growth in long-running
+    // processes. Drop the oldest entries first.
+    if (this.history.length > MAX_HISTORY) {
+      this.history.splice(0, this.history.length - MAX_HISTORY);
+    }
   }
 
   /** Get status history for a run (for debugging/recovery). */

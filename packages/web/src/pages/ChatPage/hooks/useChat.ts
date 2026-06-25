@@ -685,6 +685,14 @@ function activityFromAgentEvent(
   }
 }
 
+// W6: WebSocket reconnection parameters (exponential backoff).
+const RECONNECT_BASE_DELAY = 1000; // initial 1s
+const RECONNECT_MAX_DELAY = 30_000; // cap at 30s
+const RECONNECT_MAX_ATTEMPTS = 10; // give up after 10 tries
+// W6: pong timeout — if no pong arrives within this window after a ping, the
+// connection is considered half-open and we close it to trigger a reconnect.
+const PONG_TIMEOUT_MS = 30_000;
+
 export function useChat(
   conversationId: string,
   setConversationId: (id: string) => void,
@@ -702,6 +710,12 @@ export function useChat(
   const socketRef = useRef<WebSocket | null>(null);
   const responseTimerRef = useRef<number | null>(null);
   const keepAliveTimerRef = useRef<number | null>(null);
+  // W6: reconnection backoff + pong-timeout tracking
+  const reconnectTimerRef = useRef<number | null>(null);
+  const reconnectAttemptsRef = useRef(0);
+  const pongTimeoutTimerRef = useRef<number | null>(null);
+  // W6: flag to suppress reconnection when closeSocket() is called intentionally
+  const intentionalCloseRef = useRef(false);
   const pendingRef = useRef(false);
   const onConversationCreatedRef = useRef(onConversationCreated);
   onConversationCreatedRef.current = onConversationCreated;
@@ -771,6 +785,17 @@ export function useChat(
   );
 
   const closeSocket = useCallback(() => {
+    // W6: cancel any pending reconnect / pong-timeout timers so an
+    // intentional close doesn't get undone by a scheduled reconnect.
+    intentionalCloseRef.current = true;
+    if (reconnectTimerRef.current !== null) {
+      window.clearTimeout(reconnectTimerRef.current);
+      reconnectTimerRef.current = null;
+    }
+    if (pongTimeoutTimerRef.current !== null) {
+      window.clearTimeout(pongTimeoutTimerRef.current);
+      pongTimeoutTimerRef.current = null;
+    }
     if (keepAliveTimerRef.current !== null) {
       window.clearInterval(keepAliveTimerRef.current);
       keepAliveTimerRef.current = null;
@@ -1003,6 +1028,8 @@ export function useChat(
   const ensureSocket = useCallback(() => {
     if (socketRef.current && socketRef.current.readyState <= WebSocket.OPEN)
       return socketRef.current;
+    // W6: reset the intentional-close flag when opening a new connection
+    intentionalCloseRef.current = false;
     const socket = createChatSocket();
     socketRef.current = socket;
     const openTimer = window.setTimeout(() => {
@@ -1017,6 +1044,10 @@ export function useChat(
     }, 10_000);
     socket.addEventListener("open", () => {
       window.clearTimeout(openTimer);
+      // W6: connection (re)established — reset the backoff counter and
+      // the intentional-close flag (a new connection is not intentional close).
+      intentionalCloseRef.current = false;
+      reconnectAttemptsRef.current = 0;
       setStatus((current) => (current === "thinking" ? "thinking" : "online"));
       setError("");
       if (keepAliveTimerRef.current !== null)
@@ -1031,6 +1062,14 @@ export function useChat(
               params: {},
             }),
           );
+          // W6: pong timeout — if no pong arrives within PONG_TIMEOUT_MS, the
+          // connection is half-open; close it to trigger a reconnect.
+          if (pongTimeoutTimerRef.current !== null)
+            window.clearTimeout(pongTimeoutTimerRef.current);
+          pongTimeoutTimerRef.current = window.setTimeout(() => {
+            pongTimeoutTimerRef.current = null;
+            if (socket.readyState === WebSocket.OPEN) socket.close();
+          }, PONG_TIMEOUT_MS);
         }
       }, 25_000);
     });
@@ -1053,11 +1092,38 @@ export function useChat(
         window.clearInterval(keepAliveTimerRef.current);
         keepAliveTimerRef.current = null;
       }
+      // W6: clear the pending pong-timeout timer (no socket to wait on anymore)
+      if (pongTimeoutTimerRef.current !== null) {
+        window.clearTimeout(pongTimeoutTimerRef.current);
+        pongTimeoutTimerRef.current = null;
+      }
       if (socketRef.current === socket) socketRef.current = null;
       setStatus("offline");
       setPendingState(false);
       if (wasPending && event.code !== 1000 && event.code !== 4000) {
         setError(event.reason || "WebSocket 连接已断开，请重试。");
+      }
+      // W6: schedule an automatic reconnect with exponential backoff for
+      // non-intentional closures (not code 1000/4000 and not flagged as
+      // intentional), up to a max number of tries.
+      if (
+        !intentionalCloseRef.current &&
+        event.code !== 1000 &&
+        event.code !== 4000 &&
+        reconnectAttemptsRef.current < RECONNECT_MAX_ATTEMPTS
+      ) {
+        const attempt = reconnectAttemptsRef.current;
+        const delay = Math.min(
+          RECONNECT_BASE_DELAY * 2 ** attempt,
+          RECONNECT_MAX_DELAY,
+        );
+        reconnectAttemptsRef.current += 1;
+        if (reconnectTimerRef.current !== null)
+          window.clearTimeout(reconnectTimerRef.current);
+        reconnectTimerRef.current = window.setTimeout(() => {
+          reconnectTimerRef.current = null;
+          ensureSocket();
+        }, delay);
       }
     });
     socket.addEventListener("message", (raw) => {
@@ -1151,7 +1217,15 @@ export function useChat(
         return;
       }
 
-      if (event.method === "pong") return;
+      if (event.method === "pong") {
+        // W6: server responded — clear the pong-timeout timer so it doesn't
+        // close a healthy connection.
+        if (pongTimeoutTimerRef.current !== null) {
+          window.clearTimeout(pongTimeoutTimerRef.current);
+          pongTimeoutTimerRef.current = null;
+        }
+        return;
+      }
 
       applyAgentEvent(event);
       const activity = activityFromAgentEvent(event);

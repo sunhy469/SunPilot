@@ -269,7 +269,7 @@ describe("AssistantMessageStream", () => {
     expect(result.content).not.toContain("Found results");
   });
 
-  it("complete marks still-open transient parts as completed", async () => {
+  it("complete finalizes still-open transient parts", async () => {
     const status = stream.startStatus({
       label: "正在整理结果...",
     });
@@ -293,9 +293,12 @@ describe("AssistantMessageStream", () => {
       status: "completed",
       metadata: expect.objectContaining({ phase: "completed" }),
     });
+    // §B33: a tool_use left pending/running at finalization is marked
+    // "interrupted" (not "completed") so consumers can distinguish
+    // forcibly-closed tool calls from genuinely completed ones.
     expect(completedToolUse).toMatchObject({
       type: "tool_use",
-      status: "completed",
+      status: "interrupted",
     });
     expect(completedText).toMatchObject({ type: "text", status: "completed" });
     expect(saveMessage).toHaveBeenCalledWith(

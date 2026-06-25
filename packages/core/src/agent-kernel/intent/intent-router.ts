@@ -352,7 +352,23 @@ User message: "${message}"
     // Parse "use_skill:<skill-id>" format
     if (normalized.startsWith("use_skill:")) {
       const skillId = normalized.slice("use_skill:".length).trim();
-      return this.defaultsForType("use_skill", skillId);
+      // §B18: validate the LLM-selected skillId actually exists in the
+      // catalog. LLMs occasionally hallucinate skill IDs (or trim suffixes);
+      // accept the parsed ID only when it matches an available skill.
+      // Otherwise fall through to Layer 3 unknown rather than emitting an
+      // intent that points at a non-existent skill. Comparison is
+      // case-insensitive because the LLM response is already lowercased.
+      const matched = context.availableSkills.find(
+        (s) => s.id.toLowerCase() === skillId,
+      );
+      if (!skillId || !matched) {
+        console.warn(
+          `[intent-router] LLM returned use_skill:${skillId || "(empty)"} but no such skill exists; falling back to Layer 3`,
+        );
+        return null;
+      }
+      // Use the canonical ID from the catalog, not the LLM-cased variant.
+      return this.defaultsForType("use_skill", matched.id);
     }
 
     const validTypes = [
@@ -482,11 +498,20 @@ User message: "${message}"
  * Returns a value in [0, 1] where 1 means identical direction.
  */
 function cosineSimilarity(a: number[], b: number[]): number {
-  const len = Math.min(a.length, b.length);
+  // §B4: dimension mismatch usually means comparing embeddings from
+  // different models / providers — silently truncating would produce a
+  // meaningless score. Fail closed (0) and log so the operator can fix the
+  // configuration.
+  if (a.length !== b.length) {
+    console.warn(
+      `[intent-router] cosineSimilarity dimension mismatch: ${a.length} vs ${b.length}; returning 0`,
+    );
+    return 0;
+  }
   let dot = 0;
   let normA = 0;
   let normB = 0;
-  for (let i = 0; i < len; i++) {
+  for (let i = 0; i < a.length; i++) {
     dot += a[i]! * b[i]!;
     normA += a[i]! * a[i]!;
     normB += b[i]! * b[i]!;

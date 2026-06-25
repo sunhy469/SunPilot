@@ -24,8 +24,12 @@ export class StaleDetectionWorker {
     if (this.timer) return;
     const interval = this.deps.intervalMs ?? 300_000; // 5 min default
     this.timer = setInterval(() => this.scan(), interval);
+    // A17: unref timers so they don't keep the event loop alive, allowing
+    // the daemon to exit gracefully during shutdown.
+    this.timer.unref();
     // Run first scan after 30s to avoid competing with startup
-    setTimeout(() => this.scan(), 30_000);
+    const initial = setTimeout(() => this.scan(), 30_000);
+    initial.unref();
     console.log(
       `[stale-detection] Worker started — interval=${interval}ms`,
     );

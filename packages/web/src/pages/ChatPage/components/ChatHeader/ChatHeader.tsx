@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Typography, Button, Dropdown, Modal, Input, Popover, Badge, Tooltip } from "antd";
+import { Typography, Button, Dropdown, Modal, Input, Popover, Badge, Tooltip, App } from "antd";
 import {
   MoreOutlined,
   EditOutlined,
@@ -34,6 +34,7 @@ export function ChatHeader({
 }: ChatHeaderProps) {
   const [renameModalOpen, setRenameModalOpen] = useState(false);
   const [renameValue, setRenameValue] = useState("");
+  const { message } = App.useApp();
 
   const handleRenameOpen = () => {
     if (conversation) {
@@ -42,9 +43,16 @@ export function ChatHeader({
     }
   };
 
-  const handleRenameOk = () => {
+  const handleRenameOk = async () => {
     if (conversation && renameValue.trim() && onRename) {
-      void onRename(conversation.id, renameValue.trim());
+      try {
+        await onRename(conversation.id, renameValue.trim());
+      } catch (error) {
+        message.error(
+          `重命名失败：${error instanceof Error ? error.message : String(error)}`,
+        );
+        return;
+      }
     }
     setRenameModalOpen(false);
     setRenameValue("");

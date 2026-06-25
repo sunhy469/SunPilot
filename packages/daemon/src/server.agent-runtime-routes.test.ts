@@ -1,7 +1,7 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, test } from "vitest";
+import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import {
   AuditActor,
   type ApprovalRecord,
@@ -9,18 +9,38 @@ import {
   type RunRecord,
   type SunPilotEvent,
 } from "@sunpilot/protocol";
-import { InMemoryDatabaseContext } from "@sunpilot/storage";
+import { InMemoryDatabaseContext, getSunPilotPaths } from "@sunpilot/storage";
 import { createDaemon } from "./server.js";
 
 describe("daemon Agent runtime REST routes", () => {
   let daemon: Awaited<ReturnType<typeof createDaemon>> | undefined;
   let tempDirs: string[] = [];
+  let previousTokenAuth: string | undefined;
+  let previousHome: string | undefined;
+
+  beforeEach(() => {
+    // These suites exercise REST routing, not the local token auth gate.
+    // Disable token auth so injected requests without a Bearer token succeed.
+    previousTokenAuth = process.env.SUNPILOT_DISABLE_TOKEN_AUTH;
+    process.env.SUNPILOT_DISABLE_TOKEN_AUTH = "1";
+    previousHome = process.env.SUNPILOT_HOME;
+  });
 
   afterEach(async () => {
     await daemon?.stop();
     daemon = undefined;
     for (const dir of tempDirs.splice(0)) {
       rmSync(dir, { recursive: true, force: true });
+    }
+    if (previousTokenAuth === undefined) {
+      delete process.env.SUNPILOT_DISABLE_TOKEN_AUTH;
+    } else {
+      process.env.SUNPILOT_DISABLE_TOKEN_AUTH = previousTokenAuth;
+    }
+    if (previousHome === undefined) {
+      delete process.env.SUNPILOT_HOME;
+    } else {
+      process.env.SUNPILOT_HOME = previousHome;
     }
   });
 
@@ -918,8 +938,13 @@ describe("daemon Agent runtime REST routes", () => {
 
   test("lists artifact metadata and streams artifact content through REST", async () => {
     const db = new InMemoryDatabaseContext();
-    const artifactDir = mkdtempSync(join(tmpdir(), "sunpilot-artifact-"));
-    tempDirs.push(artifactDir);
+    // Use the daemon's actual artifacts directory so the path traversal
+    // check in the content streaming route allows the file.
+    const sunpilotHome = mkdtempSync(join(tmpdir(), "sunpilot-home-"));
+    tempDirs.push(sunpilotHome);
+    process.env.SUNPILOT_HOME = sunpilotHome;
+    const artifactDir = getSunPilotPaths().artifacts;
+    mkdirSync(artifactDir, { recursive: true });
     const artifactPath = join(artifactDir, "report.md");
     writeFileSync(artifactPath, "# Report\n\nDone.\n");
     const artifact: ArtifactRecord = {

@@ -18,10 +18,10 @@ export function UserMessage({ message }: { message: ChatMessage }) {
           {hasAttachments && (
             <Flex gap={8} wrap="wrap" className="user-attachments">
               {message.attachments!.map((att) =>
-                isImageType(att) && att.url ? (
+                isImageType(att) && (att.url || att.dataUrl) ? (
                   <div key={att.id} className="user-attachment-image">
                     <Image
-                      src={att.url}
+                      src={att.url ?? att.dataUrl}
                       alt={att.name}
                       width="100%"
                       style={{ maxWidth: 200, borderRadius: 8, objectFit: "cover" }}

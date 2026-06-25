@@ -2,6 +2,7 @@ import type { AgentService } from "@sunpilot/core";
 import type { DatabaseContext } from "@sunpilot/storage";
 import {
   approvalDecideSchema,
+  approvalRejectSchema,
   chatSendSchema,
   chatStopSchema,
   conversationSubscribeSchema,
@@ -200,7 +201,7 @@ export class JsonRpcRouter {
 
       case "approval.reject": {
         const { approvalId, actor, reason, strategy } =
-          approvalDecideSchema.parse(command.params ?? {});
+          approvalRejectSchema.parse(command.params ?? {});
         const agent = await this.deps.getChatAgent();
         return {
           result: await agent.reject(approvalId, actor, reason, strategy),
