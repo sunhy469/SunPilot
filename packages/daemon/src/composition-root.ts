@@ -441,10 +441,19 @@ export function createAgentLoopService(deps: {
   // The embeddingService (Layer 1) handles ~80% of natural-language
   // tool selection, eliminating the old regex semantic-matching path
   // that caused false positives on queries like "搜索一下日照旅游攻略".
+  // §P3 opt: Allow operators to tune the embedding short-circuit threshold.
+  // Lower values (≥ 0.75) increase the rate at which Layer 1 embedding
+  // matching skips the Layer 2 LLM call, reducing latency at the cost
+  // of potentially higher false-positive rates.
+  const embeddingThreshold = parseFloat(
+    env.SUNPILOT_INTENT_EMBEDDING_THRESHOLD ?? "0.95",
+  );
+
   const intentRouter = new IntentRouter({
     llm: intentLlm,
     embeddingService,
     skillEmbeddingCache,
+    embeddingShortCircuitThreshold: embeddingThreshold,
   });
 
   // ── Tools ──────────────────────────────────────────────────────
@@ -708,6 +717,11 @@ export function createAgentLoopService(deps: {
     injectionDetector,
     toolSandbox,
     scopedPermissionManager,
+    // §P3 opt: Pre-inference runs an LLM call in parallel with context
+    // building to classify intent early. When it completes before intent
+    // routing, the main IntentRouter skips its own Layer 2 LLM call,
+    // saving ~200-800ms per request.
+    enablePreliminaryInference: true,
     // ── Plan snapshot persistence (§P0-2) ──────────────────────────
     planSnapshotRepo: deps.database.planSnapshots,
     // ── Tool call persistence for safety audits (§P0-3) ────────────

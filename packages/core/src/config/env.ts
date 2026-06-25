@@ -53,6 +53,11 @@ export const envSchema = z.object({
   SUNPILOT_SANDBOX_MODE: z
     .enum(["strict", "moderate", "permissive"])
     .default("moderate"),
+
+  /** §P3: Minimum cosine similarity for Layer 1 embedding short-circuit.
+   *  Lower values increase short-circuit rate at the cost of potential
+   *  false positives. Clamped to [0.75, 0.98] at runtime. Default: 0.95. */
+  SUNPILOT_INTENT_EMBEDDING_THRESHOLD: z.string().default("0.95"),
 });
 
 export type Env = z.infer<typeof envSchema>;

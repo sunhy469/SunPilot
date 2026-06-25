@@ -262,14 +262,22 @@ export class AgentLoopEngine {
       // user message + system prompt (no context) and does NOT write to
       // the formal AssistantMessageStream — it only collects text and
       // tool hints.
+      // §P3 opt: The pre-inference promise is passed into buildContextAndIntent
+      // so it can be awaited AFTER context building but BEFORE intent routing.
+      // This lets the pre-inference result skip the main IntentRouter Layer 2
+      // LLM call when it completes quickly enough.
       const preliminaryPromise = this.deps.enablePreliminaryInference && this.deps.modelRouter
         ? this.runPreliminaryInference(input, signal)
-        : Promise.resolve(undefined as PreliminaryInferenceResult | undefined);
+        : undefined;
 
-      const contextPromise = this.buildContextAndIntent(input, signal);
-
-      // Wait for context building first — this is the critical path.
-      const { context, intent } = await contextPromise;
+      // §P3 opt: buildContextAndIntent awaits the pre-inference internally
+      // after context building and before intent routing.
+      const { context, intent } = await this.buildContextAndIntent(
+        input,
+        signal,
+        undefined, // pre-inference result not yet available — see below
+        preliminaryPromise, // promise passed for internal await
+      );
 
       // §P1-1: Update progress status — context is ready, now showing intent
       if (stream && progressStatusId) {
@@ -280,15 +288,12 @@ export class AgentLoopEngine {
         });
       }
 
-      // Get pre-inference result with a short timeout so it never blocks
-      // the main path. If pre-inference is slower than context building,
-      // we don't wait for it beyond a small grace period.
-      // §B19: use racePreliminaryWithTimeout so the timer is cleared when
-      // the primary promise wins — previously the 300ms setTimeout kept
-      // the event loop alive and fired a no-op resolve after preliminary
-      // already resolved.
+      // Get pre-inference result (may have already been consumed inside
+      // buildContextAndIntent — this is a no-op if it resolved there).
+      // §P3 opt: Increased grace timeout to 1500ms so pre-inference has
+      // enough time to complete before we need it for tool decisions.
       const preliminary = preliminaryPromise
-        ? await racePreliminaryWithTimeout(preliminaryPromise, 300)
+        ? await racePreliminaryWithTimeout(preliminaryPromise, 1500)
         : undefined;
 
       // §P1-1: Update progress status when entering planning
@@ -423,24 +428,38 @@ export class AgentLoopEngine {
         fullText += chunk.delta;
       }
 
-      // Extract tool hints from the pre-inference text
-      const toolHints = this.extractToolHints(fullText, input);
+      // §P3 opt: Extract full intent + tool hints from the pre-inference JSON.
+      // When intent confidence ≥ 0.7, the main IntentRouter can skip its
+      // own Layer 2 LLM call, saving ~200-800ms.
+      const parsed = this.parsePreInferenceResponse(fullText);
+      const toolHints = parsed.toolHints;
+      const intentType = parsed.intentType;
+      const intentConfidence = parsed.intentConfidence;
 
       // Record trace metadata for observability
       if (this.deps.traceManager) {
-        const { endSpan } = this.deps.traceManager.startSpan(input.runId, "intent_routing");
+        const preInferenceMs = Date.now() - t0;
+        const { endSpan } = this.deps.traceManager.startSpan(input.runId, "pre_inference_await");
         endSpan("preliminary_inference_completed", {
           modelCalls: 1,
+          latencyMs: preInferenceMs,
+          // §P3: Track pre-inference intent quality for observability
+          preInferenceIntentType: intentType,
+          preInferenceConfidence: intentConfidence,
+          preInferenceLatencyMs: preInferenceMs,
         });
       }
 
-      return { text: fullText, toolHints };
+      return { text: fullText, toolHints, intentType, intentConfidence };
     } catch (error) {
       // Pre-inference is best-effort — never block the main flow.
       // Record failure in trace for observability.
       if (this.deps.traceManager) {
-        const { endSpan } = this.deps.traceManager.startSpan(input.runId, "intent_routing");
-        endSpan("preliminary_inference_failed", {}, error instanceof Error ? error.message : String(error));
+        const { endSpan } = this.deps.traceManager.startSpan(input.runId, "pre_inference_await");
+        endSpan("preliminary_inference_failed", {
+          latencyMs: Date.now() - t0,
+          preInferenceError: error instanceof Error ? error.message : String(error),
+        });
       }
       return undefined;
     }
@@ -463,24 +482,49 @@ Rules:
 Keep your response to the JSON object ONLY — no preamble, no explanation.`;
   }
 
-  /** Extract tool-matching hints from the pre-inference text.
-   *  §P2: Parses the structured JSON response from pre-inference prompt.
-   *  Falls back to empty hints if JSON parsing fails. */
-  private extractToolHints(
+  /** §P3 opt: Parse the pre-inference JSON response, extracting both intent
+   *  classification and tool-matching hints. The intent result is used to
+   *  skip the main IntentRouter's Layer 2 LLM call when confidence ≥ 0.7.
+   *  Falls back gracefully if JSON parsing fails. */
+  private parsePreInferenceResponse(
     preText: string,
-    _input: AgentLoopInput,
-  ): PreliminaryInferenceResult["toolHints"] {
+  ): {
+    intentType?: string;
+    intentConfidence?: number;
+    toolHints?: PreliminaryInferenceResult["toolHints"];
+  } {
     try {
       // Try to extract JSON from the response (may have markdown wrapping)
       const jsonMatch = preText.match(/\{[\s\S]*\}/);
-      if (!jsonMatch) return undefined;
+      if (!jsonMatch) return {};
       const parsed = JSON.parse(jsonMatch[0]) as {
         intentCategory?: string;
         toolHints?: Array<{ category: string; confidence: number }>;
         isSimpleChat?: boolean;
       };
-      if (!parsed.toolHints || parsed.toolHints.length === 0) return undefined;
-      // Map categories to skill IDs based on known patterns
+
+      // §P3: Map pre-inference intentCategory to AgentLoop intent type.
+      // The pre-inference prompt categories are broader than the intent
+      // router's categories — we need to bridge them.
+      const intentTypeMap: Record<string, string> = {
+        "casual_chat": "casual_chat",
+        "product_search": "use_skill",
+        "image_analysis": "use_skill",
+        "data_analysis": "question_answering",
+        "web_search": "question_answering",
+        "file_operation": "file_operation",
+        "unknown": "unknown",
+      };
+      const rawCategory = parsed.intentCategory ?? "unknown";
+      const intentType = intentTypeMap[rawCategory] ?? "unknown";
+      // Confidence: 0.8 for pre-inference since it's a lightweight call.
+      // Bump to 0.9 for casual_chat (very reliable) and 0.7 for unknown (less reliable).
+      let intentConfidence: number;
+      if (rawCategory === "casual_chat") intentConfidence = 0.9;
+      else if (rawCategory === "unknown") intentConfidence = 0.7;
+      else intentConfidence = 0.8;
+
+      // Tool hints (existing logic)
       const categoryToSkillMap: Record<string, string[]> = {
         "product sourcing": ["jaderoad:product.source.search1688"],
         "image analysis": ["image.analyze"],
@@ -488,9 +532,9 @@ Keep your response to the JSON object ONLY — no preamble, no explanation.`;
         "web search": ["web.search"],
         "file operation": ["filesystem.read", "filesystem.write"],
       };
-      const hints = parsed.toolHints
-        .filter((h) => h.confidence >= 0.5)
-        .flatMap((h) => {
+      const hints = (parsed.toolHints ?? [])
+        .filter((h: { confidence: number }) => h.confidence >= 0.5)
+        .flatMap((h: { category: string; confidence: number }) => {
           const skillIds = categoryToSkillMap[h.category.toLowerCase()] ?? [];
           return skillIds.map((skillId) => ({
             skillId,
@@ -498,16 +542,26 @@ Keep your response to the JSON object ONLY — no preamble, no explanation.`;
           }));
         })
         .slice(0, 5);
-      return hints.length > 0 ? hints : undefined;
+
+      return {
+        intentType,
+        intentConfidence,
+        toolHints: hints.length > 0 ? hints : undefined,
+      };
     } catch {
-      return undefined;
+      return {};
     }
   }
 
-  /** 阶段 1+2：上下文构建 + 意图路由。 */
+  /** 阶段 1+2：上下文构建 + 意图路由。
+   *  §P3 opt: Accepts optional pre-inference promise. After context building,
+   *  awaits the pre-inference with a timeout and uses its result to skip
+   *  IntentRouter Layer 2 when available. */
   private async buildContextAndIntent(
     input: AgentLoopInput,
     signal: AbortSignal,
+    preInference?: { intentType?: string; intentConfidence?: number },
+    preInferencePromise?: Promise<PreliminaryInferenceResult | undefined>,
   ): Promise<{ context: AgentContext; intent: RoutedIntent }> {
     const { runId, conversationId } = input;
 
@@ -560,6 +614,43 @@ Keep your response to the JSON object ONLY — no preamble, no explanation.`;
       },
     );
 
+    // §P3 opt: After context is built, await the pre-inference promise
+    // with a timeout. If it completed during context building (common case),
+    // this returns instantly. Otherwise wait up to 1500ms. The pre-inference
+    // result lets us skip the main IntentRouter Layer 2 LLM call.
+    let preInferenceResult: { intentType?: string; intentConfidence?: number } | undefined = preInference;
+    if (preInferencePromise) {
+      const prelimStart = Date.now();
+      const resolved = await racePreliminaryWithTimeout(preInferencePromise, 1500);
+      if (resolved) {
+        preInferenceResult = {
+          intentType: resolved.intentType,
+          intentConfidence: resolved.intentConfidence,
+        };
+        // §P3: Track pre-inference timing for observability
+        if (this.deps.traceManager) {
+          const waitMs = Date.now() - prelimStart;
+          const { endSpan } = this.deps.traceManager.startSpan(runId, "pre_inference_await");
+          endSpan("pre_inference_resolved", {
+            latencyMs: waitMs,
+            preInferenceLatencyMs: waitMs,
+            preInferenceIntentType: preInferenceResult.intentType,
+            preInferenceConfidence: preInferenceResult.intentConfidence,
+          });
+        }
+      } else {
+        // §P3: Pre-inference timed out — track as miss
+        if (this.deps.traceManager) {
+          const waitMs = Date.now() - prelimStart;
+          const { endSpan } = this.deps.traceManager.startSpan(runId, "pre_inference_await");
+          endSpan("pre_inference_timeout", {
+            latencyMs: waitMs,
+            preInferenceTimeoutMs: 1500,
+          });
+        }
+      }
+    }
+
     // ── Intent routing span (§P1-5) ──
     const intentSpan = this._startSpan(
       runId,
@@ -571,7 +662,17 @@ Keep your response to the JSON object ONLY — no preamble, no explanation.`;
     const intentStart = Date.now();
     let intent: RoutedIntent;
     try {
-      intent = await this.deps.intentRouter.route(context, signal);
+      // §P3 opt: When pre-inference already classified the intent (confidence ≥ 0.7),
+      // use routeWithPreInference to skip Layer 2 LLM call.
+      if (preInferenceResult?.intentType && this.deps.intentRouter.routeWithPreInference) {
+        intent = await this.deps.intentRouter.routeWithPreInference(
+          context,
+          signal,
+          preInferenceResult,
+        );
+      } else {
+        intent = await this.deps.intentRouter.route(context, signal);
+      }
     } catch (err) {
       intentSpan?.endSpan(
         "Intent routing failed",
@@ -597,6 +698,9 @@ Keep your response to the JSON object ONLY — no preamble, no explanation.`;
         toolCalls: intent.candidateSkills?.length,
         // §P0-3: Phase latency metrics for observability
         intentRouteMs: Date.now() - intentStart,
+        // §P3: Routing layer for debugging which layer decided the intent
+        routingLayer: intent.trace?.routingLayer,
+        preInferenceUsed: preInferenceResult?.intentType ? "true" : "false",
         // Trace metadata for debugging tool selection (§P2):
         // embedding mode, top similarity score, form-match flag
         embeddingMode: intent.trace?.embeddingMode,

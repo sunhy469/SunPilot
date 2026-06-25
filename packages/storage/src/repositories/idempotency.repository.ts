@@ -35,4 +35,6 @@ export interface IdempotencyRepository {
     method: string;
     clientRequestId: string;
   }): Promise<IdempotencyRecord | null>;
+  /** §F5: delete expired in-flight reservations so they stop blocking retries. */
+  cleanupExpired(): Promise<number>;
 }

@@ -96,7 +96,10 @@ function validateManifestPaths(
  * - 加载失败的 skill 记录到 audit log，不影响其他 skill 加载
  */
 export class SkillRegistry {
-  private readonly skills = new Map<string, InstalledSkillRecord>();
+  private skills = new Map<string, InstalledSkillRecord>();
+  /** §A22: promise-based mutex to serialize reload() calls and prevent
+   * concurrent readers from seeing an empty/partially-populated map. */
+  private reloadPromise: Promise<InstalledSkillRecord[]> | null = null;
 
   constructor(
     private readonly db: SkillRegistryStore,
@@ -105,7 +108,21 @@ export class SkillRegistry {
   ) {}
 
   async reload(): Promise<InstalledSkillRecord[]> {
-    this.skills.clear();
+    // §A22: serialize reloads — if a reload is already in progress, return
+    // the same promise so concurrent callers all wait for the same result.
+    if (this.reloadPromise) return this.reloadPromise;
+    this.reloadPromise = this._reload();
+    try {
+      return await this.reloadPromise;
+    } finally {
+      this.reloadPromise = null;
+    }
+  }
+
+  private async _reload(): Promise<InstalledSkillRecord[]> {
+    // §A22: build the new map first, then atomically swap it in — readers
+    // always see either the complete old map or the complete new one.
+    const nextSkills = new Map<string, InstalledSkillRecord>();
     const roots = [...this.bundledDirectories, ...this.directories];
     for (const root of roots) {
       if (!existsSync(root)) continue;
@@ -145,7 +162,7 @@ export class SkillRegistry {
             installedAt: existing?.installedAt ?? now,
             updatedAt: now,
           };
-          this.skills.set(record.id, record);
+          nextSkills.set(record.id, record);
           await this.db.skills.upsert(record);
           await this.db.audit.create({
             actor: AuditActor.Daemon,
@@ -166,7 +183,10 @@ export class SkillRegistry {
         }
       }
     }
-    return this.list();
+    // §A22: atomically swap the completed map — concurrent readers always
+    // see a consistent snapshot (previous full map or new full map).
+    this.skills = nextSkills;
+    return [...nextSkills.values()];
   }
 
   list(): InstalledSkillRecord[] {
