@@ -1,5 +1,6 @@
 import type { CreateMessageInput, MessageRecord, MessageRepository } from "../repositories/message.repository.js";
 import type { PostgresPool } from "./postgres.client.js";
+import { withPostgresTransaction } from "./postgres.transaction.js";
 
 export class PostgresMessageRepository implements MessageRepository {
   constructor(private readonly pool: PostgresPool) {}
@@ -13,14 +14,18 @@ export class PostgresMessageRepository implements MessageRepository {
     const embeddingValue = input.embedding?.length
       ? formatVector(input.embedding)
       : null;
-    const result = await this.pool.query(
-      `INSERT INTO messages (id, conversation_id, role, content, metadata, embedding)
-       VALUES ($1, $2, $3, $4, $5::jsonb, $6::vector)
-       RETURNING id, conversation_id, role, content, metadata, created_at`,
-      [id, input.conversationId, input.role, input.content, JSON.stringify(metadata), embeddingValue],
-    );
-    await this.pool.query("UPDATE conversations SET updated_at = NOW() WHERE id = $1", [input.conversationId]);
-    return mapMessage(result.rows[0]);
+    // Insert the message and refresh the conversation's updated_at atomically
+    // so a failure can't leave a message without a touched conversation (or vice versa).
+    return withPostgresTransaction(this.pool, async (client) => {
+      const result = await client.query(
+        `INSERT INTO messages (id, conversation_id, role, content, metadata, embedding)
+         VALUES ($1, $2, $3, $4, $5::jsonb, $6::vector)
+         RETURNING id, conversation_id, role, content, metadata, created_at`,
+        [id, input.conversationId, input.role, input.content, JSON.stringify(metadata), embeddingValue],
+      );
+      await client.query("UPDATE conversations SET updated_at = NOW() WHERE id = $1", [input.conversationId]);
+      return mapMessage(result.rows[0]);
+    });
   }
 
   async listByConversationId(conversationId: string): Promise<MessageRecord[]> {

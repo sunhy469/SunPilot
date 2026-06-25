@@ -74,6 +74,21 @@ export const approvalDecideSchema = z.object({
     .default('interrupt'),
 });
 
+/**
+ * Dedicated schema for `approval.reject` params (A12).
+ * Distinct from `approvalDecideSchema` so reject-specific validation can
+ * evolve independently; reason is optional to preserve backwards
+ * compatibility with existing callers that omit it.
+ */
+export const approvalRejectSchema = z.object({
+  approvalId: z.string().min(1),
+  reason: z.string().optional(),
+  actor: z.string().default('local-user'),
+  strategy: z
+    .enum(['cancel', 'interrupt', 'continue_without_tool'])
+    .default('interrupt'),
+});
+
 // ── Command interfaces ───────────────────────────────────────────────
 
 export interface ChatSendParams {

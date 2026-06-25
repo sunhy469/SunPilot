@@ -122,6 +122,8 @@ export interface SunPilotEvent {
   type: AgentEventType;
   payload: unknown;
   createdAt: string;
+  /** Protocol version stamp for forward/backward compatibility (A11). */
+  protocolVersion?: string;
 }
 
 export interface ApprovalRecord {

@@ -12,6 +12,7 @@ const paths = {
   cache: "/tmp/sunpilot/cache",
   runtime: "/tmp/sunpilot/runtime",
   pidFile: "/tmp/sunpilot/runtime/daemon.pid",
+  token: "/tmp/sunpilot/runtime/token",
 };
 
 describe("launcher", () => {

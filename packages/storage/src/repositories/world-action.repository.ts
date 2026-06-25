@@ -33,6 +33,7 @@ export interface UpdateWorldActionPatch {
   status?: string;
   agentRunId?: string;
   fromNodeId?: string;
+  toNodeId?: string;
   routeNodeIds?: string[];
   statusText?: string;
   startedAt?: string;

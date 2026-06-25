@@ -39,9 +39,9 @@ function mapBeing(row: Record<string, unknown>): DigitalBeingRecord {
     tokenBudget: (row["token_budget"] as number) ?? undefined,
     usedRuns: (row["used_runs"] as number) ?? 0,
     usedSkillCalls: (row["used_skill_calls"] as number) ?? 0,
-    cooldownUntil: (row["cooldown_until"] as string) ?? undefined,
-    createdAt: row["created_at"] as string,
-    updatedAt: row["updated_at"] as string,
+    cooldownUntil: row["cooldown_until"] ? new Date(row["cooldown_until"] as Date).toISOString() : undefined,
+    createdAt: new Date(row["created_at"] as Date).toISOString(),
+    updatedAt: new Date(row["updated_at"] as Date).toISOString(),
   };
 }
 

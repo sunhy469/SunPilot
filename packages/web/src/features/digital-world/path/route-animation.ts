@@ -36,6 +36,11 @@ export class RouteAnimator {
     this.onCompleteCb = cb;
   }
 
+  /** Whether the animation is currently running. */
+  get isRunning(): boolean {
+    return this.running;
+  }
+
   start() {
     if (this.routePositions.length < 2) {
       this.onCompleteCb?.();
@@ -57,19 +62,21 @@ export class RouteAnimator {
     this.ticker.add(this.tickerCallback);
   }
 
-  stop() {
+  stop(restoreStatus: string = "idle") {
     this.running = false;
     if (this.tickerCallback) {
       this.ticker.remove(this.tickerCallback);
       this.tickerCallback = undefined;
     }
-    // Restore being to idle visual state
-    this.being.setStatus("idle");
+    // W4: allow caller to choose the restored status (e.g. "working" when
+    // stopping mid-route at a workstation). Default to "idle".
+    this.being.setStatus(restoreStatus);
   }
 
   private tick(deltaTime: number) {
     const from = this.routePositions[this.currentSegment];
     const to = this.routePositions[this.currentSegment + 1];
+    if (!from || !to) return;
 
     const dx = to.x - from.x;
     const dy = to.y - from.y;
@@ -83,12 +90,16 @@ export class RouteAnimator {
       this.currentSegment++;
 
       const reachedNodeId = this.routeNodeIds[this.currentSegment];
-      this.onNodeReachedCb?.(reachedNodeId, this.currentSegment);
+      if (reachedNodeId !== undefined) {
+        this.onNodeReachedCb?.(reachedNodeId, this.currentSegment);
+      }
 
       if (this.currentSegment >= this.routePositions.length - 1) {
         const lastPos = this.routePositions[this.routePositions.length - 1];
-        this.being.setPosition(lastPos.x, lastPos.y);
-        this.statusBubble.update("", lastPos.x, lastPos.y);
+        if (lastPos) {
+          this.being.setPosition(lastPos.x, lastPos.y);
+          this.statusBubble.update("", lastPos.x, lastPos.y);
+        }
         this.stop();
         this.onCompleteCb?.();
         return;
@@ -98,6 +109,7 @@ export class RouteAnimator {
     // 插值当前位置
     const curFrom = this.routePositions[this.currentSegment];
     const curTo = this.routePositions[this.currentSegment + 1];
+    if (!curFrom || !curTo) return;
     const x = curFrom.x + (curTo.x - curFrom.x) * this.segmentProgress;
     const y = curFrom.y + (curTo.y - curFrom.y) * this.segmentProgress;
 
@@ -108,8 +120,9 @@ export class RouteAnimator {
     }
 
     this.being.setPosition(x, y);
+    const nextNodeId = this.routeNodeIds[this.currentSegment + 1];
     this.statusBubble.update(
-      `正在前往${this.getNodeName(this.routeNodeIds[this.currentSegment + 1])}`,
+      `正在前往${nextNodeId !== undefined ? this.getNodeName(nextNodeId) : ""}`,
       x,
       y,
     );

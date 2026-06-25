@@ -611,7 +611,10 @@ export class AssistantMessageStream implements IAssistantMessageStream {
         part.type === "tool_use" &&
         (part.status === "pending" || part.status === "running")
       ) {
-        part.status = "completed";
+        // §B33: a tool_use left pending/running at finalization did NOT
+        // complete — mark it "interrupted" so consumers can distinguish
+        // forcibly-closed tool calls from genuinely completed ones.
+        part.status = "interrupted";
       } else if (part.type === "text" && part.status === "streaming") {
         part.status = "completed";
         part.completedAt = part.completedAt ?? completedAt;

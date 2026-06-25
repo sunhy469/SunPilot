@@ -150,8 +150,11 @@ export class DefaultMemoryPolicy implements MemoryPolicy {
             ? 0.65
             : 0.55;
 
-    // Recency: weighted by confidence
-    const recency = Math.min(1.0, (candidate.confidence ?? 0.5) * 1.1);
+    // §B24: Recency should reflect how recently the memory was updated,
+    // not its confidence. Derive from metadata.updatedAt (or timestamp)
+    // and decay over a 30-day window: fresh → 1.0, 30+ days old → 0.
+    // When updatedAt is unavailable, default to 1.0 (treat as fresh).
+    const recency = computeRecency(candidate.metadata);
 
     // Task relevance from metadata
     const taskRelevance = candidate.importance ?? 0.5;
@@ -182,6 +185,22 @@ export class DefaultMemoryPolicy implements MemoryPolicy {
 
 function normalize(value: string): string {
   return value.trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+/**
+ * §B24: Compute a recency score in [0, 1] from a memory's updatedAt
+ * timestamp. Fresh memories score 1.0; memories older than 30 days score
+ * 0. When no timestamp is available, default to 1.0 (treat as fresh).
+ */
+function computeRecency(metadata?: Record<string, unknown>): number {
+  if (!metadata) return 1.0;
+  const raw = metadata.updatedAt ?? metadata.timestamp;
+  if (typeof raw !== "string") return 1.0;
+  const updated = new Date(raw);
+  const ms = updated.getTime();
+  if (Number.isNaN(ms)) return 1.0;
+  const daysSinceUpdate = (Date.now() - ms) / (24 * 60 * 60 * 1000);
+  return Math.max(0, 1 - daysSinceUpdate / 30);
 }
 
 /**
@@ -246,14 +265,16 @@ function detectContradiction(
       const candidateContent = candidate.content.toLowerCase();
 
       // Check for negation patterns (prefer X vs don't prefer X)
+      // §B25: Use multi-word phrases instead of bare "not" to avoid
+      // false positives on words like "note", "nothing", "noted".
       const negationWords = [
         "don't",
+        "doesn't",
         "do not",
-        "not",
-        "never",
+        "does not",
         "no longer",
+        "never",
         "不再",
-        "不",
         "别",
         "不要",
       ];
@@ -273,8 +294,12 @@ function detectContradiction(
         };
       }
 
-      // Content divergence: substantially different content for same key
-      if (existing.relevance < 0.5 && existing.relevance >= 0.3) {
+      // Content divergence: substantially different content for same key.
+      // §C5: This branch is inside the `existing.relevance >= 0.7` outer
+      // guard, so the previous condition `relevance < 0.5 && relevance >= 0.3`
+      // was always false (dead code). Treat "high but not extremely high"
+      // relevance (0.7 ≤ relevance < 0.85) as a divergence signal instead.
+      if (existing.relevance < 0.85) {
         return {
           id: existing.id,
           source: existing.source ?? "unknown",

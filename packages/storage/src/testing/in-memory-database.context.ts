@@ -111,29 +111,29 @@ function byPinnedAndUpdatedAtDesc<T extends { pinned?: boolean; updatedAt: strin
 }
 
 export class InMemoryDatabaseContext implements DatabaseContext {
-  private readonly conversationRecords = new Map<string, ConversationRecord>();
-  private readonly messageRecords = new Map<string, MessageRecord[]>();
-  private readonly modelCallRecords = new Map<string, ModelCallRecord>();
-  private readonly runRecords = new Map<string, RunRecord>();
-  private readonly runStatusHistoryRecords: RunStatusHistoryRecord[] = [];
-  private readonly eventRecords: SunPilotEvent[] = [];
-  private readonly stepRecords = new Map<string, StepRecord>();
-  private readonly toolCallRecords = new Map<string, ToolCallRecord>();
-  private readonly approvalRecords = new Map<string, ApprovalRecord>();
-  private readonly artifactRecords = new Map<string, ArtifactRecord>();
-  private readonly memoryRecords: MemoryRecord[] = [];
-  private readonly memoryRelationsMap = new Map<string, Array<{ sourceMemoryId?: string; targetMemoryId: string; relation: string; reason?: string; confidence?: number; establishedAt: string; createdAt: string }>>();
-  private readonly settingRecords = new Map<string, SettingRecord>();
-  private readonly auditRecords: AuditRecord[] = [];
-  private readonly idempotencyRecords = new Map<string, IdempotencyRecord>();
-  private readonly skillRecords = new Map<string, InstalledSkillRecord>();
-  private readonly digitalBeingRecords = new Map<string, DigitalBeingRecord>();
-  private readonly worldNodeRecords = new Map<string, WorldNodeRecord>();
-  private readonly worldEdgeRecords = new Map<string, WorldEdgeRecord>();
-  private readonly worldTaskRecords = new Map<string, WorldTaskRecord>();
-  private readonly worldActionRecords = new Map<string, WorldActionRecord>();
-  private readonly worldActionLogRecords: WorldActionLogRecord[] = [];
-  private readonly worldArtifactRecords = new Map<string, WorldArtifactRecord>();
+  private conversationRecords = new Map<string, ConversationRecord>();
+  private messageRecords = new Map<string, MessageRecord[]>();
+  private modelCallRecords = new Map<string, ModelCallRecord>();
+  private runRecords = new Map<string, RunRecord>();
+  private runStatusHistoryRecords: RunStatusHistoryRecord[] = [];
+  private eventRecords: SunPilotEvent[] = [];
+  private stepRecords = new Map<string, StepRecord>();
+  private toolCallRecords = new Map<string, ToolCallRecord>();
+  private approvalRecords = new Map<string, ApprovalRecord>();
+  private artifactRecords = new Map<string, ArtifactRecord>();
+  private memoryRecords: MemoryRecord[] = [];
+  private memoryRelationsMap = new Map<string, Array<{ sourceMemoryId?: string; targetMemoryId: string; relation: string; reason?: string; confidence?: number; establishedAt: string; createdAt: string }>>();
+  private settingRecords = new Map<string, SettingRecord>();
+  private auditRecords: AuditRecord[] = [];
+  private idempotencyRecords = new Map<string, IdempotencyRecord>();
+  private skillRecords = new Map<string, InstalledSkillRecord>();
+  private digitalBeingRecords = new Map<string, DigitalBeingRecord>();
+  private worldNodeRecords = new Map<string, WorldNodeRecord>();
+  private worldEdgeRecords = new Map<string, WorldEdgeRecord>();
+  private worldTaskRecords = new Map<string, WorldTaskRecord>();
+  private worldActionRecords = new Map<string, WorldActionRecord>();
+  private worldActionLogRecords: WorldActionLogRecord[] = [];
+  private worldArtifactRecords = new Map<string, WorldArtifactRecord>();
 
   readonly conversations = {
     create: async (
@@ -166,7 +166,7 @@ export class InMemoryDatabaseContext implements DatabaseContext {
             input.cursor,
           ),
         )
-        .slice(0, input.limit ?? 50),
+        .slice(0, Math.max(1, Math.min(input.limit ?? 50, 200))),
     touch: async (id: string): Promise<void> => {
       const conversation = this.conversationRecords.get(id);
       if (conversation)
@@ -552,7 +552,7 @@ export class InMemoryDatabaseContext implements DatabaseContext {
       [...this.approvalRecords.values()]
         .filter((approval) => !input.status || approval.status === input.status)
         .filter((approval) => !input.runId || approval.runId === input.runId)
-        .sort(byCreatedAt)
+        .sort(byCreatedAtDesc)
         .slice(0, input.limit ?? 100),
   };
 
@@ -566,7 +566,7 @@ export class InMemoryDatabaseContext implements DatabaseContext {
     list: async (runId?: string): Promise<ArtifactRecord[]> =>
       [...this.artifactRecords.values()]
         .filter((artifact) => !runId || artifact.runId === runId)
-        .sort(byCreatedAt),
+        .sort(byCreatedAtDesc),
   };
 
   readonly memory = {
@@ -1129,7 +1129,76 @@ export class InMemoryDatabaseContext implements DatabaseContext {
   async transaction<T>(
     work: (database: InMemoryDatabaseContext) => Promise<T>,
   ): Promise<T> {
-    return work(this);
+    // Snapshot all mutable state so we can roll back on failure.
+    // NOTE: This is a shallow snapshot via spread/concat for Maps and arrays.
+    // It restores the container references on rollback, which is sufficient
+    // for tests that do not hold long-lived references to internal records.
+    const snapshot = this.snapshot();
+    try {
+      return await work(this);
+    } catch (err) {
+      this.restore(snapshot);
+      throw err;
+    }
+  }
+
+  private snapshot(): InMemorySnapshot {
+    return {
+      conversationRecords: new Map(this.conversationRecords),
+      messageRecords: new Map(this.messageRecords),
+      modelCallRecords: new Map(this.modelCallRecords),
+      runRecords: new Map(this.runRecords),
+      runStatusHistoryRecords: this.runStatusHistoryRecords.slice(),
+      eventRecords: this.eventRecords.slice(),
+      stepRecords: new Map(this.stepRecords),
+      toolCallRecords: new Map(this.toolCallRecords),
+      approvalRecords: new Map(this.approvalRecords),
+      artifactRecords: new Map(this.artifactRecords),
+      memoryRecords: this.memoryRecords.slice(),
+      memoryRelationsMap: new Map(
+        Array.from(this.memoryRelationsMap.entries()).map(([k, v]) => [
+          k,
+          v.slice(),
+        ]),
+      ),
+      settingRecords: new Map(this.settingRecords),
+      auditRecords: this.auditRecords.slice(),
+      idempotencyRecords: new Map(this.idempotencyRecords),
+      skillRecords: new Map(this.skillRecords),
+      digitalBeingRecords: new Map(this.digitalBeingRecords),
+      worldNodeRecords: new Map(this.worldNodeRecords),
+      worldEdgeRecords: new Map(this.worldEdgeRecords),
+      worldTaskRecords: new Map(this.worldTaskRecords),
+      worldActionRecords: new Map(this.worldActionRecords),
+      worldActionLogRecords: this.worldActionLogRecords.slice(),
+      worldArtifactRecords: new Map(this.worldArtifactRecords),
+    };
+  }
+
+  private restore(snapshot: InMemorySnapshot): void {
+    this.conversationRecords = snapshot.conversationRecords;
+    this.messageRecords = snapshot.messageRecords;
+    this.modelCallRecords = snapshot.modelCallRecords;
+    this.runRecords = snapshot.runRecords;
+    this.runStatusHistoryRecords = snapshot.runStatusHistoryRecords;
+    this.eventRecords = snapshot.eventRecords;
+    this.stepRecords = snapshot.stepRecords;
+    this.toolCallRecords = snapshot.toolCallRecords;
+    this.approvalRecords = snapshot.approvalRecords;
+    this.artifactRecords = snapshot.artifactRecords;
+    this.memoryRecords = snapshot.memoryRecords;
+    this.memoryRelationsMap = snapshot.memoryRelationsMap;
+    this.settingRecords = snapshot.settingRecords;
+    this.auditRecords = snapshot.auditRecords;
+    this.idempotencyRecords = snapshot.idempotencyRecords;
+    this.skillRecords = snapshot.skillRecords;
+    this.digitalBeingRecords = snapshot.digitalBeingRecords;
+    this.worldNodeRecords = snapshot.worldNodeRecords;
+    this.worldEdgeRecords = snapshot.worldEdgeRecords;
+    this.worldTaskRecords = snapshot.worldTaskRecords;
+    this.worldActionRecords = snapshot.worldActionRecords;
+    this.worldActionLogRecords = snapshot.worldActionLogRecords;
+    this.worldArtifactRecords = snapshot.worldArtifactRecords;
   }
 
   private updateIdempotency(
@@ -1160,6 +1229,42 @@ type MemoryFilter = {
   scopes?: MemoryRecord["scope"][];
   types?: MemoryRecord["type"][];
   includeDeleted?: boolean;
+};
+
+type MemoryRelationEntry = {
+  sourceMemoryId?: string;
+  targetMemoryId: string;
+  relation: string;
+  reason?: string;
+  confidence?: number;
+  establishedAt: string;
+  createdAt: string;
+};
+
+type InMemorySnapshot = {
+  conversationRecords: Map<string, ConversationRecord>;
+  messageRecords: Map<string, MessageRecord[]>;
+  modelCallRecords: Map<string, ModelCallRecord>;
+  runRecords: Map<string, RunRecord>;
+  runStatusHistoryRecords: RunStatusHistoryRecord[];
+  eventRecords: SunPilotEvent[];
+  stepRecords: Map<string, StepRecord>;
+  toolCallRecords: Map<string, ToolCallRecord>;
+  approvalRecords: Map<string, ApprovalRecord>;
+  artifactRecords: Map<string, ArtifactRecord>;
+  memoryRecords: MemoryRecord[];
+  memoryRelationsMap: Map<string, MemoryRelationEntry[]>;
+  settingRecords: Map<string, SettingRecord>;
+  auditRecords: AuditRecord[];
+  idempotencyRecords: Map<string, IdempotencyRecord>;
+  skillRecords: Map<string, InstalledSkillRecord>;
+  digitalBeingRecords: Map<string, DigitalBeingRecord>;
+  worldNodeRecords: Map<string, WorldNodeRecord>;
+  worldEdgeRecords: Map<string, WorldEdgeRecord>;
+  worldTaskRecords: Map<string, WorldTaskRecord>;
+  worldActionRecords: Map<string, WorldActionRecord>;
+  worldActionLogRecords: WorldActionLogRecord[];
+  worldArtifactRecords: Map<string, WorldArtifactRecord>;
 };
 
 function definedPatch<T extends Record<string, unknown>>(input: T): Partial<T> {

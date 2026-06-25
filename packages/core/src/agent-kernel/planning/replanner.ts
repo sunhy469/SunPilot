@@ -9,6 +9,7 @@ import type {
   ToolCallSummary,
 } from "../loop-types.js";
 import type { SkillSummary } from "../tools/tool-types.js";
+import { isRepairableFailure } from "./failure-classification.js";
 
 // ── Replan Types ────────────────────────────────────────────────────────
 
@@ -250,10 +251,17 @@ export class Replanner {
           newGoal.toLowerCase().includes(s.name.toLowerCase())),
     );
 
+    // §C1: Pre-generate step IDs and reference the REAL previous ID in
+    // dependsOn. Previously used a template literal `plan_step_newgoal_${i-1}`
+    // that never matched the crypto.randomUUID()-based ID, so dependencies
+    // were unresolvable. Now we capture each step's true id and chain them.
+    const newToolStepIds = matchingSkills
+      .slice(0, 3)
+      .map(() => `plan_step_newgoal_${crypto.randomUUID().slice(0, 8)}`);
     const newToolSteps: AgentPlanStep[] = matchingSkills
       .slice(0, 3)
       .map((skill, i) => ({
-        id: `plan_step_newgoal_${crypto.randomUUID().slice(0, 8)}`,
+        id: newToolStepIds[i]!,
         title: skill.name,
         description: `Use ${skill.name} (${skill.id}) for updated goal: ${newGoal}`,
         type: "tool" as const,
@@ -263,7 +271,7 @@ export class Replanner {
             ? [completedSteps[completedSteps.length - 1]!.id]
             : i === 0
               ? []
-              : [`plan_step_newgoal_${i - 1}`],
+              : [newToolStepIds[i - 1]!],
         riskLevel: skill.riskHints.defaultRisk,
         status: "pending" as const,
       }));
@@ -435,9 +443,14 @@ export class Replanner {
     );
     const insertIdx = reasoningIdx >= 0 ? reasoningIdx : originalPlan.steps.length;
 
+    // §C1: Pre-generate verification step IDs and reference the REAL
+    // previous ID in dependsOn (was a template literal that never matched).
+    const verifyStepIds = detailSkills.map(() =>
+      `plan_step_verify_${crypto.randomUUID().slice(0, 8)}`,
+    );
     const verificationSteps: AgentPlanStep[] = detailSkills.map(
       (skill, i) => ({
-        id: `plan_step_verify_${crypto.randomUUID().slice(0, 8)}`,
+        id: verifyStepIds[i]!,
         title: `Verify: ${skill.name}`,
         description: `Check ${missingInfo[i] ?? "missing info"} using ${skill.name} (${skill.id}).`,
         type: "tool" as const,
@@ -446,7 +459,7 @@ export class Replanner {
           insertIdx > 0 && i === 0
             ? [originalPlan.steps[insertIdx - 1]!.id]
             : i > 0
-              ? [`plan_step_verify_${i - 1}`]
+              ? [verifyStepIds[i - 1]!]
               : [],
         riskLevel: skill.riskHints.defaultRisk,
         status: "pending" as const,
@@ -711,19 +724,6 @@ export class Replanner {
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────
-
-function isRepairableFailure(summary: string): boolean {
-  return (
-    /timeout/i.test(summary) ||
-    /transient/i.test(summary) ||
-    /rate limit/i.test(summary) ||
-    /invalid (parameter|argument|input)/i.test(summary) ||
-    /missing (parameter|argument|field|required)/i.test(summary) ||
-    /connection refused/i.test(summary) ||
-    /temporary/i.test(summary) ||
-    /retry/i.test(summary)
-  );
-}
 
 function maxStepRisk(
   steps: AgentPlanStep[],

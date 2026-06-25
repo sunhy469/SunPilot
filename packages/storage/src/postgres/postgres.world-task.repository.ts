@@ -20,9 +20,9 @@ function mapTask(row: Record<string, unknown>): WorldTaskRecord {
     title: row["title"] as string,
     input: (row["input"] as Record<string, unknown>) ?? {},
     currentActionId: (row["current_action_id"] as string) ?? undefined,
-    createdAt: row["created_at"] as string,
-    startedAt: (row["started_at"] as string) ?? undefined,
-    completedAt: (row["completed_at"] as string) ?? undefined,
+    createdAt: new Date(row["created_at"] as Date).toISOString(),
+    startedAt: row["started_at"] ? new Date(row["started_at"] as Date).toISOString() : undefined,
+    completedAt: row["completed_at"] ? new Date(row["completed_at"] as Date).toISOString() : undefined,
   };
 }
 

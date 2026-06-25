@@ -44,7 +44,13 @@ import type {
 } from "@sunpilot/storage";
 import { AssistantMessageStream } from "./assistant-message-stream.js";
 
-const MAX_TOOL_ITERATIONS = 5;
+/**
+ * Maximum number of tool-iteration rounds in a single agent run.
+ *
+ * Shared between AgentLoopEngine and ToolDecisionEngine.executeStreaming
+ * so the iteration cap stays in one place. R4 (code audit).
+ */
+export const MAX_TOOL_ITERATIONS = 5;
 
 /**
  * §P2: Canonical mapping from run phase to user-visible status label.
@@ -277,13 +283,12 @@ export class AgentLoopEngine {
       // Get pre-inference result with a short timeout so it never blocks
       // the main path. If pre-inference is slower than context building,
       // we don't wait for it beyond a small grace period.
+      // §B19: use racePreliminaryWithTimeout so the timer is cleared when
+      // the primary promise wins — previously the 300ms setTimeout kept
+      // the event loop alive and fired a no-op resolve after preliminary
+      // already resolved.
       const preliminary = preliminaryPromise
-        ? await Promise.race([
-            preliminaryPromise,
-            new Promise<undefined>((resolve) =>
-              setTimeout(() => resolve(undefined), 300),
-            ),
-          ])
+        ? await racePreliminaryWithTimeout(preliminaryPromise, 300)
         : undefined;
 
       // §P1-1: Update progress status when entering planning
@@ -2026,4 +2031,33 @@ function buildRiskReasons(
     reasons.push("Low-risk operation");
   }
   return reasons;
+}
+
+/**
+ * §B19: Race a promise against a timeout, ensuring the timer is cleared
+ * when the primary promise wins. Without this, the setTimeout keeps the
+ * event loop alive and fires a no-op resolve after the primary promise
+ * already resolved.
+ *
+ * Returns `undefined` if the timeout fires first, or the primary value
+ * if it resolves within the timeout.
+ */
+async function racePreliminaryWithTimeout<T>(
+  primary: Promise<T>,
+  timeoutMs: number,
+): Promise<T | undefined> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      primary.then((value) => {
+        if (timer) clearTimeout(timer);
+        return value;
+      }),
+      new Promise<undefined>((resolve) => {
+        timer = setTimeout(() => resolve(undefined), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }

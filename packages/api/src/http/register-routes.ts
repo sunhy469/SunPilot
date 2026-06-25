@@ -143,31 +143,47 @@ export function registerSunPilotApiRoutes(
     try {
       const body = parseAgentChatRequest(request.body);
       let assistantContent = "";
-      const result = await (
-        await getChatAgent()
-      ).handleChatCommand(
-        {
-          conversationId: body.conversationId,
-          message: body.message,
-          mode: "agent",
-        },
-        { source: "api" },
-        {
-          onDelta: (delta) => {
-            assistantContent += delta.delta;
-          },
-        },
-      );
-      return {
-        conversationId: result.conversationId,
-        message: {
-          id: result.messageId,
-          conversationId: result.conversationId,
-          role: "assistant",
-          content: assistantContent,
-          createdAt: new Date().toISOString(),
-        },
+      // A5: Abort the agent loop when the HTTP client disconnects so the
+      // server stops LLM/skill work for a gone client instead of running
+      // to completion and discarding the result.
+      const abortController = new AbortController();
+      const onClose = () => abortController.abort();
+      request.raw.on("close", onClose);
+      const onFinished = () => {
+        request.raw.off("close", onClose);
       };
+      reply.raw.on("finish", onFinished);
+      reply.raw.on("close", onFinished);
+      try {
+        const result = await (
+          await getChatAgent()
+        ).handleChatCommand(
+          {
+            conversationId: body.conversationId,
+            message: body.message,
+            mode: "agent",
+          },
+          { source: "api" },
+          {
+            onDelta: (delta) => {
+              assistantContent += delta.delta;
+            },
+            signal: abortController.signal,
+          },
+        );
+        return {
+          conversationId: result.conversationId,
+          message: {
+            id: result.messageId,
+            conversationId: result.conversationId,
+            role: "assistant",
+            content: assistantContent,
+            createdAt: new Date().toISOString(),
+          },
+        };
+      } finally {
+        onFinished();
+      }
     } catch (error) {
       if (error instanceof RuntimeError) {
         return reply

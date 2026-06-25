@@ -59,7 +59,10 @@ export interface AssistantToolUsePart {
   skillId: string;
   name: string;
   inputPreview?: Record<string, unknown>;
-  status: "pending" | "running" | "completed" | "failed";
+  /** §B33: "interrupted" marks a tool_use that was left pending/running when
+   *  the message was forcibly finalized (e.g. abort/timeout) — the tool did
+   *  NOT complete successfully, so "completed" would be misleading. */
+  status: "pending" | "running" | "completed" | "failed" | "interrupted";
   createdAt: string;
 }
 

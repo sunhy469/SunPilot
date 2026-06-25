@@ -97,6 +97,16 @@ export class PostgresConversationRepository implements ConversationRepository {
 
   async delete(id: string): Promise<boolean> {
     return withPostgresTransaction(this.pool, async (client) => {
+      // Detach digital beings pointing at this conversation (no ON DELETE cascade).
+      await client.query(
+        "UPDATE digital_beings SET conversation_id = NULL WHERE conversation_id = $1",
+        [id],
+      );
+      // Soft-delete conversation-scoped memories (no ON DELETE cascade).
+      await client.query(
+        "UPDATE memory_metadata SET deleted_at = NOW() WHERE scope = 'conversation' AND scope_id = $1",
+        [id],
+      );
       // Clean up related data that doesn't have ON DELETE CASCADE
       await client.query("DELETE FROM agent_traces WHERE conversation_id = $1", [id]);
       await client.query("DELETE FROM events WHERE conversation_id = $1", [id]);

@@ -12,6 +12,15 @@ export function findShortestPath(
 ): PathResult | null {
   if (fromId === toId) return { routeNodeIds: [fromId], distance: 0 };
 
+  // W13: Dijkstra requires non-negative edge weights. Validate up front and
+  // bail out (return null) if any negative weight is found, rather than
+  // silently producing an incorrect path.
+  for (const neighbors of graph.values()) {
+    for (const { distance } of neighbors) {
+      if (distance < 0) return null;
+    }
+  }
+
   const distances = new Map<string, number>();
   const previous = new Map<string, string>();
   const visited = new Set<string>();

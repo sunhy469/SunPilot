@@ -26,8 +26,26 @@ export class TaskService {
       title: input.title,
       input: input.input,
     });
-    void this.deps.executor.executeTask(_context, task.id);
+    void this.deps.executor
+      .executeTask(_context, task.id)
+      .catch(async (err) => {
+        await this.markTaskFailed(task.id, err);
+      });
     return task;
+  }
+
+  /** Best-effort failure handler for fire-and-forget executeTask rejections. */
+  private async markTaskFailed(taskId: string, err: unknown): Promise<void> {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`[TaskService] executeTask failed for task ${taskId}: ${message}`);
+    try {
+      await this.deps.database.worldTasks.update(taskId, {
+        status: "failed",
+        completedAt: new Date().toISOString(),
+      });
+    } catch {
+      // Best-effort: task may already be in a terminal state or missing.
+    }
   }
 
   async getTask(_context: PlatformRequestContext, id: string) {

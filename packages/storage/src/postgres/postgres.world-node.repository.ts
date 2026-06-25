@@ -21,7 +21,7 @@ function mapNode(row: Record<string, unknown>): WorldNodeRecord {
     icon: (row["icon"] as string) ?? undefined,
     logo: (row["logo"] as string) ?? undefined,
     enabled: (row["enabled"] as boolean) ?? true,
-    createdAt: row["created_at"] as string,
+    createdAt: new Date(row["created_at"] as Date).toISOString(),
   };
 }
 

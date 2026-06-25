@@ -1,6 +1,7 @@
-import { appendFileSync, existsSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
+import { randomBytes, timingSafeEqual } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import fastifyStatic from "@fastify/static";
 import Fastify from "fastify";
@@ -9,6 +10,7 @@ import {
   AgentService,
   createDefaultLlmProvider,
   InMemoryAgentEventBus,
+  parseEnv,
   RepositoryApprovalExpiryService,
   RuntimeError,
   SummaryStaleDetector,
@@ -32,7 +34,7 @@ import { registerDaemonMetricsRoutes } from "./metrics.js";
 import { recoverAgentRuntimeRuns } from "./recovery.js";
 import { setupDaemonWebSocket } from "./ws.js";
 import { readSunPilotConfig, updateSunPilotConfig } from "@sunpilot/storage";
-import { AuditActor } from "@sunpilot/protocol";
+import { AuditActor, DEFAULT_EXTERNAL_ORIGINS } from "@sunpilot/protocol";
 import { StaleDetectionWorker } from "./stale-detection-worker.js";
 import { MemoryPruningWorker } from "./memory-pruning-worker.js";
 
@@ -54,10 +56,6 @@ export interface DaemonOptions {
   eventBus?: AgentEventBus;
 }
 
-const DEFAULT_EXTERNAL_ORIGINS = [
-  "https://tradeagent.asia",
-  "https://www.tradeagent.asia",
-];
 const require = createRequire(import.meta.url);
 
 function allowedExternalOrigins(): Set<string> {
@@ -78,7 +76,10 @@ function isAllowedLocalOrigin(
   port: number,
   externalOrigins = allowedExternalOrigins(),
 ): boolean {
-  if (!origin) return true;
+  // Missing Origin (non-browser clients: curl, scripts, same-host processes)
+  // is NOT trusted by the origin check. Such clients must present the local
+  // bearer token (see onRequest hook in createDaemon).
+  if (!origin) return false;
   try {
     const parsed = new URL(origin);
     if (externalOrigins.has(parsed.origin)) return true;
@@ -92,12 +93,84 @@ function isAllowedLocalOrigin(
   }
 }
 
+/** Constant-time comparison of two secret strings; returns false on length mismatch. */
+function safeEqual(a: string, b: string): boolean {
+  const ab = Buffer.from(a);
+  const bb = Buffer.from(b);
+  if (ab.length !== bb.length) return false;
+  return timingSafeEqual(ab, bb);
+}
+
+/** Extract a bearer token from an `Authorization` header value. */
+function extractBearerToken(header: unknown): string | undefined {
+  if (typeof header !== "string") return undefined;
+  const trimmed = header.trim();
+  const match = /^Bearer\s+(.+)$/i.exec(trimmed);
+  return match?.[1]?.trim();
+}
+
+/**
+ * Minimal in-memory sliding-window rate limiter.
+ * Used because @fastify/rate-limit is not a project dependency. Limits per-IP
+ * request counts within a rolling window; protects against trivial DoS.
+ */
+class SlidingWindowRateLimiter {
+  private readonly hits = new Map<string, number[]>();
+  constructor(
+    private readonly windowMs: number,
+    private readonly maxRequests: number,
+  ) {}
+
+  check(ip: string): boolean {
+    const now = Date.now();
+    const cutoff = now - this.windowMs;
+    const bucket = this.hits.get(ip);
+    const fresh = bucket ? bucket.filter((ts) => ts > cutoff) : [];
+    if (fresh.length >= this.maxRequests) {
+      this.hits.set(ip, fresh);
+      return false;
+    }
+    fresh.push(now);
+    this.hits.set(ip, fresh);
+    return true;
+  }
+}
+
+const AUTH_EXEMPT_PATHS = new Set(["/healthz", "/readyz"]);
+
 export async function createDaemon(options: DaemonOptions = {}) {
   const host = options.host ?? "127.0.0.1";
   const port = options.port ?? 3737;
+  const env = parseEnv(process.env);
   const paths = ensureSunPilotHome(getSunPilotPaths());
   const database = options.database ?? (await createDatabaseContext());
   const shouldCloseDatabase = !options.database;
+
+  // ── Local token authentication (C9/C10) ────────────────────────────
+  // The daemon can execute skills, read/write files, and call out to the
+  // network on behalf of whoever drives it. To prevent any same-host process
+  // from issuing commands, every non-exempt HTTP/WS request must present a
+  // bearer token that this daemon generated at startup. The token is written
+  // to ~/.sunpilot/runtime/token (mode 0600) so trusted local clients (CLI,
+  // launcher, browser fetch via the web client) can read it.
+  //
+  // SUNPILOT_DISABLE_TOKEN_AUTH=1 opts out for local development / tests.
+  const tokenAuthEnabled = env.SUNPILOT_DISABLE_TOKEN_AUTH !== "1";
+  let localToken: string | undefined;
+  if (tokenAuthEnabled) {
+    try {
+      // Reuse an existing token if a valid one is already on disk (e.g. daemon
+      // restart within the same runtime), otherwise generate a fresh one.
+      const existing = existsSync(paths.token)
+        ? readFileSync(paths.token, "utf8").trim()
+        : "";
+      localToken = existing.length >= 32 ? existing : randomBytes(32).toString("hex");
+      writeFileSync(paths.token, localToken, { mode: 0o600 });
+    } catch (err) {
+      console.warn("[daemon] Failed to persist local auth token:", (err as Error).message);
+      localToken = randomBytes(32).toString("hex");
+    }
+  }
 
   const eventBus = options.eventBus ?? new InMemoryAgentEventBus();
 
@@ -130,8 +203,8 @@ export async function createDaemon(options: DaemonOptions = {}) {
     },
     skillRegistry,
     {
-      timeoutMs: Number(process.env.SUNPILOT_SKILL_TIMEOUT_MS ?? 5 * 60_000),
-      maxConcurrency: Number(process.env.SUNPILOT_SKILL_MAX_CONCURRENCY ?? 4),
+      timeoutMs: env.SUNPILOT_SKILL_TIMEOUT_MS,
+      maxConcurrency: env.SUNPILOT_SKILL_MAX_CONCURRENCY,
     },
   );
 
@@ -162,7 +235,7 @@ export async function createDaemon(options: DaemonOptions = {}) {
   };
 
   const app = Fastify({
-    logger: { level: process.env.SUNPILOT_LOG_LEVEL ?? "info" },
+    logger: { level: env.SUNPILOT_LOG_LEVEL },
   });
   app.setErrorHandler((error, _request, reply) => {
     if (error instanceof RuntimeError) {
@@ -180,9 +253,49 @@ export async function createDaemon(options: DaemonOptions = {}) {
     const message = error instanceof Error ? error.message : String(error);
     return reply.code(500).send({ error: "internal_error", message });
   });
+  // ── Auth + rate limiting hook (C9/C10) ─────────────────────────────
+  // Order: exempt health probes → rate limit → token auth → origin check.
+  // - A valid bearer token authorizes any client (covers curl/CLI/scripts and
+  //   the browser when it forwards the token).
+  // - Without a token, only same-origin browser requests (Origin present and
+  //   allowed) pass; non-browser clients without a token are rejected.
+  const rateLimiter = new SlidingWindowRateLimiter(
+    env.SUNPILOT_RATE_LIMIT_WINDOW_MS,
+    env.SUNPILOT_RATE_LIMIT_MAX,
+  );
+
   app.addHook("onRequest", async (request, reply) => {
-    if (!isAllowedLocalOrigin(request.headers.origin, port)) {
-      await reply.code(403).send({ error: "origin_not_allowed" });
+    const path = request.url.split("?", 2)[0] ?? "";
+    if (AUTH_EXEMPT_PATHS.has(path)) return;
+
+    // Rate limit (per-IP sliding window).
+    if (!rateLimiter.check(request.ip)) {
+      await reply
+        .code(429)
+        .header("Retry-After", "1")
+        .send({ error: "rate_limited", message: "Too many requests." });
+      return;
+    }
+
+    if (tokenAuthEnabled) {
+      const presented = extractBearerToken(request.headers.authorization);
+      const tokenOk = presented && localToken ? safeEqual(presented, localToken) : false;
+      if (!tokenOk) {
+        // Fall back to Origin check for browser clients (which always send
+        // Origin but may not forward the bearer token for same-origin calls).
+        if (!isAllowedLocalOrigin(request.headers.origin, port)) {
+          await reply
+            .code(401)
+            .send({ error: "unauthorized", message: "Missing or invalid token." });
+        }
+      }
+    } else {
+      // Token auth disabled (local dev): still enforce the Origin boundary
+      // for browser clients. Non-browser clients are allowed in dev mode.
+      const origin = request.headers.origin;
+      if (origin !== undefined && !isAllowedLocalOrigin(origin, port)) {
+        await reply.code(403).send({ error: "origin_not_allowed" });
+      }
     }
   });
 
@@ -211,10 +324,10 @@ export async function createDaemon(options: DaemonOptions = {}) {
       websocketConnections: () => 0, // updated below after ws setup
       getLlmConfig: () => ({
         configured: Boolean(
-          process.env["SUNPILOT_LLM_API_KEY"] || process.env["SUNPILOT_DP_LLM_API_KEY"],
+          env.SUNPILOT_LLM_API_KEY || env.SUNPILOT_DP_LLM_API_KEY,
         ),
         provider: "openai-compatible",
-        model: process.env["SUNPILOT_LLM_MODEL"] ?? process.env["SUNPILOT_DP_LLM_MODEL"] ?? "deepseek-v4-flash",
+        model: env.SUNPILOT_LLM_MODEL ?? env.SUNPILOT_DP_LLM_MODEL ?? "deepseek-v4-flash",
       }),
       getModelRouterStats: () => {
         if (!modelRouterRef) return { persistFailures: 0, totalCalls: 0, fallbackCount: 0 };
@@ -227,11 +340,9 @@ export async function createDaemon(options: DaemonOptions = {}) {
       },
     },
     getModels: () => {
-      const hasSeed = !!(
-        process.env["SUNPILOT_SEED_LLM_API_KEY"]
-      );
-      const dpModel = process.env["SUNPILOT_DP_LLM_MODEL"] ?? process.env["SUNPILOT_LLM_MODEL"] ?? "deepseek-v4-flash";
-      const seedModel = process.env["SUNPILOT_SEED_LLM_MODEL"] ?? "doubao-seed-2-0-lite-260428";
+      const hasSeed = !!env.SUNPILOT_SEED_LLM_API_KEY;
+      const dpModel = env.SUNPILOT_DP_LLM_MODEL ?? env.SUNPILOT_LLM_MODEL ?? "deepseek-v4-flash";
+      const seedModel = env.SUNPILOT_SEED_LLM_MODEL ?? "doubao-seed-2-0-lite-260428";
       return [
         { id: "dp", label: "Deepseek-v4-flash", provider: "deepseek", model: dpModel, available: true },
         { id: "seed", label: "Seed-2.0-lite", provider: "volcengine-ark", model: seedModel, available: hasSeed },
@@ -296,6 +407,11 @@ export async function createDaemon(options: DaemonOptions = {}) {
     },
     port,
     isAllowedOrigin: isAllowedLocalOrigin,
+    // When token auth is enabled, WebSocket upgrades must present this token
+    // (Authorization header or ?token= query). undefined disables the check.
+    token: localToken,
+    // Skip all auth checks when SUNPILOT_DISABLE_TOKEN_AUTH=1 (local dev/tests).
+    authDisabled: !tokenAuthEnabled,
   });
 
   // Update diagnostics with real websocket count after ws is set up
@@ -357,16 +473,6 @@ export async function createDaemon(options: DaemonOptions = {}) {
         app.log.warn({ err }, "Default world seed failed (may already exist)");
       }
 
-      appendFileSync(
-        paths.logs + "/daemon.log",
-        JSON.stringify({
-          level: "info",
-          message: "SunPilot daemon started",
-          host,
-          port,
-          createdAt: new Date().toISOString(),
-        }) + "\n",
-      );
       await database.audit.create({
         actor: AuditActor.Daemon,
         action: "daemon.start",

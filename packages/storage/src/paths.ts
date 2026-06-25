@@ -13,6 +13,8 @@ export interface SunPilotPaths {
   cache: string;
   runtime: string;
   pidFile: string;
+  /** Local bearer token used to authenticate HTTP/WS requests to the daemon. */
+  token: string;
 }
 
 export interface SunPilotConfig {
@@ -34,8 +36,8 @@ export interface SunPilotConfig {
   };
 }
 
-export function getSunPilotHome(): string {
-  return process.env.SUNPILOT_HOME ?? join(homedir(), ".sunpilot");
+export function getSunPilotHome(env: NodeJS.ProcessEnv = process.env): string {
+  return env.SUNPILOT_HOME ?? join(homedir(), ".sunpilot");
 }
 
 export function getSunPilotPaths(home = getSunPilotHome()): SunPilotPaths {
@@ -49,7 +51,8 @@ export function getSunPilotPaths(home = getSunPilotHome()): SunPilotPaths {
     logs: join(home, "logs"),
     cache: join(home, "cache"),
     runtime: join(home, "runtime"),
-    pidFile: join(home, "runtime", "daemon.pid")
+    pidFile: join(home, "runtime", "daemon.pid"),
+    token: join(home, "runtime", "token")
   };
 }
 
@@ -57,7 +60,7 @@ export function defaultSunPilotConfig(paths = getSunPilotPaths()): SunPilotConfi
   return {
     version: 1,
     server: { host: "127.0.0.1", port: 3737 },
-    security: { requireLocalToken: false, allowLan: false },
+    security: { requireLocalToken: true, allowLan: false },
     skills: { directories: [paths.skills], autoReload: true },
     storage: { home: paths.home }
   };

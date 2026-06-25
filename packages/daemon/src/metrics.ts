@@ -3,6 +3,11 @@ import { AGENT_ACTIVE_STATUSES, RUN_MODES, RUN_STATUSES, type RunMode, type RunR
 import type { DatabaseContext } from "@sunpilot/storage";
 
 const METRIC_BUCKETS_MS = [100, 250, 500, 1000, 2500, 5000, 10_000, 30_000];
+// Obs5: Sample size for the single runs query (repository clamps to 200).
+const METRICS_RUN_SAMPLE_LIMIT = 200;
+// Obs5: Bound skill_id label cardinality — only emit tool metrics for the
+// top N skills by total call count.
+const METRICS_TOP_SKILLS_LIMIT = 20;
 
 function metricLabel(value: unknown): string {
   return String(value ?? "")
@@ -68,30 +73,32 @@ export function registerDaemonMetricsRoutes(
       status: "pending",
       limit: 200,
     });
-    const activeRuns = await Promise.all(
-      AGENT_ACTIVE_STATUSES.map((status) =>
-        database.runs.list({ status, limit: 200 }),
-      ),
-    );
-    const allRuns: RunRecord[] = [];
+    // Obs5: Fetch runs in a single query instead of one per (status, mode)
+    // combination (previously 28 sequential queries). Group in memory by
+    // status and mode. The repository clamps the limit to 200 and returns
+    // the most recently updated runs first — sufficient for observability
+    // gauges and bounds the downstream per-run detail queries.
+    const allRuns = await database.runs.list({ limit: METRICS_RUN_SAMPLE_LIMIT });
+    const activeStatusSet = new Set<string>(AGENT_ACTIVE_STATUSES);
+
     lines.push("# HELP sunpilot_runs_active Active Agent runs.");
     lines.push("# TYPE sunpilot_runs_active gauge");
     lines.push(
-      `sunpilot_runs_active ${activeRuns.reduce((sum, runs) => sum + runs.length, 0)}`,
+      `sunpilot_runs_active ${allRuns.filter((run) => activeStatusSet.has(run.status)).length}`,
     );
     lines.push("# HELP sunpilot_runs_total Runs by status and mode.");
     lines.push("# TYPE sunpilot_runs_total gauge");
     for (const status of RUN_STATUSES) {
       for (const mode of RUN_MODES) {
-        const runs = await database.runs.list({ status, mode, limit: 200 });
-        allRuns.push(...runs);
+        const count = allRuns.filter(
+          (run) => run.status === status && run.mode === mode,
+        ).length;
         lines.push(
-          `sunpilot_runs_total{status="${status}",mode="${mode}"} ${runs.length}`,
+          `sunpilot_runs_total{status="${status}",mode="${mode}"} ${count}`,
         );
       }
     }
-    const runsById = new Map(allRuns.map((run) => [run.id, run]));
-    const uniqueRuns = [...runsById.values()];
+    const uniqueRuns: RunRecord[] = allRuns;
     lines.push("# HELP sunpilot_run_duration_ms Run duration in ms.");
     lines.push("# TYPE sunpilot_run_duration_ms histogram");
     for (const mode of RUN_MODES) {
@@ -253,9 +260,27 @@ export function registerDaemonMetricsRoutes(
       }
       toolLatencyGroups.set(call.skillId, latencyGroup);
     }
+    // Obs5: Bound skill_id label cardinality — only emit tool metrics for
+    // the top N skills by total call count. Prevents unbounded label
+    // explosion when many distinct skills have been invoked.
+    const skillTotalCounts = new Map<string, number>();
+    for (const group of toolCallGroups.values()) {
+      skillTotalCounts.set(
+        group.skillId,
+        (skillTotalCounts.get(group.skillId) ?? 0) + group.count,
+      );
+    }
+    const topSkills = new Set(
+      [...skillTotalCounts.entries()]
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, METRICS_TOP_SKILLS_LIMIT)
+        .map(([id]) => id),
+    );
+
     lines.push("# HELP sunpilot_tool_calls_total Tool calls by skill.");
     lines.push("# TYPE sunpilot_tool_calls_total counter");
     for (const group of toolCallGroups.values()) {
+      if (!topSkills.has(group.skillId)) continue;
       lines.push(
         `sunpilot_tool_calls_total{skill_id="${metricLabel(group.skillId)}",status="${metricLabel(group.status)}",risk_level="${metricLabel(group.riskLevel)}"} ${group.count}`,
       );
@@ -263,6 +288,7 @@ export function registerDaemonMetricsRoutes(
     lines.push("# HELP sunpilot_tool_latency_ms Tool call latency in ms.");
     lines.push("# TYPE sunpilot_tool_latency_ms histogram");
     for (const group of toolLatencyGroups.values()) {
+      if (!topSkills.has(group.skillId)) continue;
       pushHistogram(
         lines,
         "sunpilot_tool_latency_ms",

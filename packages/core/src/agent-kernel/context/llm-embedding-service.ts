@@ -36,6 +36,9 @@ export class LlmEmbeddingService implements EmbeddingService {
   /** Default embedding dimension (OpenAI text-embedding-3-small). */
   private static readonly DEFAULT_DIM = 1536;
 
+  /** §B7: Maximum cache entries before LRU eviction kicks in. */
+  private static readonly MAX_CACHE_SIZE = 1000;
+
   /** Cache: text → embedding vector. Shared across all callers. */
   private readonly cache = new Map<string, number[]>();
 
@@ -49,6 +52,12 @@ export class LlmEmbeddingService implements EmbeddingService {
    * short-circuit LLM-based intent classification.
    */
   private _degraded = false;
+
+  /** §B6: timestamp (ms) when the service entered degraded mode. */
+  private _degradedAt = 0;
+
+  /** §B6: how long to skip the real provider before retrying (5 minutes). */
+  private static readonly DEGRADED_RECOVERY_MS = 5 * 60 * 1000;
 
   /** Configured embedding dimension. */
   readonly dimension: number;
@@ -67,7 +76,7 @@ export class LlmEmbeddingService implements EmbeddingService {
 
   async embed(text: string): Promise<number[]> {
     // Check cache first
-    const cached = this.cache.get(text);
+    const cached = this.cacheGet(text);
     if (cached) {
       this._cacheStats.hits++;
       return cached;
@@ -75,30 +84,42 @@ export class LlmEmbeddingService implements EmbeddingService {
     this._cacheStats.misses++;
 
     // Tier 1: Real embedding provider
-    if (this.deps.embeddingProvider && !this._degraded) {
+    if (this.deps.embeddingProvider && this.shouldTryRealProvider()) {
       try {
         const vector = await this.deps.embeddingProvider.embed(text);
-        this.cache.set(text, vector);
+        // §B6: provider succeeded — clear degraded state so future calls
+        // can use the real provider without waiting for the recovery window.
+        if (this._degraded) {
+          this._degraded = false;
+          this._degradedAt = 0;
+        }
+        this.cacheSet(text, vector);
         return vector;
       } catch {
         // Provider failed — mark degraded so callers know similarity
         // scores from this point forward are lexical, not semantic.
-        this._degraded = true;
-        console.warn(
-          "[embedding] Provider API call failed, switching to lexical fallback for remaining session. " +
-          "Semantic short-circuit (IntentRouter Layer 1) is now disabled.",
-        );
+        // §B6: record the timestamp so we can retry after the recovery
+        // window instead of staying degraded forever.
+        if (!this._degraded) {
+          this._degraded = true;
+          this._degradedAt = Date.now();
+          console.warn(
+            "[embedding] Provider API call failed, switching to lexical fallback. " +
+            "Semantic short-circuit (IntentRouter Layer 1) is now disabled. " +
+            `Will retry the real provider in ${LlmEmbeddingService.DEGRADED_RECOVERY_MS / 1000}s.`,
+          );
+        }
       }
     }
     // Tier 2: Lexical keyword fallback (NOT semantic — lexical overlap only)
     const fallbackVector = this.keywordEmbed(text);
-    this.cache.set(text, fallbackVector);
+    this.cacheSet(text, fallbackVector);
     return fallbackVector;
   }
 
   async embedBatch(texts: string[]): Promise<number[][]> {
     // Check cache for all texts first
-    const results: (number[] | null)[] = texts.map((t) => this.cache.get(t) ?? null);
+    const results: (number[] | null)[] = texts.map((t) => this.cacheGet(t) ?? null);
 
     // Collect uncached texts
     const uncachedIndices: number[] = [];
@@ -116,19 +137,27 @@ export class LlmEmbeddingService implements EmbeddingService {
       this._cacheStats.misses += uncachedTexts.length;
 
       // Tier 1: Real embedding provider (batch)
-      if (this.deps.embeddingProvider) {
+      if (this.deps.embeddingProvider && this.shouldTryRealProvider()) {
         try {
           const vectors = await this.deps.embeddingProvider.embedBatch(uncachedTexts);
+          if (this._degraded) {
+            this._degraded = false;
+            this._degradedAt = 0;
+          }
           for (let j = 0; j < uncachedIndices.length; j++) {
             const idx = uncachedIndices[j]!;
             const vector = vectors[j];
             if (vector && vector.length > 0) {
-              this.cache.set(uncachedTexts[j]!, vector);
+              this.cacheSet(uncachedTexts[j]!, vector);
               results[idx] = vector;
             }
           }
         } catch {
           // Provider failed — fall through to per-text fallback
+          if (!this._degraded) {
+            this._degraded = true;
+            this._degradedAt = Date.now();
+          }
         }
       }
 
@@ -141,6 +170,42 @@ export class LlmEmbeddingService implements EmbeddingService {
     }
 
     return results as number[][];
+  }
+
+  /**
+   * §B6: decide whether to attempt the real provider. Always try when not
+   * degraded; when degraded, only retry after the recovery window has
+   * elapsed so a transient outage doesn't permanently disable semantic
+   * embeddings.
+   */
+  private shouldTryRealProvider(): boolean {
+    if (!this._degraded) return true;
+    return Date.now() - this._degradedAt >= LlmEmbeddingService.DEGRADED_RECOVERY_MS;
+  }
+
+  /**
+   * §B7: LRU-aware cache get. Re-inserts the entry so it moves to the end
+   * of the Map's insertion order (most recently used).
+   */
+  private cacheGet(key: string): number[] | undefined {
+    const value = this.cache.get(key);
+    if (value === undefined) return undefined;
+    // Move to end (most recently used) by deleting + re-inserting.
+    this.cache.delete(key);
+    this.cache.set(key, value);
+    return value;
+  }
+
+  /**
+   * §B7: LRU-aware cache set. Evicts the oldest entry (first key in
+   * insertion order) when the cache exceeds MAX_CACHE_SIZE.
+   */
+  private cacheSet(key: string, value: number[]): void {
+    if (this.cache.size >= LlmEmbeddingService.MAX_CACHE_SIZE && !this.cache.has(key)) {
+      const oldestKey = this.cache.keys().next().value;
+      if (oldestKey !== undefined) this.cache.delete(oldestKey);
+    }
+    this.cache.set(key, value);
   }
 
   /**
@@ -165,6 +230,7 @@ export class LlmEmbeddingService implements EmbeddingService {
   /** Reset degraded state (e.g. after provider recovers or on config reload). */
   clearDegraded(): void {
     this._degraded = false;
+    this._degradedAt = 0;
   }
 
   /** Read-only snapshot of cache statistics for trace/debug. */
@@ -188,18 +254,26 @@ export class LlmEmbeddingService implements EmbeddingService {
     const uncached = texts.filter((t) => !this.cache.has(t));
     if (uncached.length === 0) return;
 
-    if (this.deps.embeddingProvider) {
+    if (this.deps.embeddingProvider && this.shouldTryRealProvider()) {
       try {
         const vectors = await this.deps.embeddingProvider.embedBatch(uncached);
+        if (this._degraded) {
+          this._degraded = false;
+          this._degradedAt = 0;
+        }
         for (let i = 0; i < uncached.length; i++) {
           const text = uncached[i];
           const vector = vectors[i];
           if (text !== undefined && vector && vector.length > 0) {
-            this.cache.set(text, vector);
+            this.cacheSet(text, vector);
           }
         }
       } catch {
         // Batch failed — fall back to individual (they'll cache on demand)
+        if (!this._degraded) {
+          this._degraded = true;
+          this._degradedAt = Date.now();
+        }
       }
     }
     // Fallback vectors are computed on demand and cached individually

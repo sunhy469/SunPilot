@@ -217,16 +217,25 @@ export class ModelRouter {
       ...(this.fallback ? [this.fallback] : []),
     ];
 
+    // §C3: Track whether the current provider has already streamed any
+    // delta to the caller. If a provider fails AFTER emitting output,
+    // falling back to the next provider would replay the stream from the
+    // beginning and corrupt the recipient's accumulated text. In that case
+    // we must NOT fall back — surface the error instead.
+    let emittedAny = false;
+
     for (const config of providersToTry) {
       try {
         usedModel = config.model;
         usedProviderId = config.provider.id;
+        emittedAny = false;
 
         for await (const delta of config.provider.streamChat(
           requestWithSignal,
         )) {
           outputTokens += estimateDeltaTokens(delta.delta);
           yield delta;
+          emittedAny = true;
         }
 
         // Success — record in-memory and persist to DB (§P1-5)
@@ -271,7 +280,14 @@ export class ModelRouter {
           throw error;
         }
 
-        // Try next provider
+        // §C3: If this provider already streamed partial output, falling
+        // back would replay deltas from the start and corrupt the output.
+        // Surface the error instead of retrying.
+        if (emittedAny) {
+          throw err;
+        }
+
+        // No output emitted yet — safe to try the next provider.
         fallbackUsed = true;
         fallbackReason = `Provider "${usedProviderId}" failed: ${err.message}`;
         continue;

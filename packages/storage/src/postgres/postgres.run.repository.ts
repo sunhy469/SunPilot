@@ -97,22 +97,28 @@ export class PostgresRunRepository implements RunRepository {
       error?: unknown;
     },
   ): Promise<void> {
+    const sets: string[] = [
+      "status = $1",
+      "updated_at = COALESCE($2, NOW())",
+      "completed_at = COALESCE($3, completed_at)",
+      "cancelled_at = COALESCE($4, cancelled_at)",
+    ];
+    const values: unknown[] = [
+      input.status,
+      input.updatedAt ?? null,
+      input.completedAt ?? null,
+      input.cancelledAt ?? null,
+    ];
+    // Only update `error` when explicitly provided. This allows callers to
+    // clear it (by passing null) instead of COALESCE silently preserving it.
+    if (input.error !== undefined) {
+      sets.push(`error = $${values.length + 1}::jsonb`);
+      values.push(JSON.stringify(input.error));
+    }
+    values.push(id);
     await this.pool.query(
-      `UPDATE runs
-       SET status = $1,
-           updated_at = COALESCE($2, NOW()),
-           completed_at = COALESCE($3, completed_at),
-           cancelled_at = COALESCE($4, cancelled_at),
-           error = COALESCE($5::jsonb, error)
-       WHERE id = $6`,
-      [
-        input.status,
-        input.updatedAt ?? null,
-        input.completedAt ?? null,
-        input.cancelledAt ?? null,
-        input.error === undefined ? null : JSON.stringify(input.error),
-        id,
-      ],
+      `UPDATE runs SET ${sets.join(", ")} WHERE id = $${values.length}`,
+      values,
     );
   }
 

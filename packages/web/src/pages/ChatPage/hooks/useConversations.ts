@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { createRequest } from "../../../shared/api/client";
+import { endpoints } from "../../../shared/api/endpoints";
 import {
   createConversation,
   deleteConversation,
-  getConversationMessages,
   listConversations,
   touchConversation,
   updateConversation,
@@ -179,11 +179,10 @@ export function useConversations(request: Request, enabled: boolean) {
     [request],
   );
 
-  /** Select an existing conversation — replaces messages and updates updatedAt */
-  const selectConversation = useCallback(async (id: string) => {
+  /** Select an existing conversation — sets active id; messages are loaded by the
+   *  activeConversationId useEffect (single source of truth, avoids double fetch). */
+  const selectConversation = useCallback((id: string) => {
     setActiveConversationId(id);
-    const response = await getConversationMessages(request, id);
-    setMessages(response.items);
     // Touch conversation to update updatedAt (fire-and-forget)
     touchConversation(request, id).then((updated) => {
       if (updated) {
@@ -213,25 +212,29 @@ export function useConversations(request: Request, enabled: boolean) {
         throw error;
       }
 
-      setConversations((items) => items.filter((item) => item.id !== id));
+      // W1: use the functional update form to compute remaining from the latest
+      // state (avoids stale `conversations` closure). The next active id is
+      // captured from the fresh list inside the updater.
+      let nextId = "";
+      setConversations((items) => {
+        const remaining = items.filter((item) => item.id !== id);
+        if (activeConversationId === id) {
+          nextId = remaining[0]?.id ?? "";
+        }
+        return remaining;
+      });
 
       if (activeConversationId === id) {
-        // Switch to the first remaining conversation (use current conversations
-        // state since setConversations hasn't flushed yet)
-        const remaining = conversations.filter((item) => item.id !== id);
-        const next = remaining[0];
-        if (next) {
-          setActiveConversationId(next.id);
-          void getConversationMessages(request, next.id).then((r) =>
-            setMessages(r.items),
-          );
+        if (nextId) {
+          // messages will be loaded by the activeConversationId useEffect
+          setActiveConversationId(nextId);
         } else {
           setActiveConversationId("");
           setMessages([]);
         }
       }
     },
-    [activeConversationId, conversations, request],
+    [activeConversationId, request],
   );
 
   const togglePin = useCallback(
@@ -262,9 +265,22 @@ export function useConversations(request: Request, enabled: boolean) {
 
   useEffect(() => {
     if (!activeConversationId || !enabled) return;
-    void getConversationMessages(request, activeConversationId).then((response) => {
-      setMessages((current) => mergeMessagesById(current, response.items));
-    });
+    // AbortController: cancel in-flight fetch when id changes or component unmounts,
+    // preventing stale responses from overwriting the current conversation's messages.
+    const controller = new AbortController();
+    request<{ conversationId: string; items: ChatMessage[] }>(
+      endpoints.conversationMessages(activeConversationId),
+      { signal: controller.signal },
+    )
+      .then((response) => {
+        setMessages((current) => mergeMessagesById(current, response.items));
+      })
+      .catch((err: unknown) => {
+        // AbortError is expected when switching conversations or unmounting
+        if (err instanceof DOMException && err.name === "AbortError") return;
+        // Other errors are non-critical; messages will retry on next refresh
+      });
+    return () => controller.abort();
   }, [activeConversationId, enabled, request]);
 
   return {
