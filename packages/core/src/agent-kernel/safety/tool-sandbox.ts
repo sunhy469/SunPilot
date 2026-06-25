@@ -488,8 +488,12 @@ function matchPath(path: string, pattern: string): boolean {
   if (pattern.endsWith("/") && path.startsWith(pattern)) return true;
   // Simple glob: * matches any sequence except /
   if (pattern.includes("*")) {
+    // §B32: escape regex metacharacters in user-supplied patterns before
+    // interpolation into new RegExp. This prevents ReDoS via patterns like
+    // (a+)+b and also prevents unintended regex semantics from ., +, ?, etc.
+    const escaped = escapeRegex(pattern);
     const regex = new RegExp(
-      "^" + pattern.replace(/\*/g, "[^/]*").replace(/\./g, "\\.") + "$",
+      "^" + escaped.replace(/\*/g, "[^/]*") + "$",
     );
     return regex.test(path);
   }
@@ -519,13 +523,25 @@ function matchDomain(hostname: string, pattern: string): boolean {
   }
   // Contains wildcard
   if (pattern.includes("*")) {
+    // §B32: escape regex metacharacters before building the regex to prevent
+    // ReDoS from user-supplied domain patterns.
+    const escaped = escapeRegex(pattern);
     const regex = new RegExp(
-      "^" + pattern.replace(/\*/g, ".*").replace(/\./g, "\\.") + "$",
+      "^" + escaped.replace(/\*/g, ".*") + "$",
       "i",
     );
     return regex.test(hostname);
   }
   return hostname === pattern || hostname.endsWith("." + pattern);
+}
+
+/**
+ * Escape regex-special characters in a user-supplied string so it can be
+ * safely interpolated into a `new RegExp(...)` constructor. §B32
+ */
+function escapeRegex(s: string): string {
+  // Escapes: . + ? ^ $ { } [ ] ( ) | \ /
+  return s.replace(/[.+?^${}()|[\]\\\/]/g, "\\$&");
 }
 
 function formatBytes(bytes: number): string {

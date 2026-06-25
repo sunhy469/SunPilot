@@ -221,6 +221,9 @@ export interface RoutedIntent {
   reason: string;
   /** Trace/debug metadata for the routing decision (§P2). */
   trace?: {
+    /** Which layer decided the intent (§P3).
+     *  "form_match" | "embedding_short_circuit" | "llm" | "pre_inference" | "default" */
+    routingLayer?: string;
     /** "real" | "lexical_fallback" | "none" */
     embeddingMode?: string;
     /** Top embedding similarity score. */
@@ -494,6 +497,15 @@ export type ToolDecision =
 export interface PreliminaryInferenceResult {
   /** Pre-inference text — internal routing hint only (§P2). */
   text: string;
+  /** §P3 opt: Intent type from the pre-inference LLM call.
+   *  When set and confidence ≥ 0.7, the main IntentRouter skips
+   *  its own Layer 2 LLM call, saving ~200-800ms.
+   *  Uses pre-inference's own category system (e.g. "casual_chat",
+   *  "product_search", "image_analysis") — IntentRouter maps
+   *  these to its own IntentType union for the final decision. */
+  intentType?: string;
+  /** Confidence of the pre-inference intent classification (0-1). */
+  intentConfidence?: number;
   /** Tool-matching hints extracted from the pre-inference output,
    *  injected into decideTools() as prioritySkills. */
   toolHints?: Array<{
@@ -597,6 +609,20 @@ export interface ContextBuilder {
 
 export interface IntentRouter {
   route(context: AgentContext, signal: AbortSignal): Promise<RoutedIntent>;
+
+  /** §P3 opt: Route with pre-inference result available.
+   *  When the pre-inference already classified the intent at
+   *  high confidence (≥ 0.7), Layer 2 LLM call can be skipped.
+   *  Layer 0 (form-match) and Layer 1 (embedding) still run
+   *  for skill selection accuracy. */
+  routeWithPreInference?(
+    context: AgentContext,
+    signal: AbortSignal,
+    preInference: {
+      intentType?: string;
+      intentConfidence?: number;
+    },
+  ): Promise<RoutedIntent>;
 }
 
 export interface Planner {

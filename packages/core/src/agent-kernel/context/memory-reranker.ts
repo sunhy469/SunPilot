@@ -87,7 +87,17 @@ export class MmrMemoryReranker implements MemoryReranker {
     a: number[] | undefined,
     b: number[] | undefined,
   ): number {
-    if (!a || !b || a.length !== b.length || a.length === 0) return 0;
+    // §B4: dimension mismatch usually means comparing embeddings from
+    // different models / providers — silently truncating would produce a
+    // meaningless score. Fail closed (0) and log so the operator can fix the
+    // configuration.
+    if (!a || !b || a.length === 0) return 0;
+    if (a.length !== b.length) {
+      console.warn(
+        `[memory-reranker] cosineSimilarity dimension mismatch: ${a.length} vs ${b.length}; returning 0`,
+      );
+      return 0;
+    }
     let dot = 0,
       normA = 0,
       normB = 0;

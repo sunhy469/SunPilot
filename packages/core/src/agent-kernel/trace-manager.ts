@@ -17,7 +17,8 @@ export type SpanKind =
   | "reflecting"
   | "responding"
   | "memory_writing"
-  | "approval_handling";
+  | "approval_handling"
+  | "pre_inference_await";
 
 export interface SpanTiming {
   startMs: number;
@@ -64,6 +65,21 @@ export interface SpanMetrics {
   retrievalCandidateCount?: number;
   /** Whether retrieval fell back to broader search. */
   retrievalFallback?: boolean;
+  // ── §P3: Pre-inference observability metrics ───────────────────
+  /** Intent type from pre-inference classification. */
+  preInferenceIntentType?: string;
+  /** Confidence score from pre-inference (0-1). */
+  preInferenceConfidence?: number;
+  /** Wall-clock latency of the pre-inference LLM call (ms). */
+  preInferenceLatencyMs?: number;
+  /** Error message if pre-inference failed. */
+  preInferenceError?: string;
+  /** Timeout duration if pre-inference was cut short (ms). */
+  preInferenceTimeoutMs?: number;
+  /** Which routing layer decided the final intent. */
+  routingLayer?: string;
+  /** Whether pre-inference result was used to skip Layer 2. */
+  preInferenceUsed?: string;
 }
 
 export interface Span {

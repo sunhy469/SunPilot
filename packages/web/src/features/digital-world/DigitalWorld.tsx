@@ -111,7 +111,7 @@ export function DigitalWorld() {
       {import.meta.env.DEV && <MovementTestBar onMoveTo={triggerMoveTo} />}
       <TaskPanel open={taskPanelOpen} beingId={being?.id} onClose={() => setTaskPanelOpen(false)} />
       <ArtifactBoxPanel open={artifactPanelOpen} beingId={being?.id} onClose={() => setArtifactPanelOpen(false)} />
-      <BeingChatPanel open={chatPanelOpen} beingName={being?.name} onClose={() => setChatPanelOpen(false)} />
+      <BeingChatPanel open={chatPanelOpen} beingId={being?.id} beingName={being?.name} request={request} onClose={() => setChatPanelOpen(false)} />
       <StatusPanel open={statusPanelOpen} beingId={being?.id} onClose={() => setStatusPanelOpen(false)} />
       <ActionLogPanel open={logPanelOpen} beingId={being?.id} onClose={() => setLogPanelOpen(false)} />
     </section>
