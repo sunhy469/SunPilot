@@ -43,8 +43,8 @@ export class PostgresStepRepository implements StepRepository {
     await this.pool.query(
       `UPDATE steps
        SET status = $1,
-           output = $2::jsonb,
-           error = $3::jsonb,
+           output = COALESCE($2::jsonb, output),
+           error = COALESCE($3::jsonb, error),
            started_at = CASE WHEN $4 = 'running' THEN COALESCE(started_at, NOW()) ELSE started_at END,
            completed_at = CASE WHEN $5 THEN NOW() ELSE NULL END
        WHERE id = $6`,

@@ -17,7 +17,6 @@ blob-report/
 .trae/
 .claude/
 
-# Test / eval directories
+# Test directories
 e2e/
-evals/
 

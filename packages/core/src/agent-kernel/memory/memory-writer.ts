@@ -482,6 +482,11 @@ export class DefaultMemoryWriter {
     relations?: MemoryRelationEntry[],
   ): MemoryRecord {
     const now = this.clock().toISOString();
+    // §B17: Redact secrets from the title too — previously the title was
+    // stored as-is, leaking secrets that the content scan had removed.
+    const redactedTitle = this.secretRedactor.scan(
+      candidate.title,
+    ).redactedText;
     return {
       id: this.idGenerator(),
       runId: input.input.runId,
@@ -490,7 +495,7 @@ export class DefaultMemoryWriter {
       scope: candidate.scope,
       scopeId: candidate.scopeId,
       type: candidate.type,
-      title: candidate.title,
+      title: redactedTitle,
       content: redactedContent,
       summary: candidate.summary ?? redactedContent,
       source: candidate.source,
@@ -553,8 +558,21 @@ function scopeIdFor(
   input: MemoryWriteInput,
 ): string | undefined {
   switch (scope) {
-    case "user":
+    case "user": {
+      // §B17: Defensively handle missing userId. defaultScopeForType
+      // normally ensures "user" scope only when userId exists, but if an
+      // upstream bug produces scope="user" without userId, warn loudly and
+      // return undefined so the inconsistency is observable rather than
+      // silently persisting a user-scoped memory with no owner.
+      if (!input.input.userId) {
+        console.warn(
+          "[memory-writer] scopeIdFor('user') called but userId is missing; " +
+            "memory will have no scope owner",
+        );
+        return undefined;
+      }
       return input.input.userId;
+    }
     case "conversation":
       return input.input.conversationId;
     case "run":

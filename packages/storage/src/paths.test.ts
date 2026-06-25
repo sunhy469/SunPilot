@@ -20,6 +20,7 @@ describe("local runtime paths", () => {
     ensureSunPilotHome(paths);
     expect(existsSync(paths.runtime)).toBe(true);
     expect(paths.pidFile).toBe(join(home, "runtime", "daemon.pid"));
+    expect(paths.token).toBe(join(home, "runtime", "token"));
   });
 });
 
@@ -31,7 +32,7 @@ describe("SunPilot config file", () => {
     expect(readSunPilotConfig(paths)).toMatchObject({
       version: 1,
       server: { host: "127.0.0.1", port: 3737 },
-      security: { requireLocalToken: false, allowLan: false },
+      security: { requireLocalToken: true, allowLan: false },
       storage: { home }
     });
 

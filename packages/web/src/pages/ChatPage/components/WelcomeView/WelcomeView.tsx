@@ -26,7 +26,7 @@ export function WelcomeView({
           value={draft}
           onChange={setDraft}
           placeholder="向 SunPilot 提问..."
-          variant="default"
+          variant="welcome"
           disabled={disabled}
           onSend={onSend}
         />

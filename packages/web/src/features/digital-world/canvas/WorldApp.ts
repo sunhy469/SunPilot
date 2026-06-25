@@ -1,7 +1,8 @@
-import { Application, Container } from "pixi.js";
+import { Application, Container, type Graphics } from "pixi.js";
 import { CANVAS_BG_COLOR } from "../constants";
 import { mockNodes, mockEdges, mockBeing } from "../mock/mockWorld";
 import type { WorldNodeData, WorldEdgeData, DigitalBeingData } from "../types";
+import type { RouteAnimator } from "../path/route-animation";
 import { WorldGrid } from "./WorldGrid";
 import { RoadLayer } from "./RoadLayer";
 import { WorkstationNode } from "./WorkstationNode";
@@ -29,6 +30,18 @@ export class WorldApp {
 
   /** Viewport container — all world objects live here, can be panned/zoomed. */
   private viewport = new Container();
+
+  // C20: explicit reference to the grid Graphics so redrawGrid doesn't rely on
+  // viewport child ordering (getChildAt(0) was fragile).
+  private gridGraphics?: Graphics;
+
+  // C19/W7: the currently active RouteAnimator, if any. Used to detect
+  // in-progress movement so polling updates don't interrupt the animation, and
+  // so destroy() can stop it cleanly before tearing down the app.
+  private _activeAnimator: RouteAnimator | null = null;
+
+  // W12: set once destroy() is called so the async mount() can bail out.
+  private _disposed = false;
 
   private _nodes: WorldNodeData[] = mockNodes;
   private _edges: WorldEdgeData[] = mockEdges;
@@ -75,6 +88,13 @@ export class WorldApp {
       powerPreference: "high-performance",
     });
 
+    // W12: guard against destroy() racing with the async init — if the app was
+    // torn down while awaiting init(), destroy the just-created app and bail.
+    if (this._disposed) {
+      app.destroy(true);
+      return;
+    }
+
     container.appendChild(app.canvas);
     this.app = app;
 
@@ -111,13 +131,27 @@ export class WorldApp {
       this.drawWorld();
       this.setupNodeInteraction();
     } else {
-      // 增量更新 being
-      this.updateBeingPosition(data.being.currentNodeId);
+      // C19: when a route animation is in progress, skip the position update so
+      // polling data doesn't snap the being back to a node mid-route. Only
+      // refresh the status text and visual status.
+      if (!this.isAnimating()) {
+        this.updateBeingPosition(data.being.currentNodeId);
+      }
       this.updateBeingStatus(data.being.statusText);
       this.updateBeingVisualStatus(data.being.status);
     }
 
     this._dataVersion++;
+  }
+
+  /** C19/W7: register the active route animator. Pass null to clear. */
+  registerAnimator(animator: RouteAnimator | null) {
+    this._activeAnimator = animator;
+  }
+
+  /** C19: whether a route animation is currently in progress. */
+  isAnimating(): boolean {
+    return this._activeAnimator?.isRunning ?? false;
   }
 
   resize(width: number, height: number) {
@@ -127,6 +161,11 @@ export class WorldApp {
   }
 
   destroy() {
+    this._disposed = true;
+    // W7: stop any in-progress route animation before tearing down the app so
+    // its ticker callback doesn't fire during/after destruction.
+    this._activeAnimator?.stop();
+    this._activeAnimator = null;
     this.stopTicker();
     this.camera?.destroy();
     this.grid.destroy();
@@ -187,10 +226,12 @@ export class WorldApp {
     );
   }
 
-  /** 停止所有 ticker 回调。RouteAnimator 自管理注册/注销，此处只做安全兜底。 */
+  /** 停止 ticker，作为 RouteAnimator 注销之外的安全兜底。 */
   stopTicker() {
-    // No-op: RouteAnimator manages its own ticker registration.
-    // This method is kept for API compatibility and as a safety net.
+    // W7: actually stop the ticker so callbacks (e.g. a leaked RouteAnimator
+    // callback) can't fire after destroy. RouteAnimator manages its own
+    // registration; this is the safety net.
+    this.app?.ticker?.stop();
   }
 
   private setupCamera() {
@@ -257,6 +298,7 @@ export class WorldApp {
 
   private clearStage() {
     this.viewport.removeChildren();
+    this.gridGraphics = undefined;
     this.grid.destroy();
     this.roadLayer.destroy();
     for (const c of this.nodeContainers) {
@@ -278,8 +320,9 @@ export class WorldApp {
     // 1. 网格 — large enough to cover expanded world
     const gridW = Math.max(this.app.renderer.width, 3000);
     const gridH = Math.max(this.app.renderer.height, 2000);
-    const gridGfx = this.grid.draw(gridW, gridH);
-    this.viewport.addChild(gridGfx);
+    // C20: keep an explicit reference instead of relying on child order.
+    this.gridGraphics = this.grid.draw(gridW, gridH);
+    this.viewport.addChild(this.gridGraphics);
 
     // 2. 道路
     const roadGfx = this.roadLayer.draw(this._nodes, this._edges);
@@ -313,15 +356,17 @@ export class WorldApp {
 
   private redrawGrid() {
     if (!this.app) return;
-    // Remove old grid from viewport
-    const oldGrid = this.viewport.getChildAt(0);
+    // C20: operate on the explicit grid reference instead of getChildAt(0),
+    // which was fragile and assumed the grid was always the first child.
+    const oldGrid = this.gridGraphics;
     const gridW = Math.max(this.app.renderer.width, 3000);
     const gridH = Math.max(this.app.renderer.height, 2000);
-    const newGrid = this.grid.draw(gridW, gridH);
+    this.gridGraphics = this.grid.draw(gridW, gridH);
     if (oldGrid) {
       this.viewport.removeChild(oldGrid);
+      oldGrid.destroy();
     }
-    this.viewport.addChildAt(newGrid, 0);
+    this.viewport.addChildAt(this.gridGraphics, 0);
   }
 
   private idSetsDiffer<T extends { id: string }>(old: T[], next: T[]): boolean {

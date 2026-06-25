@@ -24,7 +24,7 @@ function mapArtifact(row: Record<string, unknown>): WorldArtifactRecord {
     locationNodeId: row["location_node_id"] as string,
     status: row["status"] as string,
     metadata: (row["metadata"] as Record<string, unknown>) ?? {},
-    createdAt: row["created_at"] as string,
+    createdAt: new Date(row["created_at"] as Date).toISOString(),
   };
 }
 

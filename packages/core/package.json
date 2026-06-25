@@ -16,7 +16,8 @@
   "dependencies": {
     "@sunpilot/protocol": "workspace:*",
     "@sunpilot/skill-runner": "workspace:*",
-    "@sunpilot/storage": "workspace:*"
+    "@sunpilot/storage": "workspace:*",
+    "zod": "^3.25.48"
   },
   "devDependencies": {
     "typescript": "^5.8.3",

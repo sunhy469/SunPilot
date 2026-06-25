@@ -51,18 +51,18 @@ export class MultiHopRetriever {
         for (const rm of related) {
           if (!seenIds.has(rm.id)) {
             seenIds.add(rm.id);
-            newThisHop.push(rm);
+            // §B10: shallow-copy with the boosted score instead of mutating
+            // the caller-provided record. Boost: small relation-based lift.
+            newThisHop.push({
+              ...rm,
+              score: (rm.score ?? 0.3) * 0.9 + 0.1,
+            });
           }
         }
         if (newThisHop.length >= this.topKPerHop) break;
       }
 
       if (newThisHop.length === 0) break;
-
-      // Boost relevance slightly for relation-based recall
-      for (const rm of newThisHop) {
-        rm.score = (rm.score ?? 0.3) * 0.9 + 0.1; // Small relation boost
-      }
 
       allMemories.push(...newThisHop);
       hopGraph.push({

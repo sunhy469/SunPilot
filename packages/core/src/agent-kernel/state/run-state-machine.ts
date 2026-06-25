@@ -20,7 +20,9 @@ export const LEGAL_TRANSITIONS: Record<AgentLoopStatus, readonly AgentLoopStatus
   completed: [],
   cancelled: [],
   failed: [],
-  interrupted: ["cancelled", "failed"],
+  // §B23: allow resuming an interrupted run by re-entering the early phases
+  // (full restart via `created`, or context rebuild via `context_building`).
+  interrupted: ["cancelled", "failed", "created", "context_building"],
 };
 
 /**

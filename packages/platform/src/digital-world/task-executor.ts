@@ -44,11 +44,11 @@ export class TaskExecutor {
     const actionTemplates = TASK_ACTION_MAP[task.type] ?? [];
     if (actionTemplates.length === 0) return;
 
-    // Update task status to running
-    await this.deps.database.worldTasks.update(taskId, {
-      status: "running",
-      startedAt: new Date().toISOString(),
-    });
+    // Atomically claim the task: verify it's still queued, then mark running.
+    // Guards against concurrent executors double-claiming the same task
+    // (previously a non-atomic SELECT-then-UPDATE race).
+    const claimed = await this.claimTask(taskId);
+    if (!claimed) return;
 
     // Sync being's currentTaskId
     const beingId = task.beingId;
@@ -138,6 +138,25 @@ export class TaskExecutor {
       status: "completed",
       completedAt: new Date().toISOString(),
     });
+  }
+
+  /**
+   * Atomically claim a queued task and mark it running.
+   * Returns the task on success, or null if the task is missing or no longer
+   * claimable (e.g. already taken by another executor or in a terminal state).
+   */
+  private async claimTask(taskId: string) {
+    const db = this.deps.database;
+    const claim = async (dbc: DatabaseContext) => {
+      const current = await dbc.worldTasks.findById(taskId);
+      if (!current || current.status !== "queued") return null;
+      await dbc.worldTasks.update(taskId, {
+        status: "running",
+        startedAt: new Date().toISOString(),
+      });
+      return current;
+    };
+    return db.transaction ? db.transaction(claim) : claim(db);
   }
 
   private buildActionParams(type: string, param?: string): Record<string, unknown> {

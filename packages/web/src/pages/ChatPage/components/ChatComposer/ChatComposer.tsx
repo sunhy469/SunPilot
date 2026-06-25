@@ -117,10 +117,16 @@ export function ChatComposer({
   const [permission, setPermission] = useState("auto");
   const { options: modelOptions, defaultModelId } = useModels();
   const [model, setModel] = useState(defaultModelId);
+  // C21: track whether the user has manually chosen a model so the
+  // defaultModelId sync effect doesn't clobber their selection.
+  const userSelectedModelRef = useRef(false);
 
-  // Sync model when defaultModelId is loaded from API
+  // Sync model when defaultModelId is loaded from API, but only until the user
+  // manually picks a model — afterwards don't override their choice.
   useEffect(() => {
-    setModel(defaultModelId);
+    if (!userSelectedModelRef.current) {
+      setModel(defaultModelId);
+    }
   }, [defaultModelId]);
 
   // Track queued send when user clicks send while uploads are in progress
@@ -469,7 +475,10 @@ export function ChatComposer({
           <Select
             variant="borderless"
             value={model}
-            onChange={setModel}
+            onChange={(value) => {
+              userSelectedModelRef.current = true;
+              setModel(value);
+            }}
             options={modelOptions}
             size="small"
             className="chat-composer__select"

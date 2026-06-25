@@ -1,14 +1,26 @@
-import { afterEach, describe, expect, test } from "vitest";
+import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { WebSocket } from "ws";
 import { createDaemon } from "@sunpilot/daemon";
 import { InMemoryDatabaseContext } from "@sunpilot/storage";
 
 describe("daemon Agent WebSocket integration", () => {
   let daemon: Awaited<ReturnType<typeof createDaemon>> | undefined;
+  let previousTokenAuth: string | undefined;
+
+  beforeEach(() => {
+    // This suite exercises JSON-RPC plumbing, not the local token auth gate.
+    previousTokenAuth = process.env.SUNPILOT_DISABLE_TOKEN_AUTH;
+    process.env.SUNPILOT_DISABLE_TOKEN_AUTH = "1";
+  });
 
   afterEach(async () => {
     await daemon?.stop();
     daemon = undefined;
+    if (previousTokenAuth === undefined) {
+      delete process.env.SUNPILOT_DISABLE_TOKEN_AUTH;
+    } else {
+      process.env.SUNPILOT_DISABLE_TOKEN_AUTH = previousTokenAuth;
+    }
   });
 
   test("streams Agent events and returns chat.send acknowledgement", async () => {
@@ -100,7 +112,7 @@ describe("daemon Agent WebSocket integration", () => {
           status: "completed",
         }),
         approve: async () => ({ approved: true }),
-        reject: async () => ({ rejected: true }),
+        reject: async () => ({ rejected: true, runId: "run_integration", strategy: "interrupt" }),
       },
     });
     await daemon.start();

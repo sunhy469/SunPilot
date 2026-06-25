@@ -135,8 +135,10 @@ async function requirePendingApproval(
 ): Promise<ApprovalRecord> {
   const approval = await database.approvals.findById(approvalId);
   if (!approval) {
+    // §B29: AGENT_APPROVAL_REQUIRED is for "this action needs approval" —
+    // a missing record is a NOT_FOUND. Use the dedicated error code.
     throw Object.assign(new Error(`Unknown approval: ${approvalId}`), {
-      code: "AGENT_APPROVAL_REQUIRED",
+      code: "AGENT_APPROVAL_NOT_FOUND",
     });
   }
   if (approval.status !== "pending") {

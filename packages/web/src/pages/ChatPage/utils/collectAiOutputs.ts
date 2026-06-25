@@ -108,6 +108,7 @@ function cardToOutputs(
     const data = card.data as FileBundleCardData;
     for (let i = 0; i < data.files.length; i++) {
       const file = data.files[i];
+      if (!file) continue;
       outputs.push({
         id: `${baseId}:${i}`,
         messageId,
@@ -141,6 +142,7 @@ function cardToOutputs(
     const data = card.data as GalleryCardData;
     for (let i = 0; i < data.images.length; i++) {
       const img = data.images[i];
+      if (!img) continue;
       outputs.push({
         id: `${baseId}:${i}`,
         messageId,

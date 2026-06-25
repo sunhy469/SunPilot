@@ -24,11 +24,11 @@ function mapAction(row: Record<string, unknown>): WorldActionRecord {
     routeNodeIds: (row["route_node_ids"] as string[]) ?? undefined,
     agentRunId: (row["agent_run_id"] as string) ?? undefined,
     statusText: (row["status_text"] as string) ?? "",
-    startedAt: (row["started_at"] as string) ?? undefined,
-    completedAt: (row["completed_at"] as string) ?? undefined,
+    startedAt: row["started_at"] ? new Date(row["started_at"] as Date).toISOString() : undefined,
+    completedAt: row["completed_at"] ? new Date(row["completed_at"] as Date).toISOString() : undefined,
     error: row["error"] ?? undefined,
     params: (row["params"] as Record<string, unknown>) ?? {},
-    createdAt: row["created_at"] as string,
+    createdAt: new Date(row["created_at"] as Date).toISOString(),
   };
 }
 
@@ -94,6 +94,7 @@ export class PostgresWorldActionRepository implements WorldActionRepository {
       status: patch.status,
       agent_run_id: patch.agentRunId,
       from_node_id: patch.fromNodeId,
+      to_node_id: patch.toNodeId,
       route_node_ids: patch.routeNodeIds ? JSON.stringify(patch.routeNodeIds) : undefined,
       status_text: patch.statusText,
       started_at: patch.startedAt,

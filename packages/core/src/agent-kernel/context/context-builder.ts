@@ -13,6 +13,53 @@ import {
 } from "./summary-stale-detector.js";
 import { MemoryCompressor } from "./memory-compressor.js";
 
+/**
+ * Metrics collected during memory retrieval (§P3 — observability).
+ *
+ * Records timing and counts for each pipeline stage so operators
+ * can monitor retrieval quality and diagnose performance regressions.
+ */
+export interface MemoryRetrievalMetrics {
+  /** Number of memories from initial hybrid search. */
+  initialHybridCount: number;
+  /** Number of memories from vector-only recall. */
+  vectorRecallCount: number;
+  /** Total after dedup and merge of initial passes. */
+  initialTotalCount: number;
+  /** Whether multi-hop retrieval was attempted. */
+  multiHopAttempted: boolean;
+  /** Number of memories added by multi-hop expansion. */
+  multiHopAddedCount: number;
+  /** Multi-hop stage duration in milliseconds. */
+  multiHopDurationMs: number;
+  /** Whether query expansion was attempted. */
+  queryExpansionAttempted: boolean;
+  /** Number of expansion queries issued. */
+  expansionQueryCount: number;
+  /** Number of memories added by query expansion. */
+  expansionAddedCount: number;
+  /** Query expansion stage duration in milliseconds. */
+  expansionDurationMs: number;
+  /** Whether re-ranking was applied. */
+  rerankApplied: boolean;
+  /** Number of candidates before re-ranking. */
+  rerankCandidateCount: number;
+  /** Reranking stage duration in milliseconds. */
+  rerankDurationMs: number;
+  /** Number of memories after all stages (before compression). */
+  finalCount: number;
+  /** Number of memories after token budget trimming. */
+  includedCount: number;
+  /** Total memory retrieval wall-clock duration in milliseconds. */
+  totalMemorySearchMs: number;
+  /** Feature flags snapshot at retrieval time. */
+  featureFlags: {
+    multiHop: boolean;
+    queryExpansion: boolean;
+    mmrRerank: boolean;
+  };
+}
+
 export interface ContextBuilderDeps {
   /** Fetch conversation messages for the given conversation. */
   listMessages: (
@@ -143,6 +190,17 @@ export class ContextBuilder implements ContextBuilderInterface {
   private static readonly DEBUG_TIMING =
     typeof process !== "undefined" && process.env?.SUNPILOT_DEBUG_CONTEXT_TIMING === "1";
 
+  // ── Feature flags for memory retrieval stages (§P3) ──────────────
+  /** Enable multi-hop memory retrieval via memory_relations graph traversal. */
+  private static readonly FEATURE_MULTIHOP =
+    (typeof process !== "undefined" ? process.env?.SUNPILOT_MEMORY_MULTIHOP : undefined) !== "0";
+  /** Enable query expansion fallback when initial retrieval returns too few results. */
+  private static readonly FEATURE_QUERY_EXPANSION =
+    (typeof process !== "undefined" ? process.env?.SUNPILOT_MEMORY_QUERY_EXPANSION : undefined) !== "0";
+  /** Enable MMR/pairwise re-ranking of memory candidates. */
+  private static readonly FEATURE_MMR_RERANK =
+    (typeof process !== "undefined" ? process.env?.SUNPILOT_MEMORY_MMR_RERANK : undefined) !== "0";
+
   constructor(private readonly deps: ContextBuilderDeps) {
     this.budgeter = new TokenBudgeter(
       deps.maxContextTokens ?? 128_000,
@@ -243,6 +301,34 @@ export class ContextBuilder implements ContextBuilderInterface {
     // so they appear in the RunDebugPanel. Declared here (outside the
     // try block) so the contextSnapshot construction below can access them.
     const sourceFailures: Array<{ source: string; critical: boolean; error: string }> = [];
+
+    // §P3: Memory retrieval metrics for observability — declared outside
+    // the try block so it can be accessed during contextSnapshot construction
+    // regardless of whether memory search ran.
+    let topMemoriesCount = 0;
+    const memoryMetrics: MemoryRetrievalMetrics = {
+      initialHybridCount: 0,
+      vectorRecallCount: 0,
+      initialTotalCount: 0,
+      multiHopAttempted: false,
+      multiHopAddedCount: 0,
+      multiHopDurationMs: 0,
+      queryExpansionAttempted: false,
+      expansionQueryCount: 0,
+      expansionAddedCount: 0,
+      expansionDurationMs: 0,
+      rerankApplied: false,
+      rerankCandidateCount: 0,
+      rerankDurationMs: 0,
+      finalCount: 0,
+      includedCount: 0,
+      totalMemorySearchMs: 0,
+      featureFlags: {
+        multiHop: ContextBuilder.FEATURE_MULTIHOP,
+        queryExpansion: ContextBuilder.FEATURE_QUERY_EXPANSION,
+        mmrRerank: ContextBuilder.FEATURE_MMR_RERANK,
+      },
+    };
 
     try {
       // ── Parallel IO Group A: all independent data fetches ─────────
@@ -453,10 +539,14 @@ export class ContextBuilder implements ContextBuilderInterface {
                   id: summary.id,
                   content: summary.content,
                   metadata: summary.metadata as Record<string, unknown> | undefined,
+                  // §B13: when createdAt is missing, treat the summary as
+                  // ancient (epoch) instead of "now" — the previous fallback
+                  // masked stale content by making it look fresh, defeating
+                  // the purpose of stale detection.
                   createdAt:
                     typeof summary.metadata?.createdAt === "string"
                       ? summary.metadata.createdAt
-                      : new Date().toISOString(),
+                      : new Date(0).toISOString(),
                 },
                 newMessages: detectorMessages.map((m) => ({
                   role: m.role,
@@ -581,8 +671,8 @@ export class ContextBuilder implements ContextBuilderInterface {
           // Both can run in parallel since they only depend on queryEmbedding
           // from Group A.
           const [hybridMemories, vectorMemories] = await Promise.all([
-            // Hybrid search with 500ms soft timeout
-            Promise.race([
+            // Hybrid search with soft timeout (§B14: timer cleared on settle)
+            raceWithTimeout(
               this.deps.searchMemories({
                 query: input.message,
                 runId: input.runId,
@@ -592,12 +682,11 @@ export class ContextBuilder implements ContextBuilderInterface {
                 embedding: queryEmbedding,
                 stepId: this.deps.stepId,
               }),
-              new Promise<Awaited<ReturnType<NonNullable<typeof this.deps.searchMemories>>>>((resolve) =>
-                setTimeout(() => resolve([]), MEMORY_BUDGET_MS),
-              ),
-            ]).catch(() => [] as Awaited<ReturnType<NonNullable<typeof this.deps.searchMemories>>>),
+              MEMORY_BUDGET_MS,
+              [] as Awaited<ReturnType<NonNullable<typeof this.deps.searchMemories>>>,
+            ).catch(() => [] as Awaited<ReturnType<NonNullable<typeof this.deps.searchMemories>>>),
             queryEmbedding
-              ? Promise.race([
+              ? raceWithTimeout(
                   this.deps.searchMemories!({
                     query: "",
                     runId: input.runId,
@@ -606,10 +695,9 @@ export class ContextBuilder implements ContextBuilderInterface {
                     limit: 5,
                     embedding: queryEmbedding,
                   }),
-                  new Promise<Awaited<ReturnType<NonNullable<typeof this.deps.searchMemories>>>>((resolve) =>
-                    setTimeout(() => resolve([]), MEMORY_BUDGET_MS),
-                  ),
-                ]).catch(() => [] as Awaited<ReturnType<NonNullable<typeof this.deps.searchMemories>>>)
+                  MEMORY_BUDGET_MS,
+                  [] as Awaited<ReturnType<NonNullable<typeof this.deps.searchMemories>>>,
+                ).catch(() => [] as Awaited<ReturnType<NonNullable<typeof this.deps.searchMemories>>>)
               : Promise.resolve([] as Awaited<ReturnType<NonNullable<typeof this.deps.searchMemories>>>),
           ]);
 
@@ -625,26 +713,34 @@ export class ContextBuilder implements ContextBuilderInterface {
             }
           }
 
+          // §P3: Record initial counts
+          memoryMetrics.initialHybridCount = hybridMemories.length;
+          memoryMetrics.vectorRecallCount = vectorMemories.length;
+          memoryMetrics.initialTotalCount = allMemories.length;
+
           // Sort by score descending
           allMemories.sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
 
           // §Multi-hop retrieval: expand via memory_relations when initial results are sparse.
+          // §P3: Gated by SUNPILOT_MEMORY_MULTIHOP feature flag.
           if (
+            ContextBuilder.FEATURE_MULTIHOP &&
             this.deps.multiHopRetriever &&
             this.deps.findRelatedMemories &&
             allMemories.length < 5 &&
             allMemories.length > 0
           ) {
+            const tHop = Date.now();
+            memoryMetrics.multiHopAttempted = true;
             try {
-              const hopResult = await Promise.race([
+              const hopResult = await raceWithTimeout(
                 this.deps.multiHopRetriever.retrieve({
                   seedMemories: allMemories.slice(0, 3) as any[],
                   findRelated: this.deps.findRelatedMemories as any,
                 }),
-                new Promise<null>((resolve) =>
-                  setTimeout(() => resolve(null), 800),
-                ),
-              ]);
+                800,
+                null,
+              );
               if (hopResult && hopResult.memories.length > allMemories.length) {
                 const seenIds = new Set(allMemories.map((m) => m.id));
                 for (const rm of hopResult.memories) {
@@ -661,26 +757,35 @@ export class ContextBuilder implements ContextBuilderInterface {
                     });
                   }
                 }
+                memoryMetrics.multiHopAddedCount = hopResult.memories.length - (allMemories.length - hopResult.memories.length > 0 ? allMemories.length - hopResult.memories.length : 0);
               }
             } catch {
               // Multi-hop failed — continue with original results
             }
+            memoryMetrics.multiHopDurationMs = Date.now() - tHop;
+            // Fix added count: diff between current allMemories count and initial
+            memoryMetrics.multiHopAddedCount = Math.max(0, allMemories.length - memoryMetrics.initialTotalCount);
           }
 
           // §Query expansion: fallback when initial retrieval returns too few results.
+          // §P3: Gated by SUNPILOT_MEMORY_QUERY_EXPANSION feature flag.
           if (
+            ContextBuilder.FEATURE_QUERY_EXPANSION &&
             this.deps.queryExpander &&
             this.deps.searchMemories &&
             allMemories.length < 3
           ) {
+            const tExpand = Date.now();
+            memoryMetrics.queryExpansionAttempted = true;
+            const countBeforeExpand = allMemories.length;
             try {
-              const expansions = await Promise.race([
+              const expansions = await raceWithTimeout(
                 this.deps.queryExpander.expand(input.message),
-                new Promise<string[]>((resolve) =>
-                  setTimeout(() => resolve([]), 1000),
-                ),
-              ]);
+                1000,
+                [] as string[],
+              );
               if (expansions.length > 0) {
+                memoryMetrics.expansionQueryCount = Math.min(3, expansions.length);
                 const expandedResults = await Promise.allSettled(
                   expansions.slice(0, 3).map((q) =>
                     this.deps.searchMemories!({
@@ -710,13 +815,23 @@ export class ContextBuilder implements ContextBuilderInterface {
             } catch {
               // Query expansion failed — continue with original results
             }
+            memoryMetrics.expansionDurationMs = Date.now() - tExpand;
+            memoryMetrics.expansionAddedCount = Math.max(0, allMemories.length - countBeforeExpand);
           }
 
           // Re-rank: apply MMR or pairwise re-ranking if configured.
           // Only re-rank when we have more than 5 candidates — for small sets
           // the SQL scoring is sufficient.
+          // §P3: Gated by SUNPILOT_MEMORY_MMR_RERANK feature flag.
           let topMemories = allMemories.slice(0, 15);
-          if (this.deps.memoryReranker && topMemories.length > 5) {
+          if (
+            ContextBuilder.FEATURE_MMR_RERANK &&
+            this.deps.memoryReranker &&
+            topMemories.length > 5
+          ) {
+            const tRerank = Date.now();
+            memoryMetrics.rerankApplied = true;
+            memoryMetrics.rerankCandidateCount = topMemories.length;
             try {
               const candidates = topMemories.map((m) => ({
                 id: m.id,
@@ -724,17 +839,16 @@ export class ContextBuilder implements ContextBuilderInterface {
                 title: (m as any).title as string,
                 content: m.content,
               }));
-              const reranked = await Promise.race([
+              const reranked = await raceWithTimeout(
                 this.deps.memoryReranker.rerank(
                   input.message,
                   candidates,
                   Math.min(15, topMemories.length),
                 ),
                 // 500ms timeout — fall back to original order if reranker is slow
-                new Promise<typeof candidates>((resolve) =>
-                  setTimeout(() => resolve(candidates), 500),
-                ),
-              ]);
+                500,
+                candidates,
+              );
               // Reorder topMemories by reranker output order
               const rerankedIds = new Set(reranked.map((r) => r.id));
               const lookupMap = new Map<string, (typeof topMemories)[number]>();
@@ -752,7 +866,10 @@ export class ContextBuilder implements ContextBuilderInterface {
             } catch {
               // Reranker failed — use original order (already sorted by score)
             }
+            memoryMetrics.rerankDurationMs = Date.now() - tRerank;
           }
+
+          topMemoriesCount = topMemories.length;
 
           for (const mem of topMemories) {
             const content = `[${mem.type}] ${mem.title}: ${mem.content}`;
@@ -775,10 +892,13 @@ export class ContextBuilder implements ContextBuilderInterface {
               trust: "memory",
               sourceUri: `memory:${mem.id}`,
               generatedAt: new Date().toISOString(),
-              // Memory chunks expire after 24h — they carry lower trust weight
-              // once past their freshness window (see Gap-4: lifecycle fields).
+              // §B12: tier-based TTL by memory type — stable facts (preferences,
+              // project profile, tech stack, long-term goals) get a long window;
+              // semi-stable facts (deployment/workflow/error solutions) get 24h;
+              // volatile observations (summaries, tool results, manual notes)
+              // expire quickly so stale context doesn't dominate the prompt.
               expiresAt: new Date(
-                Date.now() + 24 * 60 * 60 * 1000,
+                Date.now() + memoryTtlMs(mem.type),
               ).toISOString(),
             });
           }
@@ -796,8 +916,11 @@ export class ContextBuilder implements ContextBuilderInterface {
       }
       // §P0-3: Always capture timing for trace observability
       memorySearchMs = Date.now() - tMemory;
+      memoryMetrics.totalMemorySearchMs = memorySearchMs;
+      memoryMetrics.finalCount = topMemoriesCount;
       if (ContextBuilder.DEBUG_TIMING) {
         console.debug(`[ContextBuilder] memory_search_ms=${memorySearchMs}`);
+        console.debug(`[ContextBuilder] memory_metrics=${JSON.stringify(memoryMetrics)}`);
       }
 
       // ── Artifacts (from Group A result) ───────────────────────────
@@ -1016,6 +1139,9 @@ export class ContextBuilder implements ContextBuilderInterface {
     // ── Apply token budget ────────────────────────────────────────
     const budget = this.budgeter.apply(chunks);
 
+    // §P3: Record how many memories survived token budget trimming
+    memoryMetrics.includedCount = budget.included.filter((c) => c.source === "memory").length;
+
     // ── Build context snapshot for observability (§P0 — enriched) ─
     const contextSnapshot = {
       chunks: [
@@ -1045,6 +1171,8 @@ export class ContextBuilder implements ContextBuilderInterface {
       totalTokens: budget.totalTokens,
       droppedCount: budget.excluded.length,
       sourceFailures: sourceFailures.length > 0 ? sourceFailures : undefined,
+      // §P3: Memory retrieval metrics for observability & diagnostics
+      memoryMetrics,
     };
 
     // ── Pack into AgentContext ────────────────────────────────────
@@ -1144,5 +1272,58 @@ export class ContextBuilder implements ContextBuilderInterface {
         totalBuildMs: Date.now() - t0,
       },
     };
+  }
+}
+
+// ── §B12: tier-based memory TTL (ms) ──────────────────────────────────────
+//
+// Stable facts (preferences, project profile, tech stack, long-term goals)
+// get a 7-day window; semi-stable facts (deployment/workflow/error solutions)
+// get 24h; volatile observations (summaries, tool results, manual notes)
+// expire in 4h so stale context doesn't dominate the prompt.
+const MEMORY_TTL_MS: Record<string, number> = {
+  user_preference: 7 * 24 * 60 * 60 * 1000,
+  project_profile: 7 * 24 * 60 * 60 * 1000,
+  technical_stack: 7 * 24 * 60 * 60 * 1000,
+  long_term_goal: 7 * 24 * 60 * 60 * 1000,
+  deployment_info: 24 * 60 * 60 * 1000,
+  workflow_pattern: 24 * 60 * 60 * 1000,
+  error_solution: 24 * 60 * 60 * 1000,
+  conversation_summary: 4 * 60 * 60 * 1000,
+  tool_observation: 4 * 60 * 60 * 1000,
+  manual_note: 4 * 60 * 60 * 1000,
+};
+
+function memoryTtlMs(type: string): number {
+  return MEMORY_TTL_MS[type] ?? 24 * 60 * 60 * 1000;
+}
+
+// ── §B14: Promise.race + setTimeout with proper cleanup ────────────────────
+//
+// Wraps the common pattern of racing a primary promise against a timeout.
+// The timer is always cleared when the primary promise settles first, so
+// no dangling setTimeout keeps the event loop alive or fires a no-op
+// callback later.
+async function raceWithTimeout<T>(
+  primary: Promise<T>,
+  timeoutMs: number,
+  fallback: T,
+): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      primary.then((value) => {
+        if (timer) clearTimeout(timer);
+        return value;
+      }),
+      new Promise<T>((resolve) => {
+        timer = setTimeout(() => resolve(fallback), timeoutMs);
+      }),
+    ]);
+  } finally {
+    // If the timeout won the race, primary is still pending — clear the
+    // timer (already fired) and let the finally discard it. If primary
+    // won, the .then above already cleared it; this is a safety net.
+    if (timer) clearTimeout(timer);
   }
 }

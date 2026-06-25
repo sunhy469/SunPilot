@@ -50,9 +50,32 @@ export class MemoryRetryWrapper implements MemoryWriter {
     for (let attempt = 0; attempt <= this.config.maxRetries; attempt++) {
       try {
         const result = await this.inner.writeFromTurn(input);
+        // §C6: Preserve the most recent successful (or partial) result so
+        // that if a subsequent attempt were to fail we can return the
+        // best progress made. Under the current inner contract a
+        // non-throwing call returns the authoritative result, but we keep
+        // this snapshot so partial-progress recovery remains possible.
+        lastPartial = result;
         return result;
       } catch (err) {
         lastError = err;
+        // §C6: If the inner writer attached a partial result to the error
+        // (e.g. it committed some records before failing), capture it so
+        // we can return the partial progress after all retries are
+        // exhausted instead of discarding it.
+        const partial = (err as { partial?: MemoryWriteResult }).partial;
+        if (partial) {
+          lastPartial = lastPartial
+            ? {
+                written: [...lastPartial.written, ...partial.written],
+                rejected: [...lastPartial.rejected, ...partial.rejected],
+                superseded: [
+                  ...lastPartial.superseded,
+                  ...partial.superseded,
+                ],
+              }
+            : partial;
+        }
         // On the last attempt, don't sleep — just fail
         if (attempt < this.config.maxRetries) {
           const delay =

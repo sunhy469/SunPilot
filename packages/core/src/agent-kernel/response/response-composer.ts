@@ -135,6 +135,10 @@ export class ResponseComposer implements ResponseComposerInterface {
         runId,
         modelCallId,
         modelId,
+        // §B16: pass the abort signal so the underlying provider can cancel
+        // the in-flight HTTP request when the caller aborts, instead of
+        // relying on the post-chunk signal.aborted check below.
+        signal,
         metadata: contextSnapshot ? { context: contextSnapshot } : undefined,
       })) {
         if (signal.aborted) {

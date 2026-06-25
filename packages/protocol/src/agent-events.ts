@@ -3,6 +3,13 @@
  * All chat, run, tool, approval, and response events use the `agent.*` namespace.
  */
 
+/**
+ * Protocol version for the agent event stream (A11). Producers MAY stamp
+ * events with this version; consumers MAY use it to guard incompatible
+ * payload shapes. Bumped on breaking changes to event payloads.
+ */
+export const AGENT_EVENT_PROTOCOL_VERSION = "1";
+
 export const AGENT_EVENT_TYPES = [
   // Run lifecycle
   "agent.run.created",
