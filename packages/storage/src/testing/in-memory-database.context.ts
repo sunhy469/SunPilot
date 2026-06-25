@@ -844,6 +844,22 @@ export class InMemoryDatabaseContext implements DatabaseContext {
           record.method === input.method &&
           record.clientRequestId === input.clientRequestId,
       ) ?? null,
+    /** §F5: delete expired in-flight reservations. */
+    cleanupExpired: async (): Promise<number> => {
+      const now = new Date();
+      let deleted = 0;
+      for (const [id, record] of this.idempotencyRecords) {
+        if (
+          record.status === "processing" &&
+          record.expiresAt &&
+          new Date(record.expiresAt) <= now
+        ) {
+          this.idempotencyRecords.delete(id);
+          deleted++;
+        }
+      }
+      return deleted;
+    },
   };
 
   readonly skills = {
