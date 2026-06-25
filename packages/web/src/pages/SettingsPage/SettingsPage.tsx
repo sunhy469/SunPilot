@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useMemo } from "react";
 import {
   Typography,
   Select,
@@ -12,11 +12,39 @@ import {
   Flex,
   message,
   Popconfirm,
+  Modal,
+  Input,
 } from "antd";
 import { ReloadOutlined, DeleteOutlined, ExclamationCircleOutlined } from "@ant-design/icons";
+import { createRequest } from "../../shared/api/client";
 import "./SettingsPage.scss";
 
 const { Title, Text, Paragraph } = Typography;
+const { TextArea } = Input;
+
+/**
+ * W5: replace window.prompt with an antd Modal.confirm + TextArea dialog.
+ * Resolves to the entered text, or null if cancelled.
+ */
+function promptText(title: string, placeholder?: string): Promise<string | null> {
+  return new Promise((resolve) => {
+    let value = "";
+    Modal.confirm({
+      title,
+      content: (
+        <TextArea
+          placeholder={placeholder}
+          autoFocus
+          onChange={(e) => {
+            value = e.target.value;
+          }}
+        />
+      ),
+      onOk: () => resolve(value),
+      onCancel: () => resolve(null),
+    });
+  });
+}
 
 interface MemoryItem {
   id: string;
@@ -61,36 +89,33 @@ export function SettingsPage() {
   const [error, setError] = useState<string | null>(null);
   const [filter, setFilter] = useState<string>("all");
 
-  const apiFetch = useCallback(async (path: string, options?: RequestInit) => {
-    const res = await fetch(path, options);
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    return res.json();
-  }, []);
+  // W5: use the shared API client instead of a bare fetch wrapper.
+  const request = useMemo(() => createRequest(), []);
 
   const fetchMemories = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      const res = (await apiFetch("/v1/memory?limit=200")) as { items: MemoryItem[] };
+      const res = await request<{ items: MemoryItem[] }>("/v1/memory?limit=200");
       setMemories(res.items ?? []);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load memories");
     } finally {
       setLoading(false);
     }
-  }, [apiFetch]);
+  }, [request]);
 
   useEffect(() => {
     fetchMemories();
   }, [fetchMemories]);
 
   const markStale = async (id: string) => {
-    const reason = prompt("Reason for marking stale:");
+    // W5: use Modal.confirm + TextArea instead of window.prompt
+    const reason = await promptText("Reason for marking stale:", "输入标记原因...");
     if (!reason) return;
     try {
-      await apiFetch(`/v1/memory/${id}/mark-stale`, {
+      await request(`/v1/memory/${id}/mark-stale`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ reason }),
       });
       message.success(`Memory marked as stale.`);
@@ -101,12 +126,12 @@ export function SettingsPage() {
   };
 
   const markSuperseded = async (id: string) => {
-    const supersededBy = prompt("Superseded by (memory ID):");
+    // W5: use Modal.confirm + TextArea instead of window.prompt
+    const supersededBy = await promptText("Superseded by (memory ID):", "输入替代 memory ID");
     if (!supersededBy) return;
     try {
-      await apiFetch(`/v1/memory/${id}/supersede`, {
+      await request(`/v1/memory/${id}/supersede`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ supersededBy }),
       });
       message.success(`Memory superseded.`);
@@ -118,9 +143,8 @@ export function SettingsPage() {
 
   const deleteMemory = async (id: string) => {
     try {
-      await apiFetch(`/v1/memory/${id}`, {
+      await request(`/v1/memory/${id}`, {
         method: "DELETE",
-        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ reason: "deleted by user" }),
       });
       message.success(`Memory deleted.`);

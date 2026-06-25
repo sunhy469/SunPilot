@@ -6,9 +6,14 @@ import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
 import open from "open";
 import { getSunPilotPaths, type SunPilotPaths } from "@sunpilot/storage";
+import { DEFAULT_WEB_URL } from "@sunpilot/protocol";
 
 type SpawnLike = typeof spawn;
 const require = createRequire(import.meta.url);
+
+// Ar16: Restart polling tunables — previously inline magic numbers.
+const RESTART_POLL_DEADLINE_MS = 10_000;
+const RESTART_POLL_INTERVAL_MS = 200;
 
 interface LauncherArgs {
   command: string;
@@ -60,15 +65,37 @@ export async function runLauncher(deps: LauncherDeps = {}): Promise<number> {
   const webUrl = (
     env.SUNPILOT_WEB_URL ??
     env.SUNPILOT_CONSOLE_URL ??
-    "https://tradeagent.asia"
+    DEFAULT_WEB_URL
   ).replace(/\/+$/, "");
   const paths = deps.paths ?? getSunPilotPaths();
   const fetchImpl = deps.fetchImpl ?? fetch;
   const log = deps.log ?? console.log;
 
+  // A10: Read the local bearer token (written by the daemon at startup) so
+  // the launcher can authenticate against token-gated routes like
+  // /v1/diagnostics. Returns undefined when token auth is disabled or the
+  // token file is absent.
+  function readLocalToken(): string | undefined {
+    const tokenPath = (paths as { token?: string }).token;
+    if (!tokenPath) return undefined;
+    if (!(deps.existsImpl ?? existsSync)(tokenPath)) return undefined;
+    try {
+      const raw = (deps.readFileImpl ?? readFileSync)(tokenPath, "utf8");
+      const trimmed = raw.trim();
+      return trimmed.length > 0 ? trimmed : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
   async function status(): Promise<boolean> {
     try {
-      const response = await fetchImpl(`${baseUrl}/healthz`);
+      const token = readLocalToken();
+      const response = token
+        ? await fetchImpl(`${baseUrl}/healthz`, {
+            headers: { Authorization: `Bearer ${token}` },
+          })
+        : await fetchImpl(`${baseUrl}/healthz`);
       const body = await response.json();
       log(JSON.stringify(body, null, 2));
       return response.ok;
@@ -80,7 +107,12 @@ export async function runLauncher(deps: LauncherDeps = {}): Promise<number> {
 
   async function doctor(): Promise<boolean> {
     try {
-      const response = await fetchImpl(`${baseUrl}/v1/diagnostics`);
+      const token = readLocalToken();
+      const response = token
+        ? await fetchImpl(`${baseUrl}/v1/diagnostics`, {
+            headers: { Authorization: `Bearer ${token}` },
+          })
+        : await fetchImpl(`${baseUrl}/v1/diagnostics`);
       const body = await response.json();
       log(JSON.stringify(body, null, 2));
       return response.ok;
@@ -176,8 +208,19 @@ export async function runLauncher(deps: LauncherDeps = {}): Promise<number> {
     case "restart": {
       log("Stopping SunPilot daemon...");
       killDaemon();
-      // Wait for the port to free up before starting
-      await new Promise((r) => setTimeout(r, 1000));
+      // A10: Poll until the daemon is actually unreachable (or the deadline
+      // elapses) instead of a fixed 1s wait. The fixed wait could either
+      // start too early (interrupting in-flight DB writes) or wait too long.
+      const deadline = Date.now() + RESTART_POLL_DEADLINE_MS;
+      while (Date.now() < deadline) {
+        try {
+          await fetchImpl(`${baseUrl}/healthz`);
+          // Still up — wait briefly and retry.
+          await new Promise((r) => setTimeout(r, RESTART_POLL_INTERVAL_MS));
+        } catch {
+          break; // Daemon is down — safe to start a new one.
+        }
+      }
       log("Starting SunPilot daemon...");
       return await startDaemon();
     }

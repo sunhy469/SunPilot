@@ -68,9 +68,19 @@ export class RepositoryApprovalGate implements ApprovalGateInterface {
     messageId?: string;
   }> {
     const approval = await this.requirePendingApproval(approvalId);
+    // §B3: `decide` enforces `WHERE status='pending'` atomically; if it returns
+    // null the approval was decided concurrently between our findById check
+    // and this UPDATE — surface that as ALREADY_DECIDED instead of silently
+    // treating the stale `approval` snapshot as the source of truth.
     const decided = await this.db.approvals.decide(approvalId, "approved", {
       decidedBy,
     });
+    if (!decided) {
+      throw Object.assign(
+        new Error(`Approval already decided: ${approvalId}`),
+        { code: "AGENT_APPROVAL_ALREADY_DECIDED" },
+      );
+    }
     await this.db.audit.create({
       runId: decided?.runId ?? approval.runId,
       stepId: approval.stepId,
@@ -107,10 +117,17 @@ export class RepositoryApprovalGate implements ApprovalGateInterface {
     reason?: string;
   }> {
     const approval = await this.requirePendingApproval(approvalId);
+    // §B3: same TOCTOU guard as approve().
     const decided = await this.db.approvals.decide(approvalId, "rejected", {
       decidedBy,
       reason,
     });
+    if (!decided) {
+      throw Object.assign(
+        new Error(`Approval already decided: ${approvalId}`),
+        { code: "AGENT_APPROVAL_ALREADY_DECIDED" },
+      );
+    }
     await this.db.audit.create({
       runId: decided?.runId ?? approval.runId,
       stepId: approval.stepId,
@@ -149,8 +166,10 @@ export class RepositoryApprovalGate implements ApprovalGateInterface {
   private async requireApproval(approvalId: string): Promise<ApprovalRecord> {
     const approval = await this.db.approvals.findById(approvalId);
     if (!approval) {
+      // §B29: AGENT_APPROVAL_REQUIRED is for "this action needs approval" —
+      // a missing record is a NOT_FOUND. Use the dedicated error code.
       throw Object.assign(new Error(`Unknown approval: ${approvalId}`), {
-        code: "AGENT_APPROVAL_REQUIRED",
+        code: "AGENT_APPROVAL_NOT_FOUND",
       });
     }
     return approval;

@@ -84,13 +84,20 @@ export function deduplicateResults<T extends { id: string; score?: number }>(
   for (const item of results) {
     const existing = seen.get(item.id);
     const itemScore = item.score ?? 0;
-    if (!existing || itemScore > existing.score) {
+    if (!existing) {
       seen.set(item.id, {
         item,
         score: itemScore,
         sources: new Set(source ? [source] : []),
       });
-    } else if (existing && source) {
+    } else if (itemScore > existing.score) {
+      // §C4: Higher-score entry replaces the item, but MERGE the sources
+      // so retrieval provenance isn't lost when a better-scoring duplicate
+      // arrives from a different retrieval path.
+      existing.item = item;
+      existing.score = itemScore;
+      if (source) existing.sources.add(source);
+    } else if (source) {
       existing.sources.add(source);
     }
   }

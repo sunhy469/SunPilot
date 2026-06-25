@@ -21,7 +21,16 @@ export class PostgresIdempotencyRepository implements IdempotencyRepository {
        )
        VALUES ($1, $2, $3, $4, $5, $6::jsonb, 'processing', $7, $8)
        ON CONFLICT ((COALESCE(user_id, '')), method, client_request_id)
-       DO NOTHING
+       DO UPDATE SET
+         status = 'processing',
+         request_hash = EXCLUDED.request_hash,
+         response = EXCLUDED.response,
+         error = NULL,
+         created_at = EXCLUDED.created_at,
+         expires_at = EXCLUDED.expires_at
+       WHERE idempotency_keys.status = 'processing'
+         AND idempotency_keys.expires_at IS NOT NULL
+         AND idempotency_keys.expires_at <= NOW()
        RETURNING id, user_id, method, client_request_id, request_hash,
          response, error, status, created_at, expires_at`,
       [
@@ -54,7 +63,7 @@ export class PostgresIdempotencyRepository implements IdempotencyRepository {
     const result = await this.pool.query(
       `UPDATE idempotency_keys
        SET status = 'completed', response = $1::jsonb, error = NULL
-       WHERE id = $2
+       WHERE id = $2 AND status = 'processing'
        RETURNING id, user_id, method, client_request_id, request_hash,
          response, error, status, created_at, expires_at`,
       [JSON.stringify(response), id],
@@ -66,12 +75,23 @@ export class PostgresIdempotencyRepository implements IdempotencyRepository {
     const result = await this.pool.query(
       `UPDATE idempotency_keys
        SET status = 'failed', error = $1::jsonb
-       WHERE id = $2
+       WHERE id = $2 AND status = 'processing'
        RETURNING id, user_id, method, client_request_id, request_hash,
          response, error, status, created_at, expires_at`,
       [JSON.stringify(error), id],
     );
     return result.rows[0] ? mapIdempotency(result.rows[0]) : null;
+  }
+
+  /** Delete expired in-flight reservations so they stop blocking retries. */
+  async cleanupExpired(): Promise<number> {
+    const result = await this.pool.query(
+      `DELETE FROM idempotency_keys
+       WHERE status = 'processing'
+         AND expires_at IS NOT NULL
+         AND expires_at <= NOW()`,
+    );
+    return result.rowCount ?? 0;
   }
 
   async findByKey(input: {

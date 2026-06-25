@@ -1,4 +1,5 @@
 import { useState, useCallback, useEffect, useRef } from "react";
+import { message } from "antd";
 import type { UploadFile } from "antd/es/upload";
 import { uploadFilesToAttachmentRefs, isImageType } from "../../../features/chat/attachment-utils";
 import type { AttachmentRef } from "../../../features/chat/types";
@@ -7,6 +8,27 @@ import { useDragDrop } from "./useDragDrop";
 
 /** Max file size (bytes) for dataUrl fallback. Larger files must use OSS URL. */
 const MAX_DATAURL_BYTES = 4 * 1024 * 1024; // 4 MB
+
+// W3: attachment upload limits — kept in sync with ChatComposer's `accept`.
+const MAX_FILE_SIZE_BYTES = 50 * 1024 * 1024; // 50 MB per file
+const MAX_FILE_COUNT = 10; // max attachments per message
+/** Extensions allowed when the MIME type isn't image/* or video/*. */
+const ALLOWED_EXTENSIONS = [
+  "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx",
+  "txt", "md", "json", "csv", "zip", "tar", "gz",
+];
+
+/** W3: validate a single file against the size + type whitelist. */
+function isAllowedFile(file: File): boolean {
+  // image/* and video/* MIME types are always allowed
+  if (file.type.startsWith("image/") || file.type.startsWith("video/")) {
+    return true;
+  }
+  // Otherwise fall back to extension matching (MIME can be empty/unreliable)
+  const dotIndex = file.name.lastIndexOf(".");
+  const ext = dotIndex >= 0 ? file.name.slice(dotIndex + 1).toLowerCase() : "";
+  return ALLOWED_EXTENSIONS.includes(ext);
+}
 
 /**
  * Read a File as a base64 data URL.
@@ -32,8 +54,8 @@ export interface FileAttachmentsState {
   dragHandlers: ReturnType<typeof useDragDrop>["handlers"];
   /** Whether an OSS upload is in progress. */
   uploading: boolean;
-  /** OSS upload progress (0-100). */
-  uploadProgress?: number;
+  /** W10: per-file OSS upload progress keyed by uid (0-100). */
+  uploadProgress?: Record<string, number>;
 }
 
 /**
@@ -50,6 +72,10 @@ export function useFileAttachments() {
   const [files, setFiles] = useState<UploadFile[]>([]);
   const { uploadFile, state: ossState, createUploadFileEntry } = useOssUpload();
   const mountedRef = useRef(true);
+  // W3: mirror files in a ref so addFiles can read the current count without
+  // adding `files` to its dependency array.
+  const filesRef = useRef<UploadFile[]>([]);
+  filesRef.current = files;
   useEffect(() => () => { mountedRef.current = false; }, []);
 
   // ── Add files ────────────────────────────────────────────────────
@@ -57,14 +83,43 @@ export function useFileAttachments() {
   const addFiles = useCallback(
     (fileList: FileList | File[]) => {
       const incoming = Array.from(fileList);
+
+      // W3: enforce per-file size + type whitelist
+      const valid: File[] = [];
       for (const file of incoming) {
+        if (file.size > MAX_FILE_SIZE_BYTES) {
+          message.error(`文件「${file.name}」超过 50MB 限制`);
+          continue;
+        }
+        if (!isAllowedFile(file)) {
+          message.error(`文件「${file.name}」类型不支持`);
+          continue;
+        }
+        valid.push(file);
+      }
+
+      // W3: enforce total attachment count limit
+      const currentCount = filesRef.current.length;
+      const remainingSlots = MAX_FILE_COUNT - currentCount;
+      if (remainingSlots <= 0) {
+        message.error(`最多只能上传 ${MAX_FILE_COUNT} 个附件`);
+        return;
+      }
+      const toAdd = valid.slice(0, remainingSlots);
+      if (valid.length > remainingSlots) {
+        message.error(
+          `最多只能上传 ${MAX_FILE_COUNT} 个附件，已忽略多余的 ${valid.length - remainingSlots} 个`,
+        );
+      }
+
+      for (const file of toAdd) {
         const entry = createUploadFileEntry(file);
         setFiles((prev) => [...prev, entry]);
 
         // Fire-and-forget upload; guards against setState after unmount
         (async () => {
           try {
-            const { url, key } = await uploadFile(file);
+            const { url, key } = await uploadFile(file, entry.uid);
             if (!mountedRef.current) return;
             // §P0: When OSS returns no URL (or OSS is unavailable), generate
             // a dataUrl fallback for small images so the backend can still

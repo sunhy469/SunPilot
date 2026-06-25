@@ -5,11 +5,21 @@ export function planRoute(
   toNodeId: string,
   edges: WorldEdgeRecord[],
 ): string[] | null {
-  if (fromNodeId === toNodeId) return [fromNodeId];
-
-  // Build adjacency list
+  // Build adjacency list, validating edge distances as we go.
   const graph = new Map<string, { nodeId: string; distance: number }[]>();
+  // F20: Track every node referenced by any edge so endpoint IDs can be
+  // validated against the known graph regardless of edge directionality.
+  const knownNodes = new Set<string>();
   for (const edge of edges) {
+    // F20: Negative (or non-finite) distances corrupt Dijkstra's relaxation
+    // step — reject them up front instead of producing nonsense routes.
+    if (!Number.isFinite(edge.distance) || edge.distance < 0) {
+      throw new Error(
+        `Invalid distance on edge ${edge.fromNodeId}→${edge.toNodeId}: ${edge.distance}`,
+      );
+    }
+    knownNodes.add(edge.fromNodeId);
+    knownNodes.add(edge.toNodeId);
     if (!graph.has(edge.fromNodeId)) graph.set(edge.fromNodeId, []);
     graph.get(edge.fromNodeId)!.push({ nodeId: edge.toNodeId, distance: edge.distance });
     if (edge.bidirectional) {
@@ -17,6 +27,18 @@ export function planRoute(
       graph.get(edge.toNodeId)!.push({ nodeId: edge.fromNodeId, distance: edge.distance });
     }
   }
+
+  // F20: Validate that the requested endpoints exist in the graph. Throw
+  // instead of silently returning null so callers can distinguish "no
+  // route between valid nodes" from "referenced a non-existent node".
+  if (!knownNodes.has(fromNodeId)) {
+    throw new Error(`fromNodeId "${fromNodeId}" does not exist in the graph`);
+  }
+  if (!knownNodes.has(toNodeId)) {
+    throw new Error(`toNodeId "${toNodeId}" does not exist in the graph`);
+  }
+
+  if (fromNodeId === toNodeId) return [fromNodeId];
 
   // Dijkstra
   const distances = new Map<string, number>();

@@ -92,39 +92,73 @@ export class RepositoryRunStateManager implements RunStateManager {
     }
 
     const now = new Date().toISOString();
-    await this.db.runs.updateStatus(runId, {
-      status: nextStatus,
-      updatedAt: now,
-      ...(isTerminal(nextStatus) ? { completedAt: now } : {}),
-    });
-    await this.db.runs.updateContext(runId, {
-      ...run.context,
-      agentStatus: nextStatus,
-      statusHistory: [
-        ...statusHistoryFrom(run),
-        {
-          previousStatus: currentStatus,
-          nextStatus,
-          reason: reason ?? "state transition",
-          actor: AuditActor.System,
-          createdAt: now,
-        },
-      ],
-    });
-    await this.db.runStatusHistory.append({
-      runId,
-      previousStatus: currentStatus,
-      nextStatus,
-      reason: reason ?? "state transition",
-      actor: AuditActor.System,
-      createdAt: now,
-    });
+    const statusHistory = truncateStatusHistory([
+      ...statusHistoryFrom(run),
+      {
+        previousStatus: currentStatus,
+        nextStatus,
+        reason: reason ?? "state transition",
+        actor: AuditActor.System,
+        createdAt: now,
+      },
+    ]);
+
+    // §B2: wrap the three writes in a single transaction so partial failures
+    // cannot leave runs / context / history out of sync. Fall back to the
+    // sequential path when the underlying database does not expose a
+    // transaction helper.
+    const writeAll = async (db: DatabaseContext): Promise<void> => {
+      await db.runs.updateStatus(runId, {
+        status: nextStatus,
+        updatedAt: now,
+        ...(isTerminal(nextStatus) ? { completedAt: now } : {}),
+      });
+      await db.runs.updateContext(runId, {
+        ...run.context,
+        agentStatus: nextStatus,
+        statusHistory,
+      });
+      await db.runStatusHistory.append({
+        runId,
+        previousStatus: currentStatus,
+        nextStatus,
+        reason: reason ?? "state transition",
+        actor: AuditActor.System,
+        createdAt: now,
+      });
+    };
+
+    if (this.db.transaction) {
+      await this.db.transaction(writeAll);
+    } else {
+      await writeAll(this.db);
+    }
 
     return mapRunToState((await this.requireRun(runId)));
   }
 
   async markFailed(runId: string, error: unknown): Promise<RunState> {
     const run = await this.requireRun(runId);
+    const currentStatus = run.status as AgentLoopStatus;
+    // §B11: never bypass the state machine — if the current status cannot
+    // legally transition to `failed`, surface the conflict instead of
+    // silently writing a terminal state.
+    if (isTerminal(currentStatus)) {
+      console.warn(
+        `[RepositoryRunStateManager] run ${runId} is already terminal (${currentStatus}), ignoring markFailed`,
+      );
+      return mapRunToState(run);
+    }
+    const allowed = LEGAL_TRANSITIONS[currentStatus];
+    if (!allowed || !allowed.includes("failed")) {
+      throw Object.assign(
+        new Error(
+          `Illegal state transition: ${currentStatus} -> failed for run ${runId}`,
+        ),
+        { code: "AGENT_RUN_STATE_CONFLICT" },
+      );
+    }
+
     const err = error instanceof Error ? error : new Error(String(error));
     const agentError = {
       code: (error as { code?: string }).code ?? "AGENT_INTERNAL_ERROR",
@@ -133,36 +167,45 @@ export class RepositoryRunStateManager implements RunStateManager {
       retryable: (error as { retryable?: boolean }).retryable ?? false,
     };
     const now = new Date().toISOString();
+    const statusHistory = truncateStatusHistory([
+      ...statusHistoryFrom(run),
+      {
+        previousStatus: currentStatus,
+        nextStatus: "failed",
+        reason: err.message,
+        actor: AuditActor.System,
+        createdAt: now,
+      },
+    ]);
 
-    await this.db.runs.updateStatus(runId, {
-      status: "failed",
-      updatedAt: now,
-      completedAt: now,
-      error: agentError,
-    });
-    await this.db.runs.updateContext(runId, {
-      ...run.context,
-      agentStatus: "failed",
-      statusHistory: [
-        ...statusHistoryFrom(run),
-        {
-          previousStatus: run.status,
-          nextStatus: "failed",
-          reason: err.message,
-          actor: AuditActor.System,
-          createdAt: now,
-        },
-      ],
-    });
-    await this.db.runStatusHistory.append({
-      runId,
-      previousStatus: run.status,
-      nextStatus: "failed",
-      reason: err.message,
-      actor: AuditActor.System,
-      metadata: { error: agentError },
-      createdAt: now,
-    });
+    const writeAll = async (db: DatabaseContext): Promise<void> => {
+      await db.runs.updateStatus(runId, {
+        status: "failed",
+        updatedAt: now,
+        completedAt: now,
+        error: agentError,
+      });
+      await db.runs.updateContext(runId, {
+        ...run.context,
+        agentStatus: "failed",
+        statusHistory,
+      });
+      await db.runStatusHistory.append({
+        runId,
+        previousStatus: currentStatus,
+        nextStatus: "failed",
+        reason: err.message,
+        actor: AuditActor.System,
+        metadata: { error: agentError },
+        createdAt: now,
+      });
+    };
+
+    if (this.db.transaction) {
+      await this.db.transaction(writeAll);
+    } else {
+      await writeAll(this.db);
+    }
 
     return mapRunToState(await this.requireRun(runId));
   }
@@ -232,6 +275,16 @@ function statusHistoryFrom(run: RunRecord): Array<{
 }> {
   const value = run.context.statusHistory;
   return Array.isArray(value) ? value as ReturnType<typeof statusHistoryFrom> : [];
+}
+
+/** §B8: cap persisted status history to prevent unbounded growth. */
+const MAX_STATUS_HISTORY = 1000;
+
+function truncateStatusHistory<T extends Array<unknown>>(history: T): T {
+  if (history.length <= MAX_STATUS_HISTORY) return history;
+  // Keep the most recent entries — older transitions are still available via
+  // the run_status_history table for the repository-backed manager.
+  return history.slice(history.length - MAX_STATUS_HISTORY) as T;
 }
 
 function normalizeError(error: unknown): RunState["error"] {

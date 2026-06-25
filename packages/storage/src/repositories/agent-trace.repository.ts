@@ -53,6 +53,28 @@ export interface SpanRecord extends CreateSpanInput {
   createdAt: string;
 }
 
+/**
+ * Fields that can be updated on an existing span (Obs6).
+ * Used by endSpan to UPDATE the row created by startSpan instead of
+ * inserting a duplicate, so completed-data fields (tokens, tool counts,
+ * timing, error, metadata) are persisted rather than dropped.
+ */
+export interface UpdateSpanInput {
+  summary?: string;
+  endMs?: number;
+  durationMs?: number;
+  tokenInput?: number;
+  tokenOutput?: number;
+  toolCallsCount?: number;
+  toolFailures?: number;
+  modelCallsCount?: number;
+  retryCount?: number;
+  approvalRequired?: boolean;
+  error?: string;
+  errorCode?: string;
+  metadata?: Record<string, unknown>;
+}
+
 // ── Repository ────────────────────────────────────────────────────────────
 
 export class AgentTraceRepository {
@@ -170,6 +192,40 @@ export class AgentTraceRepository {
     return { ...input, createdAt };
   }
 
+  /**
+   * Update an existing span row by id with completed-data fields (Obs6).
+   * Unlike createSpan — whose ON CONFLICT clause only refreshes a subset
+   * of columns — this performs a plain UPDATE so token/tool/model counts
+   * and the rest of the endSpan payload are actually persisted.
+   */
+  async updateSpan(id: string, input: UpdateSpanInput): Promise<void> {
+    const sets: string[] = [];
+    const values: unknown[] = [];
+    const addSet = (column: string, value: unknown) => {
+      values.push(value);
+      sets.push(`${column} = $${values.length}`);
+    };
+    if (input.summary !== undefined) addSet("summary", input.summary);
+    if (input.endMs !== undefined) addSet("end_ms", input.endMs);
+    if (input.durationMs !== undefined) addSet("duration_ms", input.durationMs);
+    if (input.tokenInput !== undefined) addSet("token_input", input.tokenInput);
+    if (input.tokenOutput !== undefined) addSet("token_output", input.tokenOutput);
+    if (input.toolCallsCount !== undefined) addSet("tool_calls_count", input.toolCallsCount);
+    if (input.toolFailures !== undefined) addSet("tool_failures", input.toolFailures);
+    if (input.modelCallsCount !== undefined) addSet("model_calls_count", input.modelCallsCount);
+    if (input.retryCount !== undefined) addSet("retry_count", input.retryCount);
+    if (input.approvalRequired !== undefined) addSet("approval_required", input.approvalRequired);
+    if (input.error !== undefined) addSet("error", input.error);
+    if (input.errorCode !== undefined) addSet("error_code", input.errorCode);
+    if (input.metadata !== undefined) addSet("metadata", JSON.stringify(input.metadata));
+    if (sets.length === 0) return;
+    values.push(id);
+    await this.pool.query(
+      `UPDATE agent_trace_spans SET ${sets.join(", ")} WHERE id = $${values.length}`,
+      values,
+    );
+  }
+
   async listSpansByTraceId(traceId: string): Promise<SpanRecord[]> {
     const result = await this.pool.query(
       `SELECT id, trace_id, parent_span_id, run_id, kind, summary,
@@ -230,8 +286,8 @@ function rowToSpan(row: Record<string, unknown>): SpanRecord {
     runId: row["run_id"] as string,
     kind: row["kind"] as string,
     summary: (row["summary"] as string) ?? undefined,
-    startMs: row["start_ms"] as bigint ? Number(row["start_ms"]) : (row["start_ms"] as number),
-    endMs: row["end_ms"] as number ?? undefined,
+    startMs: Number(row["start_ms"]),
+    endMs: row["end_ms"] != null ? Number(row["end_ms"]) : undefined,
     durationMs: (row["duration_ms"] as number) ?? undefined,
     tokenInput: (row["token_input"] as number) ?? 0,
     tokenOutput: (row["token_output"] as number) ?? 0,

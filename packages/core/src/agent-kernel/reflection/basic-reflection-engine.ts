@@ -8,6 +8,7 @@ import type {
   ReflectionEngine,
   RoutedIntent,
 } from "../loop-types.js";
+import { isRepairableFailure } from "../planning/failure-classification.js";
 
 export interface BasicReflectionEngineDeps {
   /** Optional LLM for semantic goal-achievement judgment (layer 2). */
@@ -229,19 +230,4 @@ Respond with ONLY a JSON object (no other text):
 
     return null;
   }
-}
-
-/**
- * Check if a tool failure is likely repairable (retry with fixed params).
- */
-function isRepairableFailure(summary: string): boolean {
-  return (
-    /timeout/i.test(summary) ||
-    /transient/i.test(summary) ||
-    /rate limit/i.test(summary) ||
-    /invalid (parameter|argument|input)/i.test(summary) ||
-    /missing (parameter|argument|field|required)/i.test(summary) ||
-    /connection refused/i.test(summary) ||
-    /temporary/i.test(summary)
-  );
 }

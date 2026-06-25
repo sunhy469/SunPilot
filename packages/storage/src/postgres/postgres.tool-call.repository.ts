@@ -20,6 +20,7 @@ export class PostgresToolCallRepository implements ToolCallRepository {
        ON CONFLICT (id) DO UPDATE
        SET status = EXCLUDED.status,
            started_at = COALESCE(tool_calls.started_at, EXCLUDED.started_at)
+       WHERE tool_calls.status NOT IN ('completed', 'failed', 'cancelled')
        RETURNING id, run_id, step_id, skill_id, name, arguments, result, status,
          risk_level, approval_id, error, metadata, started_at, completed_at, created_at`,
       [
@@ -37,7 +38,19 @@ export class PostgresToolCallRepository implements ToolCallRepository {
         input.createdAt ?? new Date().toISOString(),
       ],
     );
-    return mapToolCall(result.rows[0]);
+    if (result.rows[0]) return mapToolCall(result.rows[0]);
+    // ON CONFLICT update was filtered out because the existing row is already
+    // in a terminal state — return that existing record without clobbering it.
+    const existing = await this.pool.query(
+      `SELECT id, run_id, step_id, skill_id, name, arguments, result, status,
+         risk_level, approval_id, error, metadata, started_at, completed_at, created_at
+       FROM tool_calls WHERE id = $1`,
+      [input.id],
+    );
+    if (!existing.rows[0]) {
+      throw new Error(`Tool call ${input.id} not found after ON CONFLICT`);
+    }
+    return mapToolCall(existing.rows[0]);
   }
 
   async updateStatus(

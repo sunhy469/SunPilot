@@ -218,22 +218,31 @@ export function RunDebugPanel({ runId, conversationId, baseUrl = "" }: RunDebugP
       .finally(() => setListLoading(false));
   }, [runId, conversationId, baseUrl]);
 
-  const fetchTrace = useCallback(async () => {
+  const fetchTrace = useCallback(async (signal?: AbortSignal) => {
     if (!selectedRunId) { setLoading(false); return; }
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch(`${baseUrl}/v1/runs/${selectedRunId}/trace`);
+      // W8: pass an AbortSignal so switching runs cancels the in-flight fetch,
+      // preventing stale responses from overwriting the current view.
+      const res = await fetch(`${baseUrl}/v1/runs/${selectedRunId}/trace`, { signal });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       setData((await res.json()) as TraceResponse);
     } catch (err) {
+      // AbortError is expected when the run id changes or component unmounts
+      if (err instanceof DOMException && err.name === "AbortError") return;
       setError(err instanceof Error ? err.message : "Failed to load trace");
     } finally {
       setLoading(false);
     }
   }, [selectedRunId, baseUrl]);
 
-  useEffect(() => { fetchTrace(); }, [fetchTrace]);
+  // W8: explicit deps + AbortController so rapid run switches cancel stale fetches.
+  useEffect(() => {
+    const controller = new AbortController();
+    fetchTrace(controller.signal);
+    return () => controller.abort();
+  }, [selectedRunId, baseUrl]);
 
   // ── Loading ──
   if (loading) {
@@ -254,7 +263,7 @@ export function RunDebugPanel({ runId, conversationId, baseUrl = "" }: RunDebugP
           status="error"
           title="Failed to load trace"
           subTitle={error}
-          extra={<Button type="primary" onClick={fetchTrace}>Retry</Button>}
+          extra={<Button type="primary" onClick={() => fetchTrace()}>Retry</Button>}
         />
       </Flex>
     );
@@ -376,7 +385,7 @@ export function RunDebugPanel({ runId, conversationId, baseUrl = "" }: RunDebugP
             size="small"
             type="text"
             icon={<ReloadOutlined />}
-            onClick={fetchTrace}
+            onClick={() => fetchTrace()}
           />
         </Flex>
 

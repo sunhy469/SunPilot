@@ -415,11 +415,15 @@ function getCategoryRelevance(
 }
 
 function cosineSimilarity(a: number[], b: number[]): number {
+  // §B4: dimension mismatch usually means comparing embeddings from
+  // different models / providers — silently truncating would produce a
+  // meaningless score. Fail closed (0) and log so the operator can fix the
+  // configuration.
   if (a.length !== b.length) {
-    // Truncate or pad to match
-    const len = Math.min(a.length, b.length);
-    a = a.slice(0, len);
-    b = b.slice(0, len);
+    console.warn(
+      `[tool-retriever] cosineSimilarity dimension mismatch: ${a.length} vs ${b.length}; returning 0`,
+    );
+    return 0;
   }
   let dot = 0;
   let normA = 0;

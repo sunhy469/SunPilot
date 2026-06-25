@@ -49,6 +49,6 @@ function mapWorldActionLog(row: any): WorldActionLogRecord {
     beingId: row.being_id,
     eventType: row.event_type,
     payload: row.payload ?? {},
-    createdAt: row.created_at as string,
+    createdAt: new Date(row.created_at).toISOString(),
   };
 }

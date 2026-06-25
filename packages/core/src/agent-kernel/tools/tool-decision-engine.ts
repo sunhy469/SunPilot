@@ -26,6 +26,7 @@ import type { ModelRouter } from "../model-router.js";
 import { checkAnyOfUnsatisfied } from "./tool-schema-utils.js";
 import { RichCardBuilder } from "./rich-card-builder.js";
 import { MARKDOWN_RESPONSE_POLICY } from "./markdown-response-policy.js";
+import { MAX_TOOL_ITERATIONS } from "../agent-loop-engine.js";
 
 import type {
   ChatMessage,
@@ -1008,7 +1009,6 @@ IMPORTANT: return ONLY the JSON object. No markdown code fences, no surrounding 
       finalRoundFirstTokenMs: number;
     };
   }> {
-    const MAX_TOOL_ITERATIONS = 5;
     const { runId, conversationId, context, intent, plan } = input;
     const messageId = input.messageId ?? `msg_${crypto.randomUUID()}`;
     const stream = input.stream;

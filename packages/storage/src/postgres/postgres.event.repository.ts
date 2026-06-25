@@ -9,7 +9,7 @@ export class PostgresEventRepository implements EventRepository {
     const result = await this.pool.query(
       `INSERT INTO events (id, run_id, conversation_id, step_id, type, payload, created_at)
        VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7)
-       ON CONFLICT (id) DO NOTHING
+       ON CONFLICT (id) DO UPDATE SET created_at = events.created_at
        RETURNING id, run_id, conversation_id, step_id, sequence, type, payload, created_at`,
       [
         event.id,
@@ -21,16 +21,7 @@ export class PostgresEventRepository implements EventRepository {
         event.createdAt
       ]
     );
-    if (result.rows[0]) return mapEvent(result.rows[0]);
-    const existing = await this.pool.query(
-      `SELECT id, run_id, conversation_id, step_id, sequence, type, payload, created_at
-       FROM events WHERE id = $1`,
-      [event.id],
-    );
-    if (!existing.rows[0]) {
-      throw new Error(`Event ${event.id} not found after ON CONFLICT`);
-    }
-    return mapEvent(existing.rows[0]);
+    return mapEvent(result.rows[0]);
   }
 
   async listByRunId(runId: string): Promise<SunPilotEvent[]> {

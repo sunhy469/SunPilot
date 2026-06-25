@@ -6,8 +6,8 @@ import { linkify, linkifyToNodes } from "./linkify";
 
 const { Text } = Typography;
 
-const TONE_MAP: Record<string, "default" | "secondary" | "success" | "warning" | "danger"> = {
-  default: "default",
+const TONE_MAP: Record<string, "secondary" | "success" | "warning" | "danger"> = {
+  default: "secondary",
   muted: "secondary",
   success: "success",
   warning: "warning",

@@ -70,6 +70,7 @@ import {
   MemoryRetryWrapper,
   MmrMemoryReranker,
   MultiHopRetriever,
+  parseEnv,
   SimpleQueryExpander,
   type ModelPurpose,
 } from "@sunpilot/core";
@@ -93,6 +94,7 @@ export function createAgentLoopService(deps: {
   liveEventBus?: AgentEventBus;
   systemPrompt?: string;
 }): { service: AgentService; modelRouter: ModelRouter; updateMemory: (id: string, input: { content?: string; title?: string; summary?: string; confidence?: number; importance?: number }) => Promise<{ id: string } | null> } {
+  const env = parseEnv(process.env);
   // ── Foundation ─────────────────────────────────────────────────
   const rawEventBus = deps.eventBus ?? new InMemoryAgentEventBus();
   const liveEventBus = deps.liveEventBus ?? new InMemoryAgentEventBus();
@@ -143,7 +145,7 @@ export function createAgentLoopService(deps: {
   const embeddingService = new LlmEmbeddingService({
     llm: deps.llmProvider,
     embeddingProvider,
-    dimension: Number(process.env["SUNPILOT_EMBEDDING_DIMENSIONS"] ?? 1536),
+    dimension: env.SUNPILOT_EMBEDDING_DIMENSIONS,
   });
 
   const saveMessage = async (input: { id: string; conversationId: string; role: string; content: string; metadata?: Record<string, unknown> }) => {
@@ -203,9 +205,9 @@ export function createAgentLoopService(deps: {
 
   // Resolve DP config: deps.llmProvider takes precedence when explicitly
   // provided (tests, single-provider deployments). Otherwise use env vars.
-  const dpBaseUrl = process.env["SUNPILOT_DP_LLM_BASE_URL"] ?? process.env["SUNPILOT_LLM_BASE_URL"] ?? "https://api.deepseek.com";
-  const dpModel = process.env["SUNPILOT_DP_LLM_MODEL"] ?? process.env["SUNPILOT_LLM_MODEL"] ?? "deepseek-v4-flash";
-  const dpApiKey = process.env["SUNPILOT_DP_LLM_API_KEY"] ?? process.env["SUNPILOT_LLM_API_KEY"] ?? "";
+  const dpBaseUrl = env.SUNPILOT_DP_LLM_BASE_URL ?? env.SUNPILOT_LLM_BASE_URL;
+  const dpModel = env.SUNPILOT_DP_LLM_MODEL ?? env.SUNPILOT_LLM_MODEL;
+  const dpApiKey = env.SUNPILOT_DP_LLM_API_KEY ?? env.SUNPILOT_LLM_API_KEY ?? "";
 
   const dpProvider: LlmProvider = deps.llmProvider ?? new OpenAICompatibleChatProvider({
     id: "llm.deepseek",
@@ -217,9 +219,9 @@ export function createAgentLoopService(deps: {
   console.log(`[llm] DP provider — model=${dpRouteModel} base=${dpBaseUrl} source=${deps.llmProvider ? "deps.llmProvider" : "env"}`);
 
   // Resolve Seed config — only provisioned when API key is set
-  const seedBaseUrl = process.env["SUNPILOT_SEED_LLM_BASE_URL"] ?? "https://ark.cn-beijing.volces.com/api/v3";
-  const seedModel = process.env["SUNPILOT_SEED_LLM_MODEL"] ?? "doubao-seed-2-0-lite-260428";
-  const seedApiKey = process.env["SUNPILOT_SEED_LLM_API_KEY"] ?? "";
+  const seedBaseUrl = env.SUNPILOT_SEED_LLM_BASE_URL;
+  const seedModel = env.SUNPILOT_SEED_LLM_MODEL;
+  const seedApiKey = env.SUNPILOT_SEED_LLM_API_KEY ?? "";
 
   const seedProvider = seedApiKey
     ? new OpenAICompatibleChatProvider({
@@ -664,13 +666,8 @@ export function createAgentLoopService(deps: {
 
   // ToolSandbox — validates tool execution against sandbox rules.
   // Mode from SUNPILOT_SANDBOX_MODE env var (strict|moderate|permissive),
-  // defaults to "moderate" for local dev.
-  const sandboxMode: "strict" | "moderate" | "permissive" =
-    (typeof process !== "undefined" &&
-      (process.env["SUNPILOT_SANDBOX_MODE"] === "strict" ||
-       process.env["SUNPILOT_SANDBOX_MODE"] === "permissive")
-        ? process.env["SUNPILOT_SANDBOX_MODE"] as "strict" | "permissive"
-        : "moderate");
+  // defaults to "moderate" for local dev. Validated by the env schema.
+  const sandboxMode = env.SUNPILOT_SANDBOX_MODE;
   const toolSandbox = new ToolSandbox(sandboxMode);
   console.log(`[sandbox] Mode: ${sandboxMode}`);
 

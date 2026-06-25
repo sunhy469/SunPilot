@@ -2,6 +2,12 @@ import type { AgentEvent } from "@sunpilot/core";
 
 export interface WebSocketLike {
   readyState: number;
+  /** Number of bytes queued for transmission (ws.WebSocket). Used for
+   * backpressure detection in the event streamer. */
+  bufferedAmount?: number;
+  /** Subscribe to a close event. Present on ws.WebSocket; used by the
+   * registry to auto-clean disconnected sockets (A14). */
+  once?(event: "close", listener: () => void): void;
 }
 
 export interface ConnectionState<TSocket extends WebSocketLike> {
@@ -30,6 +36,12 @@ export class ConnectionRegistry<TSocket extends WebSocketLike> {
       conversationSubscriptions: new Set(),
     };
     this.connections.set(socket, state);
+    // A14: Auto-remove the connection when the socket closes so the
+    // registry never holds dead references, even if the caller forgets to
+    // register a close handler. Idempotent with explicit remove() calls.
+    if (typeof socket.once === "function") {
+      socket.once("close", () => this.connections.delete(socket));
+    }
     return state;
   }
 
