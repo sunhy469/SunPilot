@@ -18,15 +18,31 @@ export function UserMessage({ message }: { message: ChatMessage }) {
           {hasAttachments && (
             <Flex gap={8} wrap="wrap" className="user-attachments">
               {message.attachments!.map((att) =>
-                isImageType(att) && (att.url || att.dataUrl) ? (
+                isImageType(att) ? (
                   <div key={att.id} className="user-attachment-image">
-                    <Image
-                      src={att.url ?? att.dataUrl}
-                      alt={att.name}
-                      width="100%"
-                      style={{ maxWidth: 200, borderRadius: 8, objectFit: "cover" }}
-                      preview={{ mask: "点击预览" }}
-                    />
+                    {att.url || att.dataUrl ? (
+                      <Image
+                        src={att.url ?? att.dataUrl}
+                        alt={att.name}
+                        width="100%"
+                        style={{ maxWidth: 200, borderRadius: 8, objectFit: "cover" }}
+                        preview={{ mask: "点击预览" }}
+                      />
+                    ) : (
+                      <Flex
+                        align="center"
+                        justify="center"
+                        style={{
+                          width: 72,
+                          height: 72,
+                          borderRadius: 8,
+                          background: "var(--sp-surface-soft)",
+                          border: "1px solid var(--sp-border-soft)",
+                        }}
+                      >
+                        <FileOutlined style={{ fontSize: 24, color: "var(--sp-muted)" }} />
+                      </Flex>
+                    )}
                   </div>
                 ) : (
                   <Flex

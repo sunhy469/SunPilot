@@ -231,6 +231,17 @@ export class InMemoryDatabaseContext implements DatabaseContext {
     ): Promise<MessageRecord[]> => [
       ...(this.messageRecords.get(conversationId) ?? []),
     ],
+    searchByEmbedding: async (
+      conversationId: string,
+      _embedding: number[],
+      limit: number,
+    ): Promise<MessageRecord[]> => {
+      // In-memory stub: return recent messages sorted by recency
+      // (no real vector search in test harness).
+      const messages = [...(this.messageRecords.get(conversationId) ?? [])];
+      messages.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+      return messages.slice(0, limit);
+    },
   };
 
   readonly modelCalls = {

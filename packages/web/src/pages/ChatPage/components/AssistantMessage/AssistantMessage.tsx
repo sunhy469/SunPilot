@@ -201,6 +201,20 @@ function StatusPartBlock({ part }: { part: AssistantStatusPart }) {
   );
 }
 
+/** §P0: Hide full base64 dataUrls in tool arg display.
+ *  Replaces `data:image/png;base64,iVBOR...` with `[base64 image, image/png, N KB]`. */
+const DATA_URL_RE = /^data:([^;]+);base64,[A-Za-z0-9+/=]+$/;
+function formatArgValue(value: string): string {
+  const m = DATA_URL_RE.exec(value);
+  if (m) {
+    const mime = m[1]!;
+    const bytes = Math.round((value.length * 3) / 4);
+    const kb = Math.max(1, Math.round(bytes / 1024));
+    return `[base64 image, ${mime}, ${kb}KB]`;
+  }
+  return value;
+}
+
 function ToolUsePartBlock({ part }: { part: AssistantToolUsePart }) {
   const [expanded, setExpanded] = useState(false);
   const hasPreview =
@@ -252,7 +266,7 @@ function ToolUsePartBlock({ part }: { part: AssistantToolUsePart }) {
                 {key}:
               </Text>{" "}
               <Text className="assistant-tool-use__arg-value">
-                {String(value)}
+                {formatArgValue(String(value))}
               </Text>
             </Flex>
           ))}

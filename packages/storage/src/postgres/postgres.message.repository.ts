@@ -35,6 +35,20 @@ export class PostgresMessageRepository implements MessageRepository {
     );
     return result.rows.map(mapMessage);
   }
+
+  async searchByEmbedding(conversationId: string, embedding: number[], limit: number): Promise<MessageRecord[]> {
+    const vectorStr = formatVector(embedding);
+    const result = await this.pool.query(
+      `SELECT id, conversation_id, role, content, metadata, created_at,
+              embedding <=> $2::vector AS _distance
+       FROM messages
+       WHERE conversation_id = $1 AND embedding IS NOT NULL
+       ORDER BY embedding <=> $2::vector
+       LIMIT $3`,
+      [conversationId, vectorStr, limit],
+    );
+    return result.rows.map(mapMessage);
+  }
 }
 
 function mapMessage(row: any): MessageRecord {

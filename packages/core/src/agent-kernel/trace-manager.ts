@@ -42,8 +42,20 @@ export interface SpanMetrics {
   latencyMs?: number;
   /** Sub-phase timings for detailed observability (§P0-3). */
   contextGroupAMs?: number;
+  summaryGenerationMs?: number;
+  summaryProcessingMs?: number;
+  historyProcessingMs?: number;
   memorySearchMs?: number;
+  sourceCompressionMs?: number;
+  tokenBudgetMs?: number;
+  contextAssemblyMs?: number;
   intentRouteMs?: number;
+  // §P0-3: Per-layer timing breakdown for intent routing
+  layer0FormMatchMs?: number;
+  layer1QueryEmbedMs?: number;
+  layer1SkillEmbedMs?: number;
+  layer2LlmMs?: number;
+  layer2TtftMs?: number;
   toolRetrievalMs?: number;
   firstTokenMs?: number;
   toolExecutionMs?: number;

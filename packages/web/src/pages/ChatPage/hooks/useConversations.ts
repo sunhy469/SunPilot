@@ -120,6 +120,8 @@ export function useConversations(request: Request, enabled: boolean) {
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [activeConversationId, setActiveConversationId] = useState("");
   const [messages, setMessages] = useState<ChatMessage[]>([]);
+  /** True while messages are being fetched for the current conversation. */
+  const [loadingMessages, setLoadingMessages] = useState(false);
   const newChatRequestedRef = useRef(false);
   /** Track whether this is the initial load (no conversation has been selected yet) */
   const initialLoadRef = useRef(true);
@@ -147,6 +149,7 @@ export function useConversations(request: Request, enabled: boolean) {
     newChatRequestedRef.current = true;
     setActiveConversationId("");
     setMessages([]);
+    setLoadingMessages(false);
   }, []);
 
   /** 确保会话存在（首次发消息时调用），标题 = 首条消息内容 */
@@ -179,9 +182,16 @@ export function useConversations(request: Request, enabled: boolean) {
     [request],
   );
 
-  /** Select an existing conversation — sets active id; messages are loaded by the
+  /** Select an existing conversation — immediately clears messages and sets
+   *  active id for instant UI feedback. Messages are loaded async by the
    *  activeConversationId useEffect (single source of truth, avoids double fetch). */
   const selectConversation = useCallback((id: string) => {
+    // If selecting the same conversation, no-op
+    if (id === activeConversationId) return;
+    // Clear old messages immediately so the UI doesn't show stale content
+    // from the previous conversation while the new messages load.
+    setMessages([]);
+    setLoadingMessages(true);
     setActiveConversationId(id);
     // Touch conversation to update updatedAt (fire-and-forget)
     touchConversation(request, id).then((updated) => {
@@ -191,7 +201,7 @@ export function useConversations(request: Request, enabled: boolean) {
         );
       }
     }).catch(() => {/* non-critical */});
-  }, [request]);
+  }, [request, activeConversationId]);
 
   const renameConversation = useCallback(
     async (id: string, title: string) => {
@@ -267,18 +277,29 @@ export function useConversations(request: Request, enabled: boolean) {
     if (!activeConversationId || !enabled) return;
     // AbortController: cancel in-flight fetch when id changes or component unmounts,
     // preventing stale responses from overwriting the current conversation's messages.
+    setLoadingMessages(true);
     const controller = new AbortController();
+    const targetConversationId = activeConversationId;
     request<{ conversationId: string; items: ChatMessage[] }>(
       endpoints.conversationMessages(activeConversationId),
       { signal: controller.signal },
     )
       .then((response) => {
-        setMessages((current) => mergeMessagesById(current, response.items));
+        setMessages((current) => {
+          // Defensive: filter out messages from other conversations that may
+          // have been added by concurrent effects (e.g. event replay).
+          const filtered = current.filter(
+            (m) => m.conversationId === targetConversationId,
+          );
+          return mergeMessagesById(filtered, response.items);
+        });
+        setLoadingMessages(false);
       })
       .catch((err: unknown) => {
         // AbortError is expected when switching conversations or unmounting
         if (err instanceof DOMException && err.name === "AbortError") return;
         // Other errors are non-critical; messages will retry on next refresh
+        setLoadingMessages(false);
       });
     return () => controller.abort();
   }, [activeConversationId, enabled, request]);
@@ -288,6 +309,7 @@ export function useConversations(request: Request, enabled: boolean) {
     activeConversationId,
     messages,
     setMessages,
+    loadingMessages,
     refresh,
     newChat,
     ensureConversation,

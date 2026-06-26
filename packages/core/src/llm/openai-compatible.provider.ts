@@ -94,6 +94,14 @@ export class OpenAICompatibleChatProvider implements LlmProvider {
       }
     }
 
+    // §Perf: Volcengine Ark's doubao-seed models default to reasoning
+    // mode, burning hundreds of tokens on internal reasoning before
+    // emitting output. For classification/simple tasks this adds
+    // 10-40s of wasted TTFT. The caller can opt out via request metadata.
+    if (this.baseUrl.includes("volces.com") && !(request.metadata as Record<string, unknown> | undefined)?.allowReasoning) {
+      body.thinking = { type: "disabled" };
+    }
+
     const response = await this.fetchImpl(
       new URL("chat/completions", this.baseUrl).toString(),
       {
