@@ -224,18 +224,22 @@ function assistantMessageReducer(
       conversationId?: string;
       messageId: string;
       content: string;
-      parts: Array<Record<string, unknown>>;
+      parts?: Array<Record<string, unknown>>;
       cards?: Array<{
         type: string;
         title?: string;
         data: Record<string, unknown>;
       }>;
     };
-    const completedParts = normalizeCompletedAssistantParts(
-      completedParams.parts,
-    );
 
     const existing = items.find((m) => m.id === completedParams.messageId);
+    const completedParts = normalizeCompletedAssistantParts(
+      resolveCompletedAssistantParts(
+        completedParams.parts,
+        existing,
+        completedParams.content,
+      ),
+    );
     if (
       existing &&
       existing.status === "completed" &&
@@ -333,6 +337,33 @@ function normalizeCompletedAssistantParts(
     }
     return part as unknown as AssistantMessagePart;
   });
+}
+
+function resolveCompletedAssistantParts(
+  incomingParts: Array<Record<string, unknown>> | undefined,
+  existing: ChatMessage | undefined,
+  content: string,
+): Array<Record<string, unknown>> {
+  if (Array.isArray(incomingParts)) return incomingParts;
+
+  const existingParts = existing?.parts?.filter(
+    (part) => part.id !== "__local_pending",
+  );
+  if (existingParts && existingParts.length > 0) {
+    return existingParts as unknown as Array<Record<string, unknown>>;
+  }
+
+  if (content.trim().length === 0) return [];
+  return [
+    {
+      id: "final_text",
+      type: "text",
+      content,
+      source: "model",
+      status: "completed",
+      createdAt: new Date().toISOString(),
+    },
+  ];
 }
 
 function mergeMessagesById(
@@ -699,6 +730,69 @@ describe("assistantMessageReducer", () => {
     expect(result[1]!.id).toBe("msg_late");
     expect(result[1]!.status).toBe("completed");
     expect(result[1]!.content).toBe("late arrival");
+  });
+
+  test("agent.message.completed tolerates missing parts and preserves existing stream parts", () => {
+    const items: ChatMessage[] = [
+      makeStreamingAssistant({
+        id: "msg_1",
+        content: "partial",
+        parts: [
+          {
+            id: "part_1",
+            type: "text",
+            content: "partial",
+            source: "model",
+            status: "streaming",
+            createdAt: "",
+          },
+        ],
+      }),
+    ];
+
+    const result = assistantMessageReducer(
+      items,
+      {
+        method: "agent.message.completed",
+        params: {
+          messageId: "msg_1",
+          content: "final",
+        },
+      },
+      "conv_1",
+    );
+
+    expect(result[0]!.content).toBe("final");
+    expect(result[0]!.status).toBe("completed");
+    expect(result[0]!.parts).toHaveLength(1);
+    expect(result[0]!.parts![0]).toMatchObject({
+      id: "part_1",
+      status: "completed",
+    });
+  });
+
+  test("agent.message.completed without parts creates a final text part for late messages", () => {
+    const result = assistantMessageReducer(
+      [],
+      {
+        method: "agent.message.completed",
+        params: {
+          messageId: "msg_late",
+          conversationId: "conv_1",
+          content: "late final",
+        },
+      },
+      "conv_1",
+    );
+
+    expect(result).toHaveLength(1);
+    expect(result[0]!.content).toBe("late final");
+    expect(result[0]!.parts).toHaveLength(1);
+    expect(result[0]!.parts![0]).toMatchObject({
+      type: "text",
+      content: "late final",
+      status: "completed",
+    });
   });
 
   test("delta dedup: skips duplicate deltaIndex", () => {

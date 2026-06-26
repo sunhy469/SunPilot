@@ -65,16 +65,33 @@ export function useOssUpload() {
     [],
   );
 
-  /** Construct a temporary UploadFile entry for immediate UI feedback. */
+  /**
+   * Construct a temporary UploadFile entry for immediate UI feedback.
+   *
+   * For image files, generates a local blob URL so the thumbnail preview
+   * shows instantly — even before the OSS upload completes. Without this,
+   * antd Image falls back to displaying the alt text (file.name, e.g.
+   * "image.png") which looks like a broken image.
+   */
   const createUploadFileEntry = useCallback(
-    (file: File, uid?: string): UploadFile => ({
-      uid: uid ?? `upload_${Date.now()}_${file.name}`,
-      name: file.name,
-      type: file.type,
-      size: file.size,
-      status: "uploading",
-      originFileObj: file as any,
-    }),
+    (file: File, uid?: string): UploadFile => {
+      const entry: UploadFile = {
+        uid: uid ?? `upload_${Date.now()}_${file.name}`,
+        name: file.name,
+        type: file.type,
+        size: file.size,
+        status: "uploading",
+        originFileObj: file as any,
+      };
+      if (file.type?.startsWith("image/") || /\.(png|jpe?g|webp|gif|bmp|avif)(\?|#|$)/i.test(file.name ?? "")) {
+        try {
+          entry.thumbUrl = URL.createObjectURL(file);
+        } catch {
+          // createObjectURL can fail in sandboxed contexts; non-fatal.
+        }
+      }
+      return entry;
+    },
     [],
   );
 

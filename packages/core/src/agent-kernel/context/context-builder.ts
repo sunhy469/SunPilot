@@ -74,6 +74,22 @@ export interface ContextBuilderDeps {
       createdAt: string;
     }>
   >;
+  /** Vector similarity search for messages relevant to a query embedding.
+   *  Uses pgvector cosine distance to find semantically similar messages.
+   *  Falls back gracefully when no embedding provider is available. */
+  searchMessages?: (
+    conversationId: string,
+    embedding: number[],
+    limit: number,
+  ) => Promise<
+    Array<{
+      id: string;
+      role: string;
+      content: string;
+      attachments?: AttachmentRef[];
+      createdAt: string;
+    }>
+  >;
   /** Fetch relevant memories with scope-aware isolation. */
   searchMemories?: (input: {
     query: string;
@@ -165,16 +181,6 @@ export interface ContextBuilderDeps {
    * exceed the compression threshold are summarized via LLM instead of
    * truncated, preserving semantic content. */
   summarizeMemory?: (content: string, maxChars: number) => Promise<string>;
-  /** §7.3: Callback to generate a conversation summary when the message
-   *  count exceeds a threshold but no summary exists yet. Called BEFORE
-   *  history chunk building so the current request benefits from the
-   *  summary instead of waiting for the next turn. */
-  generateSummaryIfNeeded?: (input: {
-    conversationId: string;
-    runId: string;
-    userId?: string;
-    messages: Array<{ id: string; role: string; content: string; createdAt: string }>;
-  }) => Promise<void>;
 }
 
 /**
@@ -230,7 +236,13 @@ export class ContextBuilder implements ContextBuilderInterface {
     const t0 = Date.now();
     // §P0-3: Phase timing for trace observability
     let groupAParallelMs = 0;
+    let summaryGenerationMs = 0;
+    let summaryProcessingMs = 0;
+    let historyProcessingMs = 0;
     let memorySearchMs = 0;
+    let sourceCompressionMs = 0;
+    let tokenBudgetMs = 0;
+    let contextAssemblyMs = 0;
     const chunks: ContextChunk[] = [];
     let availableSkills: AgentContext["availableSkills"] = [];
 
@@ -360,11 +372,10 @@ export class ContextBuilder implements ContextBuilderInterface {
         toolResultsSettled,
         skillsSettled,
       ] = await Promise.allSettled([
-        // 1. Conversation history
-        this.deps.listMessages(
-          input.conversationId,
-          ContextBuilder.MAX_HISTORY_MESSAGES,
-        ),
+        // 1. Recent conversation messages (recency fallback).
+        // Vector search for semantically relevant messages runs after
+        // Group A when queryEmbedding is available. See merge below.
+        this.deps.listMessages(input.conversationId, 5),
         // 2. Conversation summaries (type+scope filter, no ILIKE)
         this.deps.searchMemories
           ? this.deps.searchMemories({
@@ -405,7 +416,7 @@ export class ContextBuilder implements ContextBuilderInterface {
         sourceFailures.push({ source, critical, error });
       };
 
-      const messages = messagesSettled.status === "fulfilled"
+      let messages = messagesSettled.status === "fulfilled"
         ? messagesSettled.value
         : (() => {
             const reason = String(messagesSettled.reason);
@@ -451,48 +462,51 @@ export class ContextBuilder implements ContextBuilderInterface {
         console.debug(`[ContextBuilder] group_a_parallel_ms=${groupAParallelMs}`);
       }
 
-      // §7.3: Summary generation timing — if the conversation is long
-      // enough (≥30 messages) but has NO existing summary, generate one
-      // NOW so the current request benefits from compaction instead of
-      // waiting for the next turn. The callback persists the summary;
-      // we then re-fetch to include it below.
-      let summaryMemoriesResult = summaryMemoriesResultInitial;
-      if (
-        this.deps.generateSummaryIfNeeded &&
-        messages.length >= 30 &&
-        summaryMemoriesResultInitial.length === 0
-      ) {
+      // ── Vector-based message retrieval ────────────────────────────
+      // After Group A, queryEmbedding is available. Use it to find
+      // semantically relevant messages instead of loading all history.
+      // Merge with the 5 recent messages from Group A for recency bias.
+      if (queryEmbedding && this.deps.searchMessages) {
         try {
-          await this.deps.generateSummaryIfNeeded({
-            conversationId: input.conversationId,
-            runId: input.runId,
-            userId: input.userId,
-            messages: messages.map((m) => ({
-              id: m.id,
-              role: m.role,
-              content: m.content,
-              createdAt: m.createdAt,
-            })),
-          });
-          // Re-fetch summaries to include the newly generated one
-          if (this.deps.searchMemories) {
-            summaryMemoriesResult = await this.deps.searchMemories({
-              query: "",
-              runId: input.runId,
-              conversationId: input.conversationId,
-              userId: input.userId,
-              types: ["conversation_summary"],
-              scopes: ["conversation"],
-              limit: 5,
-            });
+          const relevant = await this.deps.searchMessages(
+            input.conversationId,
+            queryEmbedding,
+            20,
+          );
+          // Merge: deduplicate by id (recency messages take priority in
+          // case of overlap, but actually server results override local).
+          const seen = new Set(messages.map((m) => m.id));
+          for (const m of relevant) {
+            if (!seen.has(m.id)) {
+              seen.add(m.id);
+              messages.push(m);
+            }
           }
         } catch {
-          // Best effort — summary generation failure shouldn't block context building
+          // Vector search failed — fall back to recency-only (already in `messages`).
+        }
+      } else if (messages.length < 5) {
+        // No embedding provider or no searchMessages callback —
+        // fall back to recent 30 messages.
+        try {
+          messages = await this.deps.listMessages(
+            input.conversationId,
+            30,
+          );
+        } catch {
+          // listMessages already handled above; messages stays as-is.
         }
       }
 
+      // Summary generation has moved to background: it now runs
+      // asynchronously in writeMemories() after every ~20 turns. We just
+      // use whatever summaries already exist in the DB (fetched in Group A).
+      summaryGenerationMs = 0;
+      let summaryMemoriesResult = summaryMemoriesResultInitial;
+
       // ── Process summaries & stale detection (depends on messages + summaries) ──
       // Check for existing conversation summaries to compress older history.
+      const tSummaryProc = Date.now();
       // Summaries replace raw messages that fall within their range,
       // keeping only recent messages (after the latest summary's range)
       // as full text.
@@ -694,6 +708,8 @@ export class ContextBuilder implements ContextBuilderInterface {
         }
       }
 
+      summaryProcessingMs = Date.now() - tSummaryProc;
+
       // Build history chunks, skipping messages already covered by a summary.
       // This is precise compaction: summarized messages are replaced by their
       // summary, reducing token usage while preserving conversation context.
@@ -702,6 +718,7 @@ export class ContextBuilder implements ContextBuilderInterface {
       // semi-recent get truncated to 500 chars, older messages to 150 chars
       // (first sentence only). Summarized messages are skipped entirely
       // (summary takes priority over truncation).
+      const tHistory = Date.now();
       const RECENT_FULL = 10;
       const SEMI_RECENT_MAX = 500;
       const OLDER_MAX = 150;
@@ -740,6 +757,8 @@ export class ContextBuilder implements ContextBuilderInterface {
           trust: msg.role === "assistant" ? "tool" : "user",
         });
       }
+
+      historyProcessingMs = Date.now() - tHistory;
 
       // Prepend summary chunks so they appear before raw history in the prompt.
       // Summaries have lower priority (8 < 10) so they survive token budget
@@ -1185,6 +1204,7 @@ export class ContextBuilder implements ContextBuilderInterface {
     // Before budget trimming, apply source-specific truncation so that
     // long chunks don't get dropped entirely. This preserves key info
     // while freeing tokens for other sources.
+    const tCompress = Date.now();
     //
     // §2.5: Dynamic thresholds based on available token budget — smaller
     // context windows get tighter caps so a single chunk can't dominate.
@@ -1292,8 +1312,12 @@ export class ContextBuilder implements ContextBuilderInterface {
       }
     }
 
+    sourceCompressionMs = Date.now() - tCompress;
+
     // ── Apply token budget ────────────────────────────────────────
+    const tBudget = Date.now();
     const budget = this.budgeter.apply(chunks);
+    tokenBudgetMs = Date.now() - tBudget;
 
     // §P3: Record how many memories survived token budget trimming
     memoryMetrics.includedCount = budget.included.filter((c) => c.source === "memory").length;
@@ -1332,6 +1356,7 @@ export class ContextBuilder implements ContextBuilderInterface {
     };
 
     // ── Pack into AgentContext ────────────────────────────────────
+    const tAssembly = Date.now();
     const systemChunks = budget.included.filter((c) => c.source === "system");
     const safetyChunks = budget.included.filter(
       (c) => c.source === "safety_policy",
@@ -1424,7 +1449,13 @@ export class ContextBuilder implements ContextBuilderInterface {
       // §P0-3: Phase timing for trace observability
       timing: {
         groupAParallelMs,
+        summaryGenerationMs,
+        summaryProcessingMs,
+        historyProcessingMs,
         memorySearchMs,
+        sourceCompressionMs,
+        tokenBudgetMs,
+        contextAssemblyMs: Date.now() - tAssembly,
         totalBuildMs: Date.now() - t0,
       },
     };

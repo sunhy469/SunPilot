@@ -232,6 +232,17 @@ export interface RoutedIntent {
     embeddingCandidateCount?: number;
     /** Whether the intent was determined by form-match rules. */
     formMatch?: boolean;
+    // ── §P0-3: Per-layer timing (ms) for intent routing breakdown ──
+    /** Layer 0: form-match regex (<1ms). */
+    layer0FormMatchMs?: number;
+    /** Layer 1: user query embedding API call. */
+    layer1QueryEmbedMs?: number;
+    /** Layer 1: skill embedding + cosine similarity (parallel batches). */
+    layer1SkillEmbedMs?: number;
+    /** Layer 2: LLM classification call (full duration). */
+    layer2LlmMs?: number;
+    /** Layer 2: LLM time-to-first-token. */
+    layer2TtftMs?: number;
   };
 }
 
@@ -304,7 +315,13 @@ export interface AgentContext {
   /** §P0-3: Phase timing for observability traces (milliseconds). */
   timing?: {
     groupAParallelMs: number;
+    summaryGenerationMs: number;
+    summaryProcessingMs: number;
+    historyProcessingMs: number;
     memorySearchMs: number;
+    sourceCompressionMs: number;
+    tokenBudgetMs: number;
+    contextAssemblyMs: number;
     totalBuildMs: number;
   };
 }
