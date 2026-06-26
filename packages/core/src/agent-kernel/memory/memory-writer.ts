@@ -228,58 +228,101 @@ export class DefaultMemoryWriter {
     // 1. A tool task completes successfully (goalAchieved), OR
     // 2. The conversation has grown large (forceSummary — token or turn trigger), OR
     // 3. Rolling trigger: every 8 tool turns to keep summary incremental
+    // 4. §7.1: Pure-chat long conversation (≥30 messages, no tool calls)
     const turnCount = input.observation?.toolCalls.length ?? 0;
     const shouldRollingSummarize =
       input.observation &&
       turnCount > 0 &&
       (input.context.messages.length >= 20 || turnCount >= 8);
+    // §7.1: New trigger for pure-chat long conversations that never
+    // produce tool calls — without this, "你好" + 52 messages never
+    // summarizes because none of the original 3 triggers fire.
+    const shouldSummarizeByMessageCount =
+      input.context.messages.length >= 30 && !input.observation;
     const shouldSummarize =
-      input.observation &&
-      (input.reflection?.goalAchieved ||
-        input.forceSummary ||
-        shouldRollingSummarize);
-    if (shouldSummarize && input.observation) {
+      (input.observation &&
+        (input.reflection?.goalAchieved ||
+          input.forceSummary ||
+          shouldRollingSummarize)) ||
+      shouldSummarizeByMessageCount;
+    if (shouldSummarize) {
+      // §7.2: Branch on whether this turn had tool calls. Pure-chat
+      // summaries use a different content shape (topic + conclusions +
+      // preferences + open questions) so they're useful even without
+      // tool evidence.
+      const hasToolTurn = !!input.observation;
       const obs = input.observation;
       const refl = input.reflection;
-      const toolDetails = obs.toolCalls
-        .map(
-          (tc) =>
-            `- ${tc.name} (${tc.skillId}): ${tc.status} — ${tc.summary}`,
-        )
-        .join("\n");
-      const artifactDetails = obs.artifacts
-        .map((a) => `- ${a.name} (${a.type})`)
-        .join("\n");
-      const structuredFacts = obs.toolCalls
-        .filter((tc) => tc.structured)
-        .map((tc) => {
-          const s = tc.structured!;
-          const total =
-            s.totalResults ??
-            (Array.isArray(s.candidates)
-              ? (s.candidates as unknown[]).length
-              : Array.isArray(s.results)
-                ? (s.results as unknown[]).length
-                : undefined);
-          return total !== undefined
-            ? `${tc.name}: ${total} results`
-            : `${tc.name}: completed`;
-        })
-        .join(", ");
 
-      const goalText = refl?.summary ?? "Conversation progress";
-      const content = [
-        `Goal: ${goalText}`,
-        obs.summary ? `Summary: ${obs.summary}` : "",
-        toolDetails ? `Tools executed:\n${toolDetails}` : "",
-        structuredFacts ? `Results: ${structuredFacts}` : "",
-        artifactDetails ? `Artifacts created:\n${artifactDetails}` : "",
-        refl?.missingInfo?.length
-          ? `Open questions: ${refl.missingInfo.join(", ")}`
-          : "",
-      ]
-        .filter(Boolean)
-        .join("\n\n");
+      let content: string;
+      let goalText: string;
+      let summaryText: string | undefined;
+
+      if (hasToolTurn && obs) {
+        // ── Tool-based summary (original format) ──
+        const toolDetails = obs.toolCalls
+          .map(
+            (tc) =>
+              `- ${tc.name} (${tc.skillId}): ${tc.status} — ${tc.summary}`,
+          )
+          .join("\n");
+        const artifactDetails = obs.artifacts
+          .map((a) => `- ${a.name} (${a.type})`)
+          .join("\n");
+        const structuredFacts = obs.toolCalls
+          .filter((tc) => tc.structured)
+          .map((tc) => {
+            const s = tc.structured!;
+            const total =
+              s.totalResults ??
+              (Array.isArray(s.candidates)
+                ? (s.candidates as unknown[]).length
+                : Array.isArray(s.results)
+                  ? (s.results as unknown[]).length
+                  : undefined);
+            return total !== undefined
+              ? `${tc.name}: ${total} results`
+              : `${tc.name}: completed`;
+          })
+          .join(", ");
+
+        goalText = refl?.summary ?? "Conversation progress";
+        summaryText = refl?.summary ?? obs.summary;
+        content = [
+          `Goal: ${goalText}`,
+          obs.summary ? `Summary: ${obs.summary}` : "",
+          toolDetails ? `Tools executed:\n${toolDetails}` : "",
+          structuredFacts ? `Results: ${structuredFacts}` : "",
+          artifactDetails ? `Artifacts created:\n${artifactDetails}` : "",
+          refl?.missingInfo?.length
+            ? `Open questions: ${refl.missingInfo.join(", ")}`
+            : "",
+        ]
+          .filter(Boolean)
+          .join("\n\n");
+      } else {
+        // ── Pure-chat summary (§7.2: topic + conclusions + preferences) ──
+        // Extract discussion topic from recent messages
+        const recentMessages = input.context.messages.slice(-10);
+        const userMessages = recentMessages
+          .filter((m) => m.role === "user")
+          .map((m) => m.content.slice(0, 120));
+        const topicGuess = userMessages[0]
+          ? userMessages[0].replace(/\n/g, " ").trim()
+          : "General conversation";
+        goalText = refl?.summary ?? "Casual conversation";
+        summaryText = refl?.summary ?? topicGuess;
+        content = [
+          `Topic: ${topicGuess}`,
+          `Messages: ${input.context.messages.length}`,
+          summaryText ? `Summary: ${summaryText}` : "",
+          refl?.missingInfo?.length
+            ? `Open questions: ${refl.missingInfo.join(", ")}`
+            : "",
+        ]
+          .filter(Boolean)
+          .join("\n\n");
+      }
 
       if (content.trim()) {
         // Determine the message range this summary covers.
@@ -290,12 +333,12 @@ export class DefaultMemoryWriter {
 
         // ── Quality scoring ──────────────────────────────────────────
         const toolSuccessRate =
-          obs.toolCalls.length > 0
+          hasToolTurn && obs && obs.toolCalls.length > 0
             ? obs.toolCalls.filter((tc) => tc.status === "completed").length /
               obs.toolCalls.length
             : 1;
         const reflConfidence = refl?.confidence ?? 0.7;
-        const hasArtifacts = obs.artifacts.length > 0;
+        const hasArtifacts = hasToolTurn && !!obs && obs.artifacts.length > 0;
         const hasQuestions = (refl?.missingInfo?.length ?? 0) > 0;
         const qualityScore = Math.round(
           (reflConfidence * 0.4 +
@@ -331,16 +374,20 @@ export class DefaultMemoryWriter {
 
         candidates.push({
           key: `task_summary:${input.input.runId}`,
-          title: `Task: ${goalText.slice(0, 80)}`,
+          title: hasToolTurn
+            ? `Task: ${goalText.slice(0, 80)}`
+            : `Chat: ${goalText.slice(0, 80)}`,
           content,
-          summary: refl?.summary ?? obs.summary,
+          summary: summaryText,
           type: "conversation_summary",
           scope: "conversation",
           scopeId: input.input.conversationId,
-          source: "agent_task_summary",
+          source: hasToolTurn ? "agent_task_summary" : "agent_chat_summary",
           confidence: qualityScore,
           importance: dynImportance,
-          reason: "completed tool task summary with structured results",
+          reason: hasToolTurn
+            ? "completed tool task summary with structured results"
+            : "pure-chat long conversation summary",
           metadata: {
             trigger: refl?.goalAchieved
               ? "completed_tool_task"
@@ -348,10 +395,12 @@ export class DefaultMemoryWriter {
                 ? "force_summary"
                 : shouldRollingSummarize
                   ? "rolling_turn_trigger"
-                  : "manual",
+                  : shouldSummarizeByMessageCount
+                    ? "message_count_trigger"
+                    : "manual",
             runId: input.input.runId,
-            artifactIds: obs.artifacts.map((a) => a.id),
-            toolCallIds: obs.toolCalls.map((tc) => tc.id),
+            artifactIds: hasToolTurn && obs ? obs.artifacts.map((a) => a.id) : [],
+            toolCallIds: hasToolTurn && obs ? obs.toolCalls.map((tc) => tc.id) : [],
             goalAchieved: refl?.goalAchieved ?? false,
             confidence: refl?.confidence,
             timestamp: now,
@@ -362,7 +411,7 @@ export class DefaultMemoryWriter {
               reflectionConfidence: reflConfidence,
               hasArtifacts,
               hasOpenQuestions: hasQuestions,
-              toolCount: obs.toolCalls.length,
+              toolCount: hasToolTurn && obs ? obs.toolCalls.length : 0,
             },
             version: summaryVersion,
             updatedAt: now,

@@ -1,0 +1,37 @@
+// §9.4.2: Shared panel design language for the digital-world side panels
+// (TaskPanel, ArtifactBoxPanel, StatusPanel, ActionLogPanel). Provides a
+// unified gradient header. List-item hover transitions are added directly in
+// each panel's SCSS for locality.
+
+// Unified Drawer header: gradient strip + icon + title.
+// Negative margins pull the header flush with the Drawer body edges so the
+// gradient spans the full width of the title bar.
+.dw-panel-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 16px;
+  margin: -8px -16px;
+  font-size: 15px;
+  font-weight: 600;
+  color: #1f2937;
+  background: linear-gradient(90deg, #eef2ff 0%, #ffffff 70%);
+  border-bottom: 1px solid #e0e7ff;
+  border-radius: 8px 8px 0 0;
+
+  &__icon {
+    font-size: 18px;
+    color: #4f46e5;
+    line-height: 1;
+  }
+
+  &__title {
+    flex: 1;
+  }
+
+  &__subtitle {
+    font-size: 12px;
+    font-weight: 400;
+    color: #6b7280;
+  }
+}

@@ -18,6 +18,12 @@ import type { EmbeddingService } from "../context/embedding-service.js";
 export class SkillEmbeddingCache {
   private cache = new Map<string, number[]>();
   private pending = new Map<string, Promise<number[] | undefined>>();
+  // §4.4: Query embedding cache — IntentRouter computes the query
+  // embedding during Layer 1 matching, and ToolRetriever needs the SAME
+  // embedding for its Layer 4 semantic scoring. Without this cache, the
+  // query gets re-embedded on every ToolRetriever.retrieve() call,
+  // wasting one embedding API call per turn.
+  private queryCache = new Map<string, number[]>();
 
   constructor(private readonly embeddingService: EmbeddingService) {}
 
@@ -112,6 +118,30 @@ export class SkillEmbeddingCache {
   /** Number of cached embeddings. */
   get size(): number {
     return this.cache.size;
+  }
+
+  // ── §4.4: Query embedding cache ──────────────────────────────────
+
+  /**
+   * Store a query embedding so ToolRetriever can reuse it without
+   * re-calling the embedding API. Called by IntentRouter after it
+   * computes the query embedding during Layer 1 matching.
+   */
+  setQueryEmbedding(query: string, embedding: number[]): void {
+    this.queryCache.set(query, embedding);
+  }
+
+  /**
+   * Get a previously-stored query embedding, or undefined if not cached.
+   * ToolRetriever calls this before computing its own embedding.
+   */
+  getQueryEmbedding(query: string): number[] | undefined {
+    return this.queryCache.get(query);
+  }
+
+  /** Clear the query embedding cache (e.g., between unrelated runs). */
+  clearQueryEmbeddings(): void {
+    this.queryCache.clear();
   }
 
   private buildKey(skill: {

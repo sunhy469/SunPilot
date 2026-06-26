@@ -1,7 +1,9 @@
 import { Drawer, Timeline } from "antd";
+import { HistoryOutlined } from "@ant-design/icons";
 import { useState, useEffect, useMemo } from "react";
 import { createRequest } from "../../../shared/api/client";
 import { listActionLogs } from "../api";
+import { useIsMobile } from "../hooks/useIsMobile";
 import "./ActionLogPanel.scss";
 
 interface ActionLog {
@@ -30,6 +32,8 @@ const EVENT_LABELS: Record<string, string> = {
 export function ActionLogPanel({ open, beingId, onClose }: ActionLogPanelProps) {
   const [logs, setLogs] = useState<ActionLog[]>([]);
   const request = useMemo(() => createRequest(), []);
+  // Task 17 (§9.4.5): full-screen Drawer on mobile (<768px).
+  const isMobile = useIsMobile();
 
   useEffect(() => {
     if (!open || !beingId) return;
@@ -39,7 +43,17 @@ export function ActionLogPanel({ open, beingId, onClose }: ActionLogPanelProps) 
   }, [open, beingId, request]);
 
   return (
-    <Drawer title="动作日志" open={open} onClose={onClose} width={360}>
+    <Drawer
+      title={
+        <div className="dw-panel-header">
+          <HistoryOutlined className="dw-panel-header__icon" />
+          <span className="dw-panel-header__title">动作日志</span>
+        </div>
+      }
+      open={open}
+      onClose={onClose}
+      width={isMobile ? "100%" : 360}
+    >
       <div className="action-log-panel">
         {logs.length > 0 ? (
           <Timeline
