@@ -154,6 +154,42 @@ export class SummaryStaleDetector {
       }
     }
 
+    // ── Check 5: Topic drift (§7.5) ─────────────────────────────────
+    // Compare keyword overlap between new USER messages and summary content.
+    // If overlap < 30%, the conversation has drifted to a new topic and
+    // the summary may be outdated. This is especially important for pure
+    // chat scenarios where no tool results trigger fact-change detection.
+    //
+    // Only user messages are considered (assistant messages don't signal
+    // user intent drift), and at least 3 keywords are required to avoid
+    // false positives on short follow-up questions like "can you explain
+    // more about that?" which produce too few meaningful keywords.
+    const userMessages = input.newMessages.filter((m) => m.role === "user");
+    if (userMessages.length > 0) {
+      const summaryKeywords = extractKeywords(input.summary.content);
+      const userContent = userMessages.map((m) => m.content).join(" ");
+      const newKeywords = extractKeywords(userContent);
+      const MIN_DRIFT_KEYWORDS = 3;
+
+      if (
+        summaryKeywords.size > 0 &&
+        newKeywords.size >= MIN_DRIFT_KEYWORDS
+      ) {
+        let shared = 0;
+        for (const kw of newKeywords) {
+          if (summaryKeywords.has(kw)) shared++;
+        }
+        const union = summaryKeywords.size + newKeywords.size - shared;
+        const overlapRatio = union > 0 ? shared / union : 0;
+
+        if (overlapRatio < 0.3) {
+          reasons.push(
+            `Topic drift detected: keyword overlap ${(overlapRatio * 100).toFixed(0)}% < 30% — conversation may have moved to a new topic`,
+          );
+        }
+      }
+    }
+
     // ── Determine severity ──────────────────────────────────────────
     if (reasons.length === 0) {
       return {
@@ -225,4 +261,56 @@ export class SummaryStaleDetector {
       newToolResults: params.newToolResultsSince,
     });
   }
+}
+
+/**
+ * §7.5: Extract keywords from text for topic-drift overlap comparison.
+ *
+ * Handles both English (whitespace tokenization) and Chinese (bigram
+ * extraction) text. Filters out common stop words and very short tokens.
+ * Returns a Set of lowercase keywords.
+ */
+const STOP_WORDS = new Set([
+  // English
+  "the", "a", "an", "is", "are", "was", "were", "be", "been", "being",
+  "have", "has", "had", "do", "does", "did", "will", "would", "could",
+  "should", "may", "might", "must", "can", "to", "of", "in", "on", "at",
+  "by", "for", "with", "about", "as", "into", "through", "during", "and",
+  "or", "but", "if", "then", "that", "this", "these", "those", "it", "its",
+  "from", "they", "them", "their", "there", "here", "what", "which", "who",
+  "when", "where", "why", "how", "all", "each", "every", "both", "few",
+  "more", "most", "other", "some", "such", "no", "not", "only", "own",
+  "same", "so", "than", "too", "very", "just", "also", "now", "you", "your",
+  "i", "me", "my", "we", "us", "our", "he", "she", "him", "her", "his",
+  // Common Chinese stop chars
+  "的", "了", "是", "在", "我", "你", "他", "她", "它", "们", "和", "与",
+  "或", "但", "如果", "因为", "所以", "虽然", "但是", "不过", "然后",
+  "现在", "这个", "那个", "这些", "那些", "什么", "怎么", "为什么",
+  "可以", "需要", "应该", "已经", "正在", "一个", "一些", "没有", "不",
+]);
+
+function extractKeywords(text: string): Set<string> {
+  const keywords = new Set<string>();
+  const lower = text.toLowerCase();
+
+  // English: split on non-alphanumeric, filter stop words and short tokens
+  const englishTokens = lower.split(/[^a-z0-9]+/).filter((w) => w.length > 2);
+  for (const token of englishTokens) {
+    if (!STOP_WORDS.has(token)) {
+      keywords.add(token);
+    }
+  }
+
+  // Chinese: extract 2-character bigrams from CJK ranges
+  const cjkChars = [...lower].filter(
+    (c) => c.charCodeAt(0) >= 0x4e00 && c.charCodeAt(0) <= 0x9fff,
+  );
+  for (let i = 0; i < cjkChars.length - 1; i++) {
+    const bigram = cjkChars[i]! + cjkChars[i + 1]!;
+    if (!STOP_WORDS.has(bigram)) {
+      keywords.add(bigram);
+    }
+  }
+
+  return keywords;
 }

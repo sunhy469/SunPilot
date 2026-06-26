@@ -27,11 +27,31 @@ export class TokenBudgeter {
   apply(chunks: ContextChunk[]): BudgetResult {
     const availableTokens = this.maxTokens - this.reservedForOutput;
 
+    // §2.4: Pre-compression pass — compress low-priority conversation_history
+    // chunks instead of dropping them entirely. This runs BEFORE budget
+    // allocation so compressed chunks are more likely to fit.
+    const compressedChunks = chunks.map((chunk) => {
+      if (
+        chunk.source === 'conversation_history' &&
+        chunk.content.length > 300 &&
+        chunk.tokenEstimate > 75
+      ) {
+        const compressed = compressHistoryMessage(chunk.content, 300);
+        return {
+          ...chunk,
+          content: compressed,
+          tokenEstimate: estimateTokens(compressed),
+          metadata: { ...chunk.metadata, preCompressed: true },
+        };
+      }
+      return chunk;
+    });
+
     // Separate mandatory chunks
     const mandatory: ContextChunk[] = [];
     const optional: ContextChunk[] = [];
 
-    for (const chunk of chunks) {
+    for (const chunk of compressedChunks) {
       if (MANDATORY_SOURCES.has(chunk.source)) {
         mandatory.push(chunk);
       } else {
@@ -109,4 +129,24 @@ export class TokenBudgeter {
   static estimateTokens(text: string): number {
     return estimateTokens(text);
   }
+}
+
+/**
+ * §2.4: Compress a history message to fit within maxChars.
+ * Keeps the first sentence + a truncated tail with an ellipsis.
+ */
+function compressHistoryMessage(content: string, maxChars: number): string {
+  if (content.length <= maxChars) return content;
+  const slice = content.slice(0, maxChars);
+  const lastStop = Math.max(
+    slice.lastIndexOf('。'),
+    slice.lastIndexOf('.'),
+    slice.lastIndexOf('!'),
+    slice.lastIndexOf('?'),
+    slice.lastIndexOf('\n'),
+  );
+  if (lastStop > maxChars * 0.5) {
+    return slice.slice(0, lastStop + 1) + '…';
+  }
+  return slice + '…';
 }

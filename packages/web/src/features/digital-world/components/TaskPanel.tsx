@@ -1,7 +1,9 @@
 import { Drawer, Button, Space, Tag } from "antd";
+import { CheckCircleOutlined } from "@ant-design/icons";
 import { useState, useEffect, useMemo, useCallback } from "react";
 import { createRequest } from "../../../shared/api/client";
 import { listTasks, createTask } from "../api";
+import { useIsMobile } from "../hooks/useIsMobile";
 import "./TaskPanel.scss";
 
 interface TaskRecord {
@@ -32,6 +34,8 @@ const STATUS_COLORS: Record<string, string> = {
 export function TaskPanel({ open, beingId, onClose }: TaskPanelProps) {
   const [tasks, setTasks] = useState<TaskRecord[]>([]);
   const request = useMemo(() => createRequest(), []);
+  // Task 17 (§9.4.5): full-screen Drawer on mobile (<768px).
+  const isMobile = useIsMobile();
 
   const refreshTasks = useCallback(() => {
     if (!beingId) return;
@@ -53,7 +57,17 @@ export function TaskPanel({ open, beingId, onClose }: TaskPanelProps) {
   };
 
   return (
-    <Drawer title="任务" open={open} onClose={onClose} width={360}>
+    <Drawer
+      title={
+        <div className="dw-panel-header">
+          <CheckCircleOutlined className="dw-panel-header__icon" />
+          <span className="dw-panel-header__title">任务</span>
+        </div>
+      }
+      open={open}
+      onClose={onClose}
+      width={isMobile ? "100%" : 360}
+    >
       <div className="task-panel">
         <div className="task-panel__actions">
           <Space direction="vertical" style={{ width: "100%" }}>
