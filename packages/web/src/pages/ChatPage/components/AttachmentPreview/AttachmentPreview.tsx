@@ -23,8 +23,10 @@ export function AttachmentPreview({ files, onRemove }: AttachmentPreviewProps) {
   useEffect(() => () => { mountedRef.current = false; }, []);
 
   const handlePreview = useCallback((file: UploadFile) => {
-    if (file.url || file.preview) {
-      setPreviewSrc((file.url ?? file.preview) as string);
+    // Prefer OSS URL, then antd preview, then our local blob thumbUrl.
+    const src = (file.url ?? file.preview ?? file.thumbUrl) as string | undefined;
+    if (src) {
+      setPreviewSrc(src);
       setPreviewVisible(true);
       return;
     }
@@ -54,14 +56,40 @@ export function AttachmentPreview({ files, onRemove }: AttachmentPreviewProps) {
           const isUploading = file.status === "uploading";
 
           if (isImageType(file)) {
+            const thumbSrc = file.thumbUrl ?? file.url;
             return (
               <Flex
                 key={file.uid}
                 className="chat-composer__attachment-card"
-                onClick={() => !isUploading && handlePreview(file)}
+                onClick={() => handlePreview(file)}
                 style={{ position: "relative" }}
               >
-                {isUploading ? (
+                {thumbSrc ? (
+                  <div style={{ position: "relative", width: 72, height: 72 }}>
+                    <Image
+                      src={thumbSrc}
+                      alt={file.name}
+                      width={72}
+                      height={72}
+                      style={{ borderRadius: 10, objectFit: "cover" }}
+                      preview={false}
+                    />
+                    {isUploading && (
+                      <Flex
+                        align="center"
+                        justify="center"
+                        style={{
+                          position: "absolute",
+                          inset: 0,
+                          borderRadius: 10,
+                          background: "rgba(0,0,0,0.35)",
+                        }}
+                      >
+                        <Spin indicator={<LoadingOutlined style={{ fontSize: 20, color: "#fff" }} spin />} />
+                      </Flex>
+                    )}
+                  </div>
+                ) : isUploading ? (
                   <Flex
                     align="center"
                     justify="center"
@@ -77,7 +105,7 @@ export function AttachmentPreview({ files, onRemove }: AttachmentPreviewProps) {
                   </Flex>
                 ) : (
                   <Image
-                    src={file.thumbUrl ?? file.url ?? undefined}
+                    src={undefined}
                     alt={file.name}
                     width={72}
                     height={72}

@@ -38,8 +38,14 @@ export function ChatPage() {
   );
 
   const hasMessages = conversations.messages.length > 0;
+  // Only show welcome when there's no active conversation AND no messages.
+  // During conversation switching, messages are cleared immediately but
+  // activeConversationId is set — we show the chat area (not welcome) so
+  // messages load in without a jarring welcome → chat flash.
   const isWelcome =
-    !hasMessages && chat.chatViewState !== "loadingConversation";
+    !hasMessages &&
+    !conversations.activeConversationId &&
+    chat.chatViewState !== "loadingConversation";
   const isOffline = chat.chatViewState === "offline";
 
   const aiOutputs = useMemo(
@@ -134,6 +140,7 @@ export function ChatPage() {
                   sendState={chat.sendState}
                   toolName={chat.toolName}
                   onCardAction={chat.onCardAction}
+                  loadingMessages={conversations.loadingMessages}
                 />
                 <div className="chat-composer-wrap">
                   <ArtifactPanel

@@ -39,4 +39,7 @@ export interface CreateMessageInput {
 export interface MessageRepository {
   create(input: CreateMessageInput): Promise<MessageRecord>;
   listByConversationId(conversationId: string): Promise<MessageRecord[]>;
+  /** Vector similarity search using pgvector cosine distance.
+   *  Returns messages ordered by semantic relevance to the query embedding. */
+  searchByEmbedding(conversationId: string, embedding: number[], limit: number): Promise<MessageRecord[]>;
 }

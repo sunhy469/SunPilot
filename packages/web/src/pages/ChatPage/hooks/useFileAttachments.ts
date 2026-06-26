@@ -135,6 +135,9 @@ export function useFileAttachments() {
                       ...f,
                       status: "done",
                       url: url || undefined,
+                      // Prefer the OSS URL for the thumbnail so it survives
+                      // page reload; keep the local blob URL as fallback.
+                      thumbUrl: url || f.thumbUrl,
                       response: { key, dataUrl },
                     }
                   : f,
@@ -155,6 +158,9 @@ export function useFileAttachments() {
                       ...f,
                       status: dataUrl ? "done" : "error",
                       url: undefined,
+                      // Use the dataUrl as thumbUrl so the image still shows
+                      // in the thumbnail strip even when OSS is unavailable.
+                      thumbUrl: dataUrl || f.thumbUrl,
                       response: dataUrl ? { dataUrl } : undefined,
                     }
                   : f,
@@ -190,11 +196,24 @@ export function useFileAttachments() {
   // ── Remove / clear ───────────────────────────────────────────────
 
   const removeFile = useCallback((uid: string) => {
-    setFiles((prev) => prev.filter((f) => f.uid !== uid));
+    setFiles((prev) => {
+      const file = prev.find((f) => f.uid === uid);
+      if (file?.thumbUrl?.startsWith("blob:")) {
+        URL.revokeObjectURL(file.thumbUrl);
+      }
+      return prev.filter((f) => f.uid !== uid);
+    });
   }, []);
 
   const clearFiles = useCallback(() => {
-    setFiles([]);
+    setFiles((prev) => {
+      for (const f of prev) {
+        if (f.thumbUrl?.startsWith("blob:")) {
+          URL.revokeObjectURL(f.thumbUrl);
+        }
+      }
+      return [];
+    });
   }, []);
 
   // ── Convert for sending ──────────────────────────────────────────

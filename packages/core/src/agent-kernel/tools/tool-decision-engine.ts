@@ -27,7 +27,36 @@ import type { ModelRouter } from "../model-router.js";
 import { checkAnyOfUnsatisfied } from "./tool-schema-utils.js";
 import { RichCardBuilder } from "./rich-card-builder.js";
 import { MARKDOWN_RESPONSE_POLICY } from "./markdown-response-policy.js";
-import { MAX_TOOL_ITERATIONS } from "../agent-loop-engine.js";
+import {
+  buildStreamingToolDefinitions,
+} from "./tool-decision-engine/tool-definition-builder.js";
+import {
+  buildToolArgumentsHeuristic,
+  canonicalizeArgs,
+} from "./tool-decision-engine/tool-argument-normalizer.js";
+import {
+  injectStreamingToolResults,
+  projectToolResultForModel,
+} from "./tool-decision-engine/tool-result-projector.js";
+import {
+  attachTrace,
+  capabilityNameFromToolId,
+  clampConfidence,
+  computeMaxIterations,
+  deriveRecentHistory,
+  maxRisk,
+  scoreSkills,
+  stableStringifyArgs,
+  summarizeForPreview,
+} from "./tool-decision-engine/selection-utils.js";
+import { parseTextualFunctionCalls } from "./tool-decision-engine/textual-function-call-parser.js";
+import type {
+  DecisionMetadata,
+  LlmToolDecision,
+  ScoredSkill,
+  ToolCallAccumulator,
+  ToolLoopStopReason,
+} from "./tool-decision-engine/types.js";
 
 import type {
   ChatMessage,
@@ -35,63 +64,12 @@ import type {
   ToolDefinition,
 } from "../../llm/llm.types.js";
 
-// ── Tool loop stop reason (§5.6 of duplicate-streaming bugfix) ──────────
-
-export type ToolLoopStopReason =
-  | "missing_required_arguments"
-  | "schema_validation_failed"
-  | "permission_denied"
-  | "all_tools_failed"
-  | "duplicate_tool_call_blocked"
-  | "max_iterations";
-
-// ── Decision metadata (§P1-4) ─────────────────────────────────────────────
-
-/** Audit metadata recorded on each PlannedToolCall for debugging tool selection. */
-export interface DecisionMetadata {
-  /** Which layer made the final selection. */
-  decisionPath:
-    | "plan"
-    | "intent_match"
-    | "priority"
-    | "deterministic_scorer"
-    | "llm_semantic"
-    | "scorer_fallback"
-    | "intent_skill_map"
-    | "no_tool";
-  /** Whether an LLM call was involved in the selection. */
-  llmSelectionUsed: boolean;
-  /** Top-K candidates from ToolRetriever with scores and reasons. */
-  retrievalMetadata?: {
-    query: string;
-    topK: number;
-    candidates: Array<{
-      skillId: string;
-      score: number;
-      matchReasons: string[];
-    }>;
-    fallbackUsed: boolean;
-  };
-  /** Reason for asking clarification instead of selecting. */
-  clarificationReason?: string;
-}
-
-/**
- * Structured output from the LLM tool reranker (§P1).
- * Replaces the simple string-based "tool ID or none" with a
- * three-way decision that enables proper no-tool rejection.
- */
-export interface LlmToolDecision {
-  decision: "select" | "none" | "clarify";
-  /** Tool ID (only for "select"). */
-  skillId?: string;
-  /** Confidence score 0.0–1.0. */
-  confidence: number;
-  /** Human-readable explanation for audit/debug. */
-  reason: string;
-  /** Clarification question (only for "clarify"). */
-  missingInfo?: string;
-}
+export type {
+  DecisionMetadata,
+  LlmToolDecision,
+  ToolLoopStopReason,
+} from "./tool-decision-engine/types.js";
+export { projectToolResultForModel } from "./tool-decision-engine/tool-result-projector.js";
 
 export interface ToolDecisionEngineDeps {
   /** List all available skills with their summaries. */
@@ -1044,7 +1022,7 @@ IMPORTANT: return ONLY the JSON object. No markdown code fences, no surrounding 
         input.permissionMode,
       );
       const toolRetrievalMs = Date.now() - retrievalStart;
-      const { tools, nameMap } = this.buildStreamingToolDefinitions(retrieval, intent);
+      const { tools, nameMap } = buildStreamingToolDefinitions(retrieval, intent);
 
       // 4. Streaming loop: interleave text + tool calls
       let iteration = 0;
@@ -1234,7 +1212,7 @@ IMPORTANT: return ONLY the JSON object. No markdown code fences, no surrounding 
         }
 
         // Inject tool results into messages for next iteration
-        currentMessages = this.injectStreamingToolResults(
+        currentMessages = injectStreamingToolResults(
           currentMessages,
           result.toolCalls,
           toolResults,
@@ -1602,76 +1580,6 @@ Use the same language as the user.`,
   }
 
   /**
-   * Convert scored tools into LLM ToolDefinitions.
-   * Uses inputSchema from SkillSummary for the function parameters.
-   *
-   * §4.2: Intent-based tool count limiting — casual_chat/question_answering
-   *        get 0 tools, specific intents get fewer, default gets 15.
-   * §4.3: Candidate skills are sorted to the front so the LLM sees the
-   *        most relevant tools first.
-   */
-  private buildStreamingToolDefinitions(
-    retrieval: ToolRetrievalResult,
-    intent?: { type: string; candidateSkills?: string[] },
-  ): {
-    tools: ToolDefinition[];
-    nameMap: Map<string, string>;
-  } {
-    // §4.2: Intent-based tool count limit (was hardcoded 20)
-    const TOPK_BY_INTENT: Partial<Record<string, number>> = {
-      casual_chat: 0,
-      question_answering: 0,
-      memory_update: 0,
-      image_analysis: 5,
-      product_search: 5,
-      use_skill: 5,
-      file_operation: 3,
-      shell_operation: 3,
-      default: 15,
-    };
-    const limit = intent
-      ? (TOPK_BY_INTENT[intent.type] ?? TOPK_BY_INTENT.default!)
-      : TOPK_BY_INTENT.default!;
-
-    // §4.2: Sort candidate skills to the front, then by score
-    const candidates = new Set(intent?.candidateSkills ?? []);
-    const sorted = [...retrieval.tools].sort((a, b) => {
-      const aIsCandidate = candidates.has(a.skill.id) ? 0 : 1;
-      const bIsCandidate = candidates.has(b.skill.id) ? 0 : 1;
-      return aIsCandidate - bIsCandidate || b.score - a.score;
-    });
-
-    const topTools = sorted.slice(0, limit);
-    const usedNames = new Set<string>();
-    const nameMap = new Map<string, string>();
-
-    const tools = topTools.map((scored) => {
-      const skill = scored.skill;
-      const functionName = toProviderToolName(skill.id, usedNames);
-      nameMap.set(functionName, skill.id);
-      // §Schema fix: Normalize anyOf/oneOf → top-level required for LLM compat.
-      // OpenAI function calling ignores anyOf/oneOf — the LLM needs a flat
-      // required[] to know which params are mandatory.
-      const parameters = normalizeSchemaForLLM(skill.inputSchema);
-
-      return {
-        type: "function" as const,
-        function: {
-          name: functionName,
-          description: `${skill.name}: ${skill.description}${
-            scored.matchReasons && scored.matchReasons.length > 0
-              ? ` (matched: ${scored.matchReasons.join(", ")})`
-              : ""
-          }\nSunPilot skill id: ${skill.id}`,
-          parameters,
-        },
-      };
-    });
-
-    return { tools, nameMap };
-  }
-
-  /**
    * One turn of LLM streaming. Returns accumulated text content and any
    * complete tool calls the LLM decided to make.
    */
@@ -1727,6 +1635,13 @@ Use the same language as the user.`,
       );
     }, 50);
 
+    // §P0: Buffer for suppressing <FunctionCallBegin> text from frontend.
+    // Doubao occasionally outputs tool calls as text tags instead of
+    // native tool_calls. We suppress these from the stream and parse
+    // them into tool calls after the turn completes.
+    let bufferingFunctionCall = false;
+    let functionCallBuffer = "";
+
     try {
       for await (const chunk of this.deps.modelRouter.streamChat(
         "response_composition",
@@ -1747,24 +1662,35 @@ Use the same language as the user.`,
             firstTokenMs = Date.now() - streamStartTime;
           }
 
-          // §Phase 2a: Lazy text part creation — only create when the
-          // model actually produces text, avoiding empty text parts.
-          // §P0-1: Pass textPartRole so frontend can classify stably.
-          if (stream && !lazyTextPartId) {
-            const textPart = stream.startTextPart(textPartRole);
-            lazyTextPartId = textPart.id;
+          // §P0: Detect and suppress textual function call blocks.
+          // When the model outputs <FunctionCallBegin>, buffer instead of
+          // streaming — so users never see the hallucinated text format.
+          if (chunk.delta.includes("<FunctionCallBegin>") || bufferingFunctionCall) {
+            bufferingFunctionCall = true;
+            functionCallBuffer += chunk.delta;
+            textContent += chunk.delta; // still capture for parsing
+            if (chunk.delta.includes("<FunctionCallEnd>")) {
+              bufferingFunctionCall = false;
+            }
+          } else {
+            // §Phase 2a: Lazy text part creation — only create when the
+            // model actually produces text, avoiding empty text parts.
+            // §P0-1: Pass textPartRole so frontend can classify stably.
+            if (stream && !lazyTextPartId) {
+              const textPart = stream.startTextPart(textPartRole);
+              lazyTextPartId = textPart.id;
+            }
+
+            textContent += chunk.delta;
+
+            // Route deltas through stream when available (§Phase 3)
+            if (stream && lazyTextPartId) {
+              stream.appendText(lazyTextPartId, chunk.delta);
+            }
+
+            // §6.5: Throttled event emission (see deltaThrottle above)
+            deltaThrottle.push(chunk.delta);
           }
-
-          textContent += chunk.delta;
-
-          // Route deltas through stream when available (§Phase 3)
-          // Legacy agent.response.delta removed — use agent.message.part.delta instead
-          if (stream && lazyTextPartId) {
-            stream.appendText(lazyTextPartId, chunk.delta);
-          }
-
-          // §6.5: Throttled event emission (see deltaThrottle above)
-          deltaThrottle.push(chunk.delta);
         }
 
         // Accumulate tool call deltas
@@ -1824,6 +1750,8 @@ Use the same language as the user.`,
       throw error;
     }
 
+    const textualToolCalls = parseTextualFunctionCalls(textContent, tools);
+
     // Convert accumulators to ToolCall array
     const toolCalls: ToolCall[] = [];
     for (const acc of toolCallAccumulator.values()) {
@@ -1839,7 +1767,11 @@ Use the same language as the user.`,
       }
     }
 
-    return { textContent, toolCalls, textPartId: lazyTextPartId, firstTokenMs };
+    // §P0: Fall back to textual tool calls when native tool_calls are empty
+    // but the model emitted a well-formed <FunctionCallBegin> block.
+    const effectiveToolCalls = toolCalls.length > 0 ? toolCalls : textualToolCalls;
+
+    return { textContent, toolCalls: effectiveToolCalls, textPartId: lazyTextPartId, firstTokenMs };
   }
 
   /**
@@ -2313,40 +2245,6 @@ Use the same language as the user.`,
   }
 
   /**
-   * Append tool call and tool result messages to the conversation.
-   * This allows the LLM to see tool results in the next iteration.
-   */
-  private injectStreamingToolResults(
-    messages: ChatMessage[],
-    toolCalls: ToolCall[],
-    results: { summaries: ToolCallSummary[]; artifacts: ArtifactRef[] },
-    maxContextTokens?: number,
-  ): ChatMessage[] {
-    const updated = [...messages];
-
-    // Add assistant message with tool_calls
-    updated.push({
-      role: "assistant",
-      content: "",
-      tool_calls: toolCalls,
-    });
-
-    // Add tool result messages
-    // §P0-2 + §P1-3: Use dedicated ToolResultProjection to build the richest
-    // available model observation from the full tool output.
-    for (const summary of results.summaries) {
-      const projection = projectToolResultForModel(summary, maxContextTokens);
-      updated.push({
-        role: "tool",
-        content: projection.modelObservation,
-        tool_call_id: summary.id,
-      } satisfies ChatMessage);
-    }
-
-    return updated;
-  }
-
-  /**
    * Build rich cards from artifacts for inline rendering in the chat UI.
    * Detects video/image artifacts and creates RichCardView-compatible data.
    */
@@ -2365,610 +2263,4 @@ Use the same language as the user.`,
     );
     return builder.build();
   }
-}
-
-/** Extract the capability name portion from a fully-qualified tool id. */
-function capabilityNameFromToolId(toolId: string): string | undefined {
-  const separator = toolId.indexOf(":");
-  return separator >= 0 ? toolId.slice(separator + 1) : undefined;
-}
-
-/**
- * §P1-3: ToolResultProjection — projects a ToolCallSummary into three facets:
- *  - displaySummary: what the user sees in the thinking section (terse)
- *  - modelObservation: what the next LLM round receives (full content)
- *  - isFinalAnswer: whether this result can serve as the final answer directly
- *
- * Priority for modelObservation:
- *  1. Explicit modelObservation (pre-computed by executor)
- *  2. Full content field (actual tool output text)
- *  3. Structured output fields (script, markdown, content, etc.)
- *  4. Summary as fallback
- */
-export function projectToolResultForModel(
-  summary: ToolCallSummary,
-  maxContextTokens?: number,
-): {
-  displaySummary: string;
-  modelObservation: string;
-  isFinalAnswer: boolean;
-} {
-  const statusPrefix =
-    summary.status === "completed" ? "" : `[${summary.status.toUpperCase()}] `;
-  const displaySummary = summary.summary;
-
-  // Check if this result can be the final answer
-  const hints = summary.metadata?.projectionHints as
-    | { outputIsFinal?: boolean }
-    | undefined;
-  const isFinalAnswer =
-    hints?.outputIsFinal === true && summary.status === "completed";
-
-  // Build the richest model observation available
-  let modelObservation: string;
-  if (summary.modelObservation) {
-    modelObservation = statusPrefix + summary.modelObservation;
-  } else if (summary.content) {
-    modelObservation = statusPrefix + summary.content;
-  } else if (summary.structured && Object.keys(summary.structured).length > 0) {
-    const outputFields = extractOutputFields(summary.structured);
-    modelObservation = statusPrefix + outputFields;
-  } else {
-    modelObservation = statusPrefix + summary.summary;
-  }
-
-  // Truncate very long observations to prevent context bloat
-  // §4.5: Dynamic threshold based on context window size
-  const MAX_OBSERVATION_CHARS = Math.min(8000, (maxContextTokens ?? 128_000) * 2);
-  if (modelObservation.length > MAX_OBSERVATION_CHARS) {
-    modelObservation =
-      modelObservation.slice(0, MAX_OBSERVATION_CHARS) +
-      `…[truncated ${modelObservation.length - MAX_OBSERVATION_CHARS} chars]`;
-  }
-
-  return { displaySummary, modelObservation, isFinalAnswer };
-}
-
-/**
- * §P0-2: Extract content-bearing fields from structured tool output
- * for use as model observation. Prevents the model from seeing only a
- * terse summary like "已完成生成短视频脚本" when the actual script is in
- * structured.script or structured.content.
- */
-function extractOutputFields(structured: Record<string, unknown>): string {
-  // Priority order for output content fields
-  const outputKeys = [
-    "script",
-    "markdown",
-    "content",
-    "finalText",
-    "text",
-    "body",
-    "html",
-    "message",
-    "output",
-    "result",
-    "response",
-  ];
-  const parts: string[] = [];
-
-  for (const key of outputKeys) {
-    const val = structured[key];
-    if (typeof val === "string" && val.length > 0) {
-      parts.push(`[${key}]\n${val}`);
-    }
-  }
-
-  // Also include candidates/results arrays as structured data
-  if (
-    Array.isArray(structured.candidates) &&
-    structured.candidates.length > 0
-  ) {
-    parts.push(`[candidates: ${structured.candidates.length} items]`);
-  }
-  if (Array.isArray(structured.results) && structured.results.length > 0) {
-    parts.push(`[results: ${structured.results.length} items]`);
-  }
-  if (typeof structured.totalResults === "number") {
-    parts.push(`[totalResults: ${structured.totalResults}]`);
-  }
-  if (typeof structured.summary === "string" && parts.length === 0) {
-    parts.push(structured.summary);
-  }
-
-  return parts.length > 0 ? parts.join("\n\n") : JSON.stringify(structured);
-}
-
-function toProviderToolName(skillId: string, usedNames: Set<string>): string {
-  const base = skillId.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 56);
-  const fallback = base.length > 0 ? base : "tool";
-  let candidate = fallback;
-  let suffix = 2;
-  while (usedNames.has(candidate)) {
-    candidate = `${fallback.slice(0, 52)}_${suffix}`;
-    suffix++;
-  }
-  usedNames.add(candidate);
-  return candidate;
-}
-
-function maxRisk(
-  left: "low" | "medium" | "high" | "critical",
-  right: "low" | "medium" | "high" | "critical",
-): "low" | "medium" | "high" | "critical" {
-  const order = {
-    low: 0,
-    medium: 1,
-    high: 2,
-    critical: 3,
-  };
-  return order[left] >= order[right] ? left : right;
-}
-
-function buildToolArgumentsHeuristic(
-  context: AgentContext,
-  skill?: SkillSummary,
-): Record<string, unknown> {
-  const message = context.currentMessage.content.trim();
-  const attachments = context.currentMessage.attachments ?? [];
-  const urls = extractUrls(message);
-
-  // Find best image attachment: prefer URL, then dataUrl
-  const imageAttachment =
-    attachments.find(
-      (attachment) =>
-        Boolean(attachment.url) &&
-        (attachment.type.startsWith("image/") ||
-          /\.(png|jpe?g|webp|gif|bmp|avif)(\?|#|$)/i.test(
-            attachment.url ?? "",
-          )),
-    ) ??
-    attachments.find(
-      (attachment) =>
-        Boolean(attachment.dataUrl) &&
-        (attachment.type.startsWith("image/") ||
-          /\.(png|jpe?g|webp|gif|bmp|avif)(\?|#|$)/i.test(
-            attachment.name ?? "",
-          )),
-    );
-
-  const imageUrl =
-    imageAttachment?.url ??
-    urls.find((url) => /\.(png|jpe?g|webp|gif|bmp|avif)(\?|#|$)/i.test(url)) ??
-    urls[0];
-
-  const isSearchLike =
-    skill &&
-    /search|source|lookup|find|1688|搜索|货源|同款/i.test(
-      `${skill.id} ${skill.name} ${skill.description}`,
-    );
-
-  const args: Record<string, unknown> = {};
-  if (isSearchLike && message.length > 0) {
-    args.query = message;
-  }
-  if (attachments.length > 0) {
-    args.attachments = attachments.map((attachment) => ({
-      id: attachment.id,
-      name: attachment.name,
-      type: attachment.type,
-      url: attachment.url,
-      dataUrl: attachment.dataUrl,
-      storageKey: attachment.storageKey,
-      provider: attachment.provider,
-    }));
-  }
-  if (imageAttachment) {
-    fillImageArguments(args, imageAttachment);
-  } else if (imageUrl) {
-    args.imageUrl = imageUrl;
-    args.image_url = imageUrl;
-  }
-  if (urls.length > 0) {
-    args.urls = urls;
-    args.url = urls[0];
-  }
-  // §Attachment fix: fall back to image attachment URL when no URL in message text
-  if (!args.url && imageUrl) {
-    args.url = imageUrl;
-  }
-
-  return args;
-}
-
-function extractUrls(text: string): string[] {
-  return Array.from(
-    text.matchAll(/https?:\/\/[^\s)）"'<>]+/gi),
-    (match) => match[0],
-  );
-}
-
-/**
- * Fill all image-related argument aliases from an AttachmentRef.
- *
- * Canonical fields: imageUrl (public URL), imageDataUrl (base64 fallback).
- * Compat aliases: image_url, image_data_url.
- *
- * Only overwrites undefined fields — model-provided values take precedence
- * when they are non-empty (the merge order { ...parsedArgs, ...builtArgs }
- * in executeToolCalls already ensures deterministic values win, but this
- * helper is also used in heuristic-only paths where no model args exist).
- */
-function fillImageArguments(
-  args: Record<string, unknown>,
-  image: { url?: string; dataUrl?: string },
-): void {
-  if (image.url) {
-    args.imageUrl = image.url;
-    args.image_url = image.url;
-    // Also set url as convenience alias when no explicit URL in args
-    if (!args.url) args.url = image.url;
-  }
-  if (image.dataUrl) {
-    args.imageDataUrl = image.dataUrl;
-    args.image_data_url = image.dataUrl;
-  }
-}
-
-/**
- * Canonicalize tool arguments — normalize alias fields to canonical names.
- *
- * LLMs may produce snake_case or camelCase variants. This normalizes known
- * aliases so downstream validation sees a consistent shape.
- */
-function canonicalizeArgs(
-  args: Record<string, unknown>,
-): Record<string, unknown> {
-  const normalized = { ...args };
-
-  // image_url → imageUrl (only if canonical field is absent)
-  if (normalized.image_url !== undefined && normalized.imageUrl === undefined) {
-    normalized.imageUrl = normalized.image_url;
-  }
-  if (
-    normalized.image_data_url !== undefined &&
-    normalized.imageDataUrl === undefined
-  ) {
-    normalized.imageDataUrl = normalized.image_data_url;
-  }
-  // Keep aliases too — schema validation may reference either
-
-  return normalized;
-}
-
-// ── use_skill scoring ──────────────────────────────────────────────────
-
-interface ScoredSkill {
-  skill: SkillSummary;
-  score: number;
-  /** Match reasons from ToolRetriever for audit trail (§2). */
-  matchReasons?: string[];
-}
-
-/**
- * Deterministic scorer for matching a user message against available skills.
- * Handles both English (substring/word-based) and Chinese (character bigram
- * overlap) matching so skills with Chinese names are correctly discovered.
- *
- * IMPORTANT: Semantic matching is now the PRIMARY layer (IntentRouter embedding
- * pipeline). This function serves as a DETERMINISTIC FALLBACK. Bigram scoring
- * is deliberately kept low-weight to avoid false positives (e.g. "商品" matching
- * "生成 Seedream 商品图" and shadowing "搜索 1688 货源").
- *
- * Scoring tiers (revised — bigrams demoted):
- *   - 1.0: skill id or capability name present verbatim (form-match)
- *   - 0.5: skill display name present verbatim (form-match, reduced from 0.8)
- *   - 0.15: strong Chinese bigram overlap (≥2 matches — tiebreaker only)
- *   - 0.10: single Chinese bigram overlap (weak hint)
- *   - 0.2: description keyword overlap ≥3 (moderate signal)
- *   - 0.1: description keyword overlap ≥1 (weak signal)
- *   - 0.4: category match
- *
- * Returns results sorted by score descending.
- */
-function scoreSkills(message: string, skills: SkillSummary[]): ScoredSkill[] {
-  const lower = message.toLowerCase();
-
-  const scored = skills.map((skill) => {
-    let score = 0;
-
-    // Exact id match (e.g. "product.source.search1688")
-    if (lower.includes(skill.id.toLowerCase())) {
-      score = Math.max(score, 1.0);
-    }
-
-    // Capability name match (the part after the last colon)
-    const capName = capabilityNameFromToolId(skill.id);
-    if (capName && lower.includes(capName.toLowerCase())) {
-      score = Math.max(score, 1.0);
-    }
-
-    // Skill display name match (verbatim) — reduced from 0.8 to 0.5.
-    // Verbatim name match is a form-match signal but NOT a semantic one —
-    // the embedding layer handles semantic matching.
-    if (lower.includes(skill.name.toLowerCase())) {
-      score = Math.max(score, 0.5);
-    }
-
-    // Chinese character bigram overlap — DEMOTED to tiebreaker weight.
-    // Bigrams are structurally brittle: "商品" appears in both "生成Seedream商品图"
-    // AND "搜索1688货源" (via user message), causing false positives.
-    // Now used only as a weak hint; embedding similarity is the primary signal.
-    const nameBigrams = extractBigrams(skill.name);
-    const nameOverlap = nameBigrams.filter((bg) => lower.includes(bg));
-    if (nameOverlap.length >= 2) {
-      score = Math.max(score, 0.15); // was 0.8 — now tiebreaker only
-    } else if (nameOverlap.length === 1) {
-      score = Math.max(score, 0.1); // was 0.6 — now weak hint
-    }
-
-    // Description keyword overlap (handles English words and Chinese bigrams)
-    const descWords = skill.description.toLowerCase().split(/\s+/);
-    const matchedWords = descWords.filter(
-      (w) => w.length > 1 && lower.includes(w),
-    );
-    const descBigrams = extractBigrams(skill.description);
-    const matchedBigrams = descBigrams.filter((bg) => lower.includes(bg));
-
-    const totalDescMatches = matchedWords.length + matchedBigrams.length;
-    if (totalDescMatches >= 3) {
-      // §4.7: Reduced from 0.2 → 0.1 — description keyword matching
-      // causes false positives in Chinese (bigram overlap is noisy).
-      // Let embedding (0.5) be the dominant semantic signal.
-      score = Math.max(score, 0.1);
-    } else if (totalDescMatches >= 1) {
-      // §4.7: Reduced from 0.1 → 0.05
-      score = Math.max(score, 0.05);
-    }
-
-    // Category match
-    if (lower.includes(skill.category.toLowerCase())) {
-      score = Math.max(score, 0.4);
-    }
-
-    return { skill, score };
-  });
-
-  // Sort by score descending
-  scored.sort((a, b) => b.score - a.score);
-  return scored;
-}
-
-/**
- * §Schema fix: Normalize JSON Schema for LLM function calling compatibility.
- *
- * OpenAI function calling ignores anyOf/oneOf — the LLM only respects
- * top-level `required`. This converts anyOf[{required:[...]}] into
- * a flat `required: [...]` by picking the first branch's required fields.
- *
- * Also adds `additionalProperties: false` when missing, so the LLM
- * doesn't hallucinate extra params.
- */
-function normalizeSchemaForLLM(
-  schema: Record<string, unknown> | undefined,
-): Record<string, unknown> {
-  if (!schema || typeof schema !== "object") {
-    return { type: "object", properties: {}, additionalProperties: true };
-  }
-
-  const normalized = { ...schema };
-  const anyOf = normalized.anyOf;
-  const oneOf = normalized.oneOf;
-  const hasDisjunction =
-    (Array.isArray(anyOf) && anyOf.length > 0) ||
-    (Array.isArray(oneOf) && oneOf.length > 0);
-
-  // Remove anyOf/oneOf/allOf — LLM APIs don't understand them
-  delete normalized.anyOf;
-  delete normalized.oneOf;
-  delete normalized.allOf;
-
-  // If no top-level required but anyOf/oneOf exists, make all fields
-  // optional to avoid biasing the LLM toward any single branch.
-  if (
-    hasDisjunction &&
-    (!Array.isArray(normalized.required) || normalized.required.length === 0)
-  ) {
-    // Explicitly empty required — LLM is free to provide any combination.
-    // The deterministic argument builder + checkAnyOfUnsatisfied handle
-    // validation at execution time.
-    normalized.required = [];
-
-    // Append a disjunction hint to the description so the LLM knows at
-    // least one of the disjunctive fields should be provided.
-    const branches = (Array.isArray(anyOf) ? anyOf : []) as Array<
-      Record<string, unknown>
-    >;
-    const altBranches = (Array.isArray(oneOf) ? oneOf : []) as Array<
-      Record<string, unknown>
-    >;
-    const allBranches = [...branches, ...altBranches];
-    const branchFields = allBranches
-      .map((b) => (Array.isArray(b.required) ? b.required.join(" + ") : ""))
-      .filter(Boolean);
-    if (branchFields.length > 0) {
-      const hint = ` [至少提供其一: ${branchFields.join(" 或 ")}]`;
-      normalized.description =
-        (typeof normalized.description === "string"
-          ? normalized.description
-          : "") + hint;
-    }
-  }
-
-  // Ensure additionalProperties is set
-  if (normalized.additionalProperties === undefined) {
-    normalized.additionalProperties = false;
-  }
-
-  return normalized;
-}
-
-/**
- * Extract meaningful bigrams from text.
- * Supports CJK characters (2-char bigrams), numbers/identifiers, and
- * whole English words. Skips single characters and whitespace.
- * e.g. "搜索1688货源" → ["搜索","1688","货源"]
- */
-function extractBigrams(text: string): string[] {
-  const result: string[] = [];
-  // Extract CJK 2-char sequences
-  const cjk = /[一-鿿㐀-䶿]{2,}/g;
-  let match: RegExpExecArray | null;
-  while ((match = cjk.exec(text)) !== null) {
-    const seg = match[0];
-    for (let i = 0; i < seg.length - 1; i++) {
-      result.push(seg.slice(i, i + 2));
-    }
-  }
-  // Extract numeric/identifier tokens (e.g. "1688", "search1688")
-  const tokens = /[a-z0-9]{2,}/gi;
-  while ((match = tokens.exec(text)) !== null) {
-    result.push(match[0].toLowerCase());
-  }
-  return result;
-}
-
-/**
- * Derive ToolCallHistoryEntry[] from context tool results.
- * Extracts skillId and status from tool result entries so the ToolRetriever
- * can apply success/failure weighting at runtime without depending on
- * pre-constructed history from the composition root.
- *
- * Entries without a resolvable skillId are filtered out — a UUID
- * toolCallId is not meaningful for skill-to-skill weighting.
- */
-function deriveRecentHistory(
-  toolResults: Array<{
-    toolCallId: string;
-    summary: string;
-    content?: string;
-    status: string;
-    name?: string;
-    skillId?: string;
-    structured?: Record<string, unknown>;
-  }>,
-): Array<{
-  skillId: string;
-  status: "completed" | "failed" | "timeout" | "rejected";
-  timestamp: string;
-}> {
-  return toolResults
-    .filter((tr) => tr.status !== "pending" && tr.status !== "running")
-    .map((tr) => {
-      // Resolve skillId: prefer explicit field, then structured metadata.
-      // Skip entries that fall back to a UUID toolCallId — that isn't
-      // useful for the retriever's skill-level weighting.
-      const resolvedSkillId =
-        tr.skillId ??
-        (tr.name?.includes(":")
-          ? tr.name.slice(0, tr.name.lastIndexOf(":"))
-          : undefined) ??
-        ((tr.structured as Record<string, unknown> | undefined)?.skillId as
-          | string
-          | undefined);
-      if (!resolvedSkillId) return null;
-
-      // Map tool status to history status. Unknown statuses default to
-      // "failed" — it's safer to de-prioritize than to assume success.
-      const historyStatus =
-        tr.status === "completed"
-          ? ("completed" as const)
-          : tr.status === "failed" || tr.status === "timeout"
-            ? (tr.status as "failed" | "timeout")
-            : tr.status === "cancelled"
-              ? ("rejected" as const)
-              : ("failed" as const);
-
-      return {
-        skillId: resolvedSkillId,
-        status: historyStatus,
-        timestamp: new Date().toISOString(),
-      };
-    })
-    .filter((entry): entry is NonNullable<typeof entry> => entry !== null);
-}
-
-/** Clamp a value to [0, 1] with a default for NaN/undefined. */
-function clampConfidence(value: unknown): number {
-  const n = Number(value);
-  if (!Number.isFinite(n)) return 0.5;
-  return Math.max(0, Math.min(1, n));
-}
-
-/** Summarize tool arguments for inline preview display (truncates long values). */
-function summarizeForPreview(
-  args: Record<string, unknown>,
-): Record<string, unknown> {
-  const preview: Record<string, unknown> = {};
-  for (const [key, value] of Object.entries(args)) {
-    if (typeof value === "string" && value.length > 80) {
-      preview[key] = value.slice(0, 80) + "...";
-    } else if (Array.isArray(value) && value.length > 3) {
-      preview[key] = `[${value.length} items]`;
-    } else {
-      preview[key] = value;
-    }
-  }
-  return preview;
-}
-
-/** Attach trace metadata to a ToolDecision from DecisionMetadata (§P2). */
-function attachTrace(
-  decision: ToolDecision,
-  meta?: DecisionMetadata,
-): ToolDecision {
-  if (meta) {
-    decision.decisionPath = meta.decisionPath;
-    if (meta.retrievalMetadata) {
-      decision.retrievalTopK = meta.retrievalMetadata.topK;
-      decision.retrievalCandidateCount =
-        meta.retrievalMetadata.candidates?.length;
-      decision.retrievalFallback = meta.retrievalMetadata.fallbackUsed;
-    }
-  }
-  return decision;
-}
-
-/**
- * §4.6: Stable serialization of tool call arguments.
- * Parses the JSON arguments string and re-stringifies with sorted keys
- * so that {"a":1,"b":2} and {"b":2,"a":1} produce the same signature.
- * Falls back to the raw string if parsing fails.
- */
-function stableStringifyArgs(args: string): string {
-  try {
-    const parsed = JSON.parse(args);
-    return JSON.stringify(parsed, Object.keys(parsed).sort());
-  } catch {
-    return args;
-  }
-}
-
-// ── Internal Types ─────────────────────────────────────────────────────
-
-interface ToolCallAccumulator {
-  index: number;
-  id: string;
-  type: "function";
-  functionName: string;
-  functionArguments: string;
-}
-
-/**
- * §6.2: Compute dynamic max tool iterations based on intent and plan.
- * - Plan with steps: plan steps + 2 buffer (min 5)
- * - Heavy intents (project_analysis, automation_execution): higher cap
- * - Default: MAX_TOOL_ITERATIONS (5)
- */
-function computeMaxIterations(
-  intent: RoutedIntent,
-  plan?: AgentPlan,
-): number {
-  if (plan && plan.steps.length > 0) {
-    return Math.max(MAX_TOOL_ITERATIONS, plan.steps.length + 2);
-  }
-  if (intent.type === "project_analysis") return 8;
-  if (intent.type === "automation_execution") return 10;
-  if (intent.type === "artifact_generation") return 8;
-  return MAX_TOOL_ITERATIONS;
 }

@@ -17,12 +17,15 @@ export function MessageList({
   sendState,
   toolName,
   onCardAction,
+  loadingMessages,
 }: {
   messages: ChatMessage[];
   status: ChatViewState;
   sendState?: LocalSendState;
   toolName?: string | null;
   onCardAction?: (messageId: string, action: RichCardAction) => void;
+  /** True while messages are being fetched for the current conversation. */
+  loadingMessages?: boolean;
 }) {
   const isStreaming = status === "streaming";
 
@@ -58,8 +61,22 @@ export function MessageList({
     return -1;
   })();
 
-  if (messages.length === 0) {
+  // Show a loading spinner while messages are being fetched for a new
+  // conversation. We still render the .message-list container (flex: 1)
+  // so the composer stays pinned to the bottom of the page.
+  if (messages.length === 0 && !loadingMessages) {
     return null;
+  }
+
+  if (messages.length === 0 && loadingMessages) {
+    return (
+      <div className="message-list">
+        <Flex align="center" justify="center" className="message-list__loading">
+          <Spin size="default" />
+          <Typography.Text type="secondary" style={{ marginLeft: 10 }}>加载对话中...</Typography.Text>
+        </Flex>
+      </div>
+    );
   }
 
   return (
