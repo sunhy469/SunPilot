@@ -22,6 +22,7 @@ import type {
 } from "./tool-retriever.js";
 import type { EmbeddingService } from "../context/embedding-service.js";
 import type { AgentEventBus } from "../agent-event-bus.js";
+import { DeltaThrottle } from "../agent-event-bus.js";
 import type { ModelRouter } from "../model-router.js";
 import { checkAnyOfUnsatisfied } from "./tool-schema-utils.js";
 import { RichCardBuilder } from "./rich-card-builder.js";
@@ -1043,7 +1044,7 @@ IMPORTANT: return ONLY the JSON object. No markdown code fences, no surrounding 
         input.permissionMode,
       );
       const toolRetrievalMs = Date.now() - retrievalStart;
-      const { tools, nameMap } = this.buildStreamingToolDefinitions(retrieval);
+      const { tools, nameMap } = this.buildStreamingToolDefinitions(retrieval, intent);
 
       // 4. Streaming loop: interleave text + tool calls
       let iteration = 0;
@@ -1053,8 +1054,12 @@ IMPORTANT: return ONLY the JSON object. No markdown code fences, no surrounding 
       let totalToolExecutionMs = 0;
       let firstRoundFirstTokenMs = 0;
       let finalRoundFirstTokenMs = 0;
+      // §6.2: Dynamic iteration cap based on intent + plan complexity.
+      // Simple tasks get the default 5; complex/long-running intents and
+      // multi-step plans get more headroom so they don't get truncated.
+      const maxIterations = computeMaxIterations(intent, plan);
 
-      while (iteration < MAX_TOOL_ITERATIONS) {
+      while (iteration < maxIterations) {
         if (signal.aborted) break;
         iteration++;
 
@@ -1133,10 +1138,11 @@ IMPORTANT: return ONLY the JSON object. No markdown code fences, no surrounding 
         }
 
         // §5.9: Tool call signature dedup — prevent identical calls in same run
+        // §4.6: Use stable serialization so key order doesn't cause missed dups
         let duplicateBlocked = false;
         for (const tc of result.toolCalls) {
           const skillId = nameMap.get(tc.function.name) ?? tc.function.name;
-          const signature = `${skillId}:${tc.function.arguments}`;
+          const signature = `${skillId}:${stableStringifyArgs(tc.function.arguments)}`;
           if (seenToolCallSignatures.has(signature)) {
             if (stream) {
               stream.addError({
@@ -1208,7 +1214,7 @@ IMPORTANT: return ONLY the JSON object. No markdown code fences, no surrounding 
           (s) => s.status === "completed",
         );
         const finalProjections = completedTools
-          .map((s) => projectToolResultForModel(s))
+          .map((s) => projectToolResultForModel(s, context.limits.maxTokens))
           .filter((p) => p.isFinalAnswer);
 
         if (finalProjections.length > 0 && stream) {
@@ -1232,7 +1238,36 @@ IMPORTANT: return ONLY the JSON object. No markdown code fences, no surrounding 
           currentMessages,
           result.toolCalls,
           toolResults,
+          context.limits.maxTokens,
         );
+
+        // §6.3: Plan-driven iteration validation — when a plan exists,
+        // check if all tool-type steps have been satisfied by executed
+        // tool calls. If so, inject a hint guiding the LLM to summarize
+        // and stop calling more tools. This prevents the LLM from
+        // continuing to call tools after the plan is complete.
+        if (plan && plan.steps.some((s) => s.type === "tool" && s.skillId)) {
+          const executedSkillIds = new Set(
+            allToolCallSummaries.map((s) => s.skillId),
+          );
+          const planToolSteps = plan.steps.filter(
+            (s) => s.type === "tool" && s.skillId,
+          );
+          const allPlanToolsExecuted = planToolSteps.every((step) =>
+            executedSkillIds.has(step.skillId!),
+          );
+          if (allPlanToolsExecuted) {
+            // Inject a system hint telling the LLM the plan is complete
+            currentMessages = [
+              ...currentMessages,
+              {
+                role: "system" as const,
+                content:
+                  "All planned tool steps have been executed. Summarize the results for the user and do not call additional tools unless absolutely necessary.",
+              },
+            ];
+          }
+        }
 
         // ── Post-tool status: let user know we're summarizing results ──
         if (stream) {
@@ -1426,7 +1461,9 @@ Use the same language as the user.`,
       // it verbatim. You may add a brief introduction or formatting but MUST
       // NOT rewrite, rephrase, or regenerate the tool's output content.
       "CRITICAL: When a tool result contains final generated content (scripts, documents, search results, etc.), keep the content exactly as provided by the tool. You may add a short introduction, but do NOT rewrite, rephrase, or replace the tool's output with your own version.",
-      MARKDOWN_RESPONSE_POLICY,
+      // §4.3: MARKDOWN_RESPONSE_POLICY only in non-slim (final answer) mode.
+      // First tool round doesn't need formatting instructions.
+      ...(slim ? [] : [MARKDOWN_RESPONSE_POLICY]),
     ];
 
     if (context.system.rules.length > 0) {
@@ -1567,13 +1604,44 @@ Use the same language as the user.`,
   /**
    * Convert scored tools into LLM ToolDefinitions.
    * Uses inputSchema from SkillSummary for the function parameters.
+   *
+   * §4.2: Intent-based tool count limiting — casual_chat/question_answering
+   *        get 0 tools, specific intents get fewer, default gets 15.
+   * §4.3: Candidate skills are sorted to the front so the LLM sees the
+   *        most relevant tools first.
    */
-  private buildStreamingToolDefinitions(retrieval: ToolRetrievalResult): {
+  private buildStreamingToolDefinitions(
+    retrieval: ToolRetrievalResult,
+    intent?: { type: string; candidateSkills?: string[] },
+  ): {
     tools: ToolDefinition[];
     nameMap: Map<string, string>;
   } {
-    // Limit to top 20 tools to avoid overwhelming the LLM
-    const topTools = retrieval.tools.slice(0, 20);
+    // §4.2: Intent-based tool count limit (was hardcoded 20)
+    const TOPK_BY_INTENT: Partial<Record<string, number>> = {
+      casual_chat: 0,
+      question_answering: 0,
+      memory_update: 0,
+      image_analysis: 5,
+      product_search: 5,
+      use_skill: 5,
+      file_operation: 3,
+      shell_operation: 3,
+      default: 15,
+    };
+    const limit = intent
+      ? (TOPK_BY_INTENT[intent.type] ?? TOPK_BY_INTENT.default!)
+      : TOPK_BY_INTENT.default!;
+
+    // §4.2: Sort candidate skills to the front, then by score
+    const candidates = new Set(intent?.candidateSkills ?? []);
+    const sorted = [...retrieval.tools].sort((a, b) => {
+      const aIsCandidate = candidates.has(a.skill.id) ? 0 : 1;
+      const bIsCandidate = candidates.has(b.skill.id) ? 0 : 1;
+      return aIsCandidate - bIsCandidate || b.score - a.score;
+    });
+
+    const topTools = sorted.slice(0, limit);
     const usedNames = new Set<string>();
     const nameMap = new Map<string, string>();
 
@@ -1650,6 +1718,15 @@ Use the same language as the user.`,
       { runId, conversationId },
     );
 
+    // §6.5: Throttle agent.model.delta events to reduce WebSocket load.
+    const deltaThrottle = new DeltaThrottle((delta) => {
+      this.deps.eventBus.emit(
+        "agent.model.delta",
+        { runId, modelCallId, delta },
+        { runId, conversationId },
+      );
+    }, 50);
+
     try {
       for await (const chunk of this.deps.modelRouter.streamChat(
         "response_composition",
@@ -1686,11 +1763,8 @@ Use the same language as the user.`,
             stream.appendText(lazyTextPartId, chunk.delta);
           }
 
-          this.deps.eventBus.emit(
-            "agent.model.delta",
-            { runId, modelCallId, delta: chunk.delta },
-            { runId, conversationId },
-          );
+          // §6.5: Throttled event emission (see deltaThrottle above)
+          deltaThrottle.push(chunk.delta);
         }
 
         // Accumulate tool call deltas
@@ -1724,12 +1798,17 @@ Use the same language as the user.`,
         }
       }
 
+      // §6.5: Flush any remaining buffered delta before emitting model.completed
+      deltaThrottle.flush();
+
       this.deps.eventBus.emit(
         "agent.model.completed",
         { runId, modelCallId, outputTokens: textContent.length },
         { runId, conversationId },
       );
     } catch (error) {
+      // §6.5: Flush buffered delta on error so partial text isn't lost
+      deltaThrottle.flush();
       this.deps.eventBus.emit(
         "agent.model.failed",
         {
@@ -1789,6 +1868,20 @@ Use the same language as the user.`,
   }> {
     const artifacts: ArtifactRef[] = [];
     const summaries: ToolCallSummary[] = [];
+
+    // §4.1: Multi-tool parallel execution.
+    // Phase 1 (sequential): parse args, find skill, validate, check permissions.
+    //   Permission/approval gates are safety-critical and stay serial.
+    // Phase 2 (parallel): execute all validated tools with Promise.allSettled.
+    // Phase 3 (sequential): process results, emit events in original order.
+    interface ExecutionTask {
+      tc: ToolCall;
+      skill: SkillSummary;
+      plannedCall: PlannedToolCall;
+      statusPartId?: string;
+      onProgress?: (progress: { phase: string; message: string; percent?: number }) => void;
+    }
+    const executionTasks: ExecutionTask[] = [];
 
     for (const tc of toolCalls) {
       // Parse arguments
@@ -1877,11 +1970,6 @@ Use the same language as the user.`,
       }
 
       // ── Argument validation gate (§5.4) ──────────────────────────
-      // 1. canonicalize model args (normalize aliases)
-      // 2. merge deterministic args from context/attachments
-      // 3. validate against schema
-      // 4. repair once if possible
-      // 5. if still invalid: emit error part, skip execution
       let finalArgs = canonicalizeArgs(parsedArgs);
       let argumentSources: PlannedToolCall["argumentSources"] = [];
       if (this.deps.argumentBuilder && skill.inputSchema) {
@@ -1895,15 +1983,9 @@ Use the same language as the user.`,
             },
             signal,
           );
-          // Merge: deterministic args from context override model args
           finalArgs = { ...finalArgs, ...built.arguments };
           argumentSources = built.sources;
 
-          // §P0-fix: Check anyOf/oneOf disjunctions before missing-required check.
-          // The argument builder may report `missing: []` when a disjunction
-          // (e.g. imageUrl OR imageDataUrl) has no universally-required fields
-          // but ALL branches are unsatisfied. In that case, the tool must NOT
-          // be called — emit an error part instead.
           const anyOfUnsatisfied = checkAnyOfUnsatisfied(
             finalArgs,
             skill.inputSchema,
@@ -1928,7 +2010,6 @@ Use the same language as the user.`,
               );
               finalArgs = { ...finalArgs, ...repaired.arguments };
 
-              // Re-check after repair
               const postRepairCheck = await this.deps.argumentBuilder.build(
                 { context, intent, skill, schema: skill.inputSchema },
                 signal,
@@ -1938,7 +2019,6 @@ Use the same language as the user.`,
                 skill.inputSchema,
               );
               if (postRepairCheck.missing.length > 0 || postAnyOfUnsatisfied) {
-                // Still missing required args after repair — do not execute
                 const missingFields = postRepairCheck.missing.join(", ");
                 const failSummary: ToolCallSummary = {
                   id: tc.id,
@@ -1962,9 +2042,6 @@ Use the same language as the user.`,
                     recoverable: true,
                   });
                 }
-                // §5.6: Stop the tool loop immediately on missing required args.
-                // These are deterministic errors — retrying with the same context
-                // will always produce the same result.
                 return {
                   artifacts,
                   summaries,
@@ -2029,10 +2106,8 @@ Use the same language as the user.`,
               status: "failed",
               label: `失败: ${skill.name} (权限不足)`,
             });
-            // §P1-3: Update tool_use part status on permission denial
             stream.updateToolUse(tc.id, { status: "failed" });
           }
-          // §5.6: Stop the tool loop on permission denial — retrying won't help
           return {
             artifacts,
             summaries,
@@ -2057,11 +2132,8 @@ Use the same language as the user.`,
               status: "failed",
               label: `需要审批: ${skill.name}`,
             });
-            // §P1-3: Update tool_use part status on approval required
             stream.updateToolUse(tc.id, { status: "failed" });
           }
-          // Approval-required tools should not be auto-executed —
-          // they need to go through the approval path. Stop here.
           return {
             artifacts,
             summaries,
@@ -2073,148 +2145,166 @@ Use the same language as the user.`,
         }
       }
 
-      // Execute via ExecutionOrchestrator
+      // Emit tool.started and collect for parallel execution (§4.1)
       this.deps.eventBus.emit(
         "agent.tool.started",
         { runId, toolCallId: tc.id, skillId: skill.id, name: skill.name },
         { runId, conversationId },
       );
 
-      try {
-        // §P1-4: Bridge tool progress to stream status part metadata
-        const onProgress =
-          stream && statusPartId
-            ? (progress: {
-                phase: string;
-                message: string;
-                percent?: number;
-              }) => {
-                stream!.updateStatus(statusPartId!, {
-                  label: progress.message,
-                  metadata: {
-                    skillId: skill.id,
-                    phase: progress.phase as
-                      | "queued"
-                      | "running"
-                      | "polling"
-                      | "completed",
-                    progress: progress.percent,
-                  },
-                });
-              }
-            : undefined;
+      // §P1-4: Bridge tool progress to stream status part metadata
+      const onProgress =
+        stream && statusPartId
+          ? (progress: {
+              phase: string;
+              message: string;
+              percent?: number;
+            }) => {
+              stream!.updateStatus(statusPartId!, {
+                label: progress.message,
+                metadata: {
+                  skillId: skill.id,
+                  phase: progress.phase as
+                    | "queued"
+                    | "running"
+                    | "polling"
+                    | "completed",
+                  progress: progress.percent,
+                },
+              });
+            }
+          : undefined;
 
-        const observation = await this.deps.executionOrchestrator.execute(
-          {
-            runId,
-            context,
-            intent: {
-              type: "use_skill",
-              confidence: 1,
-              requiresPlanning: false,
-              requiresTool: true,
-              requiresApproval: false,
-              riskLevel: "medium",
-              candidateSkills: [skill.id],
-              reason: "LLM function calling",
-            },
-            decision: {
-              type: "use_tool",
-              reason: `LLM called ${skill.name}`,
-              toolCalls: [plannedCall],
-            },
-            onProgress: onProgress as
-              | ((p: import("../loop-types.js").ToolExecutionProgress) => void)
-              | undefined,
-          },
-          signal,
-        );
+      executionTasks.push({ tc, skill, plannedCall, statusPartId, onProgress });
+    }
 
-        for (const summary of observation.toolCalls) {
-          summaries.push(summary);
-          this.deps.eventBus.emit(
-            summary.status === "completed"
-              ? "agent.tool.completed"
-              : "agent.tool.failed",
+    // §4.1 Phase 2: Execute all prepared tools in parallel.
+    // Multi-tool latency goes from sum(latencies) → max(latencies).
+    // Each tool's abort signal is respected — if signal aborts, pending
+    // executions are rejected by Promise.allSettled.
+    if (executionTasks.length > 0) {
+      const execResults = await Promise.allSettled(
+        executionTasks.map((task) =>
+          this.deps.executionOrchestrator.execute(
             {
               runId,
-              toolCallId: summary.id,
-              skillId: summary.skillId,
-              summary: summary.summary,
-              artifacts: observation.artifacts.map((a) => a.id),
+              context,
+              intent: {
+                type: "use_skill",
+                confidence: 1,
+                requiresPlanning: false,
+                requiresTool: true,
+                requiresApproval: false,
+                riskLevel: "medium",
+                candidateSkills: [task.skill.id],
+                reason: "LLM function calling",
+              },
+              decision: {
+                type: "use_tool",
+                reason: `LLM called ${task.skill.name}`,
+                toolCalls: [task.plannedCall],
+              },
+              onProgress: task.onProgress as
+                | ((p: import("../loop-types.js").ToolExecutionProgress) => void)
+                | undefined,
             },
-            { runId, conversationId },
-          );
+            signal,
+          ),
+        ),
+      );
 
-          // Update status part and add tool result via stream (§Phase 3)
-          if (stream && statusPartId) {
-            const ok = summary.status === "completed";
-            stream.updateStatus(statusPartId, {
-              status: ok ? "completed" : "failed",
-              label: ok ? `完成: ${skill.name}` : `失败: ${skill.name}`,
+      // §4.1 Phase 3: Process results sequentially in original order
+      for (let i = 0; i < executionTasks.length; i++) {
+        const task = executionTasks[i]!;
+        const result = execResults[i]!;
+
+        if (result.status === "fulfilled") {
+          const observation = result.value;
+          for (const summary of observation.toolCalls) {
+            summaries.push(summary);
+            this.deps.eventBus.emit(
+              summary.status === "completed"
+                ? "agent.tool.completed"
+                : "agent.tool.failed",
+              {
+                runId,
+                toolCallId: summary.id,
+                skillId: summary.skillId,
+                summary: summary.summary,
+                artifacts: observation.artifacts.map((a) => a.id),
+              },
+              { runId, conversationId },
+            );
+
+            if (stream && task.statusPartId) {
+              const ok = summary.status === "completed";
+              stream.updateStatus(task.statusPartId, {
+                status: ok ? "completed" : "failed",
+                label: ok ? `完成: ${task.skill.name}` : `失败: ${task.skill.name}`,
+              });
+              stream.updateToolUse(summary.id, {
+                status: ok ? "completed" : "failed",
+              });
+              stream.addToolResult({
+                toolCallId: summary.id,
+                skillId: summary.skillId,
+                summary: summary.summary,
+                artifactIds: observation.artifacts.map((a) => a.id),
+                trust: summary.status === "completed" ? "trusted" : "untrusted",
+              });
+            }
+          }
+
+          artifacts.push(...observation.artifacts);
+
+          for (const artifact of observation.artifacts) {
+            this.deps.eventBus.emit(
+              "agent.artifact.created",
+              {
+                runId,
+                artifactId: artifact.id,
+                name: artifact.name,
+                type: artifact.type,
+                version: artifact.version,
+              },
+              { runId, conversationId },
+            );
+          }
+        } else {
+          const errMsg =
+            result.reason instanceof Error
+              ? result.reason.message
+              : String(result.reason);
+          const failSummary: ToolCallSummary = {
+            id: task.tc.id,
+            skillId: task.skill.id,
+            name: task.skill.name,
+            status: "failed",
+            summary: `Execution error: ${errMsg}`,
+          };
+          summaries.push(failSummary);
+          this.deps.eventBus.emit(
+            "agent.tool.failed",
+            {
+              runId,
+              toolCallId: task.tc.id,
+              skillId: task.skill.id,
+              error: { code: "AGENT_TOOL_EXECUTION_FAILED", message: errMsg },
+            },
+            { runId },
+          );
+          if (stream && task.statusPartId) {
+            stream.updateStatus(task.statusPartId, {
+              status: "failed",
+              label: `执行失败: ${task.skill.name}`,
             });
-            // §P1-3: Update tool_use part status
-            stream.updateToolUse(summary.id, {
-              status: ok ? "completed" : "failed",
-            });
-            stream.addToolResult({
-              toolCallId: summary.id,
-              skillId: summary.skillId,
-              summary: summary.summary,
-              artifactIds: observation.artifacts.map((a) => a.id),
-              trust: summary.status === "completed" ? "trusted" : "untrusted",
+            stream.updateToolUse(task.tc.id, { status: "failed" });
+            stream.addError({
+              message: errMsg,
+              code: "AGENT_TOOL_EXECUTION_FAILED",
+              recoverable: true,
             });
           }
-        }
-
-        artifacts.push(...observation.artifacts);
-
-        // Emit artifact.created for each artifact
-        for (const artifact of observation.artifacts) {
-          this.deps.eventBus.emit(
-            "agent.artifact.created",
-            {
-              runId,
-              artifactId: artifact.id,
-              name: artifact.name,
-              type: artifact.type,
-              version: artifact.version,
-            },
-            { runId, conversationId },
-          );
-        }
-      } catch (error) {
-        const errMsg = error instanceof Error ? error.message : String(error);
-        const failSummary: ToolCallSummary = {
-          id: tc.id,
-          skillId: skill.id,
-          name: skill.name,
-          status: "failed",
-          summary: `Execution error: ${errMsg}`,
-        };
-        summaries.push(failSummary);
-        this.deps.eventBus.emit(
-          "agent.tool.failed",
-          {
-            runId,
-            toolCallId: tc.id,
-            skillId: skill.id,
-            error: { code: "AGENT_TOOL_EXECUTION_FAILED", message: errMsg },
-          },
-          { runId },
-        );
-        if (stream && statusPartId) {
-          stream.updateStatus(statusPartId, {
-            status: "failed",
-            label: `执行失败: ${skill.name}`,
-          });
-          // §P1-3: Update tool_use part status on execution error
-          stream.updateToolUse(tc.id, { status: "failed" });
-          stream.addError({
-            message: errMsg,
-            code: "AGENT_TOOL_EXECUTION_FAILED",
-            recoverable: true,
-          });
         }
       }
     }
@@ -2230,6 +2320,7 @@ Use the same language as the user.`,
     messages: ChatMessage[],
     toolCalls: ToolCall[],
     results: { summaries: ToolCallSummary[]; artifacts: ArtifactRef[] },
+    maxContextTokens?: number,
   ): ChatMessage[] {
     const updated = [...messages];
 
@@ -2244,7 +2335,7 @@ Use the same language as the user.`,
     // §P0-2 + §P1-3: Use dedicated ToolResultProjection to build the richest
     // available model observation from the full tool output.
     for (const summary of results.summaries) {
-      const projection = projectToolResultForModel(summary);
+      const projection = projectToolResultForModel(summary, maxContextTokens);
       updated.push({
         role: "tool",
         content: projection.modelObservation,
@@ -2294,7 +2385,10 @@ function capabilityNameFromToolId(toolId: string): string | undefined {
  *  3. Structured output fields (script, markdown, content, etc.)
  *  4. Summary as fallback
  */
-export function projectToolResultForModel(summary: ToolCallSummary): {
+export function projectToolResultForModel(
+  summary: ToolCallSummary,
+  maxContextTokens?: number,
+): {
   displaySummary: string;
   modelObservation: string;
   isFinalAnswer: boolean;
@@ -2324,7 +2418,8 @@ export function projectToolResultForModel(summary: ToolCallSummary): {
   }
 
   // Truncate very long observations to prevent context bloat
-  const MAX_OBSERVATION_CHARS = 8000;
+  // §4.5: Dynamic threshold based on context window size
+  const MAX_OBSERVATION_CHARS = Math.min(8000, (maxContextTokens ?? 128_000) * 2);
   if (modelObservation.length > MAX_OBSERVATION_CHARS) {
     modelObservation =
       modelObservation.slice(0, MAX_OBSERVATION_CHARS) +
@@ -2617,9 +2712,13 @@ function scoreSkills(message: string, skills: SkillSummary[]): ScoredSkill[] {
 
     const totalDescMatches = matchedWords.length + matchedBigrams.length;
     if (totalDescMatches >= 3) {
-      score = Math.max(score, 0.2); // was 0.5 — reduced
+      // §4.7: Reduced from 0.2 → 0.1 — description keyword matching
+      // causes false positives in Chinese (bigram overlap is noisy).
+      // Let embedding (0.5) be the dominant semantic signal.
+      score = Math.max(score, 0.1);
     } else if (totalDescMatches >= 1) {
-      score = Math.max(score, 0.1); // was 0.3 — reduced
+      // §4.7: Reduced from 0.1 → 0.05
+      score = Math.max(score, 0.05);
     }
 
     // Category match
@@ -2830,6 +2929,21 @@ function attachTrace(
   return decision;
 }
 
+/**
+ * §4.6: Stable serialization of tool call arguments.
+ * Parses the JSON arguments string and re-stringifies with sorted keys
+ * so that {"a":1,"b":2} and {"b":2,"a":1} produce the same signature.
+ * Falls back to the raw string if parsing fails.
+ */
+function stableStringifyArgs(args: string): string {
+  try {
+    const parsed = JSON.parse(args);
+    return JSON.stringify(parsed, Object.keys(parsed).sort());
+  } catch {
+    return args;
+  }
+}
+
 // ── Internal Types ─────────────────────────────────────────────────────
 
 interface ToolCallAccumulator {
@@ -2838,4 +2952,23 @@ interface ToolCallAccumulator {
   type: "function";
   functionName: string;
   functionArguments: string;
+}
+
+/**
+ * §6.2: Compute dynamic max tool iterations based on intent and plan.
+ * - Plan with steps: plan steps + 2 buffer (min 5)
+ * - Heavy intents (project_analysis, automation_execution): higher cap
+ * - Default: MAX_TOOL_ITERATIONS (5)
+ */
+function computeMaxIterations(
+  intent: RoutedIntent,
+  plan?: AgentPlan,
+): number {
+  if (plan && plan.steps.length > 0) {
+    return Math.max(MAX_TOOL_ITERATIONS, plan.steps.length + 2);
+  }
+  if (intent.type === "project_analysis") return 8;
+  if (intent.type === "automation_execution") return 10;
+  if (intent.type === "artifact_generation") return 8;
+  return MAX_TOOL_ITERATIONS;
 }

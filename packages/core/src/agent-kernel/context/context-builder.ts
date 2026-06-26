@@ -160,6 +160,21 @@ export interface ContextBuilderDeps {
   findRelatedMemories?: (memoryId: string, relation?: string, limit?: number) => Promise<Array<{ id: string; type?: string; title?: string; content?: string; source?: string; confidence?: number; scope?: string; scopeId?: string; score?: number }>>;
   /** Current step ID for scope-aware retrieval. */
   stepId?: string;
+  /** §7.4: Optional LLM summarizer for high-value memory compression.
+   * When provided, memories of type user_preference / project_profile that
+   * exceed the compression threshold are summarized via LLM instead of
+   * truncated, preserving semantic content. */
+  summarizeMemory?: (content: string, maxChars: number) => Promise<string>;
+  /** §7.3: Callback to generate a conversation summary when the message
+   *  count exceeds a threshold but no summary exists yet. Called BEFORE
+   *  history chunk building so the current request benefits from the
+   *  summary instead of waiting for the next turn. */
+  generateSummaryIfNeeded?: (input: {
+    conversationId: string;
+    runId: string;
+    userId?: string;
+    messages: Array<{ id: string; role: string; content: string; createdAt: string }>;
+  }) => Promise<void>;
 }
 
 /**
@@ -414,7 +429,7 @@ export class ContextBuilder implements ContextBuilderInterface {
             );
             return [] as Awaited<ReturnType<typeof this.deps.listMessages>>;
           })();
-      const summaryMemoriesResult = summaryMemoriesSettled.status === "fulfilled"
+      const summaryMemoriesResultInitial = summaryMemoriesSettled.status === "fulfilled"
         ? summaryMemoriesSettled.value
         : (() => { const reason = String(summaryMemoriesSettled.reason); console.error("[ContextBuilder] searchMemories(summary) FAILED", { runId: input.runId, reason }); recordFailure("summaryMemories", false, reason); return [] as Awaited<ReturnType<NonNullable<typeof this.deps.searchMemories>>>; })();
       const queryEmbedding = queryEmbeddingSettled.status === "fulfilled"
@@ -436,6 +451,46 @@ export class ContextBuilder implements ContextBuilderInterface {
         console.debug(`[ContextBuilder] group_a_parallel_ms=${groupAParallelMs}`);
       }
 
+      // §7.3: Summary generation timing — if the conversation is long
+      // enough (≥30 messages) but has NO existing summary, generate one
+      // NOW so the current request benefits from compaction instead of
+      // waiting for the next turn. The callback persists the summary;
+      // we then re-fetch to include it below.
+      let summaryMemoriesResult = summaryMemoriesResultInitial;
+      if (
+        this.deps.generateSummaryIfNeeded &&
+        messages.length >= 30 &&
+        summaryMemoriesResultInitial.length === 0
+      ) {
+        try {
+          await this.deps.generateSummaryIfNeeded({
+            conversationId: input.conversationId,
+            runId: input.runId,
+            userId: input.userId,
+            messages: messages.map((m) => ({
+              id: m.id,
+              role: m.role,
+              content: m.content,
+              createdAt: m.createdAt,
+            })),
+          });
+          // Re-fetch summaries to include the newly generated one
+          if (this.deps.searchMemories) {
+            summaryMemoriesResult = await this.deps.searchMemories({
+              query: "",
+              runId: input.runId,
+              conversationId: input.conversationId,
+              userId: input.userId,
+              types: ["conversation_summary"],
+              scopes: ["conversation"],
+              limit: 5,
+            });
+          }
+        } catch {
+          // Best effort — summary generation failure shouldn't block context building
+        }
+      }
+
       // ── Process summaries & stale detection (depends on messages + summaries) ──
       // Check for existing conversation summaries to compress older history.
       // Summaries replace raw messages that fall within their range,
@@ -447,14 +502,20 @@ export class ContextBuilder implements ContextBuilderInterface {
       if (this.deps.searchMemories && summaryMemoriesResult.length > 0) {
         const convSummaries = summaryMemoriesResult;
 
+        // §2.6: Consolidated stale detection — call checkStale ONCE for all
+        // summaries instead of once per summary. We find the LATEST boundary
+        // across all summaries, collect messages after it, and run a single
+        // semantic check. The result applies to all summaries (if the topic
+        // drifted, all summaries are equally stale).
+
         // Collect all message IDs covered by any summary range.
-        // Build a map: messageId → true for fast lookup.
+        // Also find the latest boundary for consolidated stale detection.
+        let latestBoundaryIdx = -1;
         for (const summary of convSummaries) {
           const range = summary.metadata?.messageRange as
             | { fromMessageId?: string; toMessageId?: string }
             | undefined;
           if (range?.fromMessageId && range?.toMessageId) {
-            // Find all messages between fromMessageId and toMessageId (inclusive)
             const fromIdx = messages.findIndex(
               (m) => m.id === range.fromMessageId,
             );
@@ -467,17 +528,104 @@ export class ContextBuilder implements ContextBuilderInterface {
               }
             }
           }
+          // Track the latest boundary for consolidated stale detection
+          if (range?.toMessageId) {
+            const boundaryIdx = messages.findIndex(
+              (m) => m.id === range.toMessageId,
+            );
+            if (boundaryIdx > latestBoundaryIdx) {
+              latestBoundaryIdx = boundaryIdx;
+            }
+          }
+        }
 
-          // ── Stale detection (§P0 — full detector integration) ──
-          // Phase 1: Range-based heuristic (fast path — always computed).
-          // Phase 2: Semantic stale detection via SummaryStaleDetector
-          //   (goal-change / correction / fact-change / preference-conflict).
-          // Semantic detection wins when it reports higher severity.
+        // ── Consolidated stale detection (§2.6 — single checkStale call) ──
+        // Phase 1: Range-based heuristic (fast path — always computed per-summary).
+        // Phase 2: Semantic stale detection via SummaryStaleDetector — called
+        //   ONCE with messages after the latest boundary, result shared across
+        //   all summaries.
+        let sharedSemanticStale = false;
+        let sharedSemanticSeverity: "info" | "warning" | "critical" = "info";
+        let sharedSemanticReasons: string[] = [];
+
+        if (this.deps.staleDetector) {
+          try {
+            // Collect messages after the LATEST summary boundary.
+            // CRITICAL: the current user message MUST be included —
+            // it is the single most important signal for goal-change
+            // and correction detection (e.g. "actually, use Vue instead").
+            const messagesAfter = latestBoundaryIdx >= 0
+              ? messages.slice(latestBoundaryIdx + 1)
+              : [];
+            const hasCurrentInMessages = messagesAfter.some(
+              (m) => m.id === input.userMessageId,
+            );
+            const detectorMessages = hasCurrentInMessages
+              ? messagesAfter
+              : [
+                  ...messagesAfter,
+                  {
+                    id: input.userMessageId,
+                    role: "user",
+                    content: input.message,
+                    createdAt: new Date().toISOString(),
+                  },
+                ];
+
+            // Collect recent tool results for fact-change detection
+            let newToolResults: StaleDetectionInput["newToolResults"];
+            if (toolResultsResult.length > 0 && detectorMessages.length > 0) {
+              newToolResults = toolResultsResult
+                .filter((tr) => tr.status === "completed")
+                .map((tr) => ({
+                  skillId: tr.skillId ?? tr.name ?? tr.toolCallId,
+                  summary: tr.summary ?? "",
+                  status: tr.status,
+                }));
+            }
+
+            // Use the most recent summary's content for the semantic check
+            // (it represents the latest state of the conversation).
+            const latestSummary = convSummaries[convSummaries.length - 1]!;
+            const semanticResult = this.deps.staleDetector.checkStale({
+              summary: {
+                id: latestSummary.id,
+                content: latestSummary.content,
+                metadata: latestSummary.metadata as Record<string, unknown> | undefined,
+                createdAt:
+                  typeof latestSummary.metadata?.createdAt === "string"
+                    ? latestSummary.metadata.createdAt
+                    : new Date(0).toISOString(),
+              },
+              newMessages: detectorMessages.map((m) => ({
+                role: m.role,
+                content: m.content,
+              })),
+              newToolResults,
+            });
+
+            if (semanticResult.stale) {
+              sharedSemanticStale = true;
+              sharedSemanticSeverity = semanticResult.severity;
+              sharedSemanticReasons = semanticResult.reasons;
+            }
+          } catch {
+            // Stale detector failed — keep range-based results only
+          }
+        }
+
+        // Build summary chunks using the shared semantic result + per-summary
+        // range-based check.
+        for (const summary of convSummaries) {
+          const range = summary.metadata?.messageRange as
+            | { fromMessageId?: string; toMessageId?: string }
+            | undefined;
+
           let isStale = false;
           let staleSeverity: "info" | "warning" | "critical" = "info";
           let staleReasons: string[] = [];
 
-          // Phase 1 — range-based: new messages after summary boundary
+          // Phase 1 — range-based: new messages after THIS summary's boundary
           if (range?.toMessageId) {
             const boundaryIdx = messages.findIndex(
               (m) => m.id === range.toMessageId,
@@ -489,95 +637,21 @@ export class ContextBuilder implements ContextBuilderInterface {
             }
           }
 
-          // Phase 2 — semantic: full SummaryStaleDetector check
-          if (this.deps.staleDetector) {
-            try {
-              // Collect messages after this summary's boundary.
-              // CRITICAL: the current user message MUST be included —
-              // it is the single most important signal for goal-change
-              // and correction detection (e.g. "actually, use Vue instead").
-              const boundaryIdx = range?.toMessageId
-                ? messages.findIndex((m) => m.id === range.toMessageId)
-                : -1;
-              const messagesAfter = boundaryIdx >= 0
-                ? messages.slice(boundaryIdx + 1)
-                : [];
-              // Always ensure the current user message is present for
-              // stale detection, even when it's the only message after
-              // the summary boundary.
-              const hasCurrentInMessages = messagesAfter.some(
-                (m) => m.id === input.userMessageId,
-              );
-              const detectorMessages = hasCurrentInMessages
-                ? messagesAfter
-                : [
-                    ...messagesAfter,
-                    {
-                      id: input.userMessageId,
-                      role: "user",
-                      content: input.message,
-                      createdAt: new Date().toISOString(),
-                    },
-                  ];
-
-              // Collect recent tool results for fact-change detection
-              // NOTE: We reuse toolResultsResult from Group A instead of
-              // making a separate DB query here (was a duplicate query before).
-              let newToolResults: StaleDetectionInput["newToolResults"];
-              if (toolResultsResult.length > 0 && detectorMessages.length > 0) {
-                newToolResults = toolResultsResult
-                  .filter((tr) => tr.status === "completed")
-                  .map((tr) => ({
-                    skillId: tr.skillId ?? tr.name ?? tr.toolCallId,
-                    summary: tr.summary ?? "",
-                    status: tr.status,
-                  }));
-              }
-
-              const semanticResult = this.deps.staleDetector.checkStale({
-                summary: {
-                  id: summary.id,
-                  content: summary.content,
-                  metadata: summary.metadata as Record<string, unknown> | undefined,
-                  // §B13: when createdAt is missing, treat the summary as
-                  // ancient (epoch) instead of "now" — the previous fallback
-                  // masked stale content by making it look fresh, defeating
-                  // the purpose of stale detection.
-                  createdAt:
-                    typeof summary.metadata?.createdAt === "string"
-                      ? summary.metadata.createdAt
-                      : new Date(0).toISOString(),
-                },
-                newMessages: detectorMessages.map((m) => ({
-                  role: m.role,
-                  content: m.content,
-                })),
-                newToolResults,
-              });
-
-              // Semantic detection wins when it reports higher severity
-              if (semanticResult.stale) {
-                isStale = true;
-                // Upgrade severity if semantic detects a worse condition
-                const severityRank = {
-                  info: 0,
-                  warning: 1,
-                  critical: 2,
-                } as const;
-                if (
-                  severityRank[semanticResult.severity] >
-                  severityRank[staleSeverity]
-                ) {
-                  staleSeverity = semanticResult.severity;
-                }
-                staleReasons = [
-                  ...staleReasons,
-                  ...semanticResult.reasons,
-                ];
-              }
-            } catch {
-              // Stale detector failed — keep range-based result
+          // Phase 2 — shared semantic result (§2.6: single checkStale call)
+          if (sharedSemanticStale) {
+            isStale = true;
+            const severityRank = {
+              info: 0,
+              warning: 1,
+              critical: 2,
+            } as const;
+            if (
+              severityRank[sharedSemanticSeverity] >
+              severityRank[staleSeverity]
+            ) {
+              staleSeverity = sharedSemanticSeverity;
             }
+            staleReasons = [...staleReasons, ...sharedSemanticReasons];
           }
 
           // severity → priority mapping:
@@ -623,24 +697,44 @@ export class ContextBuilder implements ContextBuilderInterface {
       // Build history chunks, skipping messages already covered by a summary.
       // This is precise compaction: summarized messages are replaced by their
       // summary, reducing token usage while preserving conversation context.
+      //
+      // §2.1: Sliding-window truncation — recent messages keep full text,
+      // semi-recent get truncated to 500 chars, older messages to 150 chars
+      // (first sentence only). Summarized messages are skipped entirely
+      // (summary takes priority over truncation).
+      const RECENT_FULL = 10;
+      const SEMI_RECENT_MAX = 500;
+      const OLDER_MAX = 150;
       let skippedCount = 0;
-      for (const msg of messages) {
+      for (let i = 0; i < messages.length; i++) {
+        const msg = messages[i];
+        if (!msg) continue;
         if (msg.id === input.userMessageId) continue; // skip current
         if (summarizedMessageIds.has(msg.id)) {
           skippedCount++;
           continue; // covered by a conversation summary
         }
+        // §2.1: Age-based truncation (0 = newest)
+        const age = messages.length - 1 - i;
+        let content = msg.content;
+        if (age >= 20 && content.length > OLDER_MAX) {
+          content = extractFirstSentence(content, OLDER_MAX);
+        } else if (age >= RECENT_FULL && content.length > SEMI_RECENT_MAX) {
+          content = content.slice(0, SEMI_RECENT_MAX) + '…';
+        }
+        // age < RECENT_FULL: keep full text
         chunks.push({
           id: `history_${msg.id}`,
           source: "conversation_history",
           title: `${msg.role} message`,
-          content: msg.content,
+          content,
           priority: 10,
-          tokenEstimate: estimateTokens(msg.content),
+          tokenEstimate: estimateTokens(content),
           metadata: {
             messageId: msg.id,
             role: msg.role,
             attachments: msg.attachments,
+            truncated: content.length < msg.content.length,
           },
           createdAt: msg.createdAt,
           trust: msg.role === "assistant" ? "tool" : "user",
@@ -662,9 +756,17 @@ export class ContextBuilder implements ContextBuilderInterface {
       // §P1-3: Soft timeout — total memory search budget 500ms. Vector recall
       // runs in parallel with hybrid but is cut at 500ms instead of 2s.
       // Deep recall for complex tasks runs asynchronously after first response.
+      //
+      // §2.3: Skip memory search for short new conversations (≤5 messages).
+      // There's nothing meaningful to recall when the conversation just
+      // started — saves 4-7ms + an embedding API call.
       const tMemory = Date.now();
       const MEMORY_BUDGET_MS = 500;
-      if (this.deps.searchMemories) {
+      const SKIP_MEMORY_FOR_SHORT_CONVO = 5;
+      if (
+        this.deps.searchMemories &&
+        messages.length > SKIP_MEMORY_FOR_SHORT_CONVO
+      ) {
         try {
           // Pass 1: Hybrid search (query + embedding) — keyword-dominant
           // Pass 2: Pure vector recall (embedding only, empty query, 500ms cap)
@@ -973,29 +1075,51 @@ export class ContextBuilder implements ContextBuilderInterface {
       }
 
       // ── Skill catalog (from Group A result) ───────────────────────
+      // §2.2: Skip skill catalog for casual chat / question_answering
+      // patterns. Context building runs before intent routing, so we use
+      // a lightweight form-match heuristic (similar to IntentRouter Layer 0)
+      // to detect obvious casual messages and skip the catalog entirely.
+      // Full intent-based filtering happens in ResponseComposer/ToolDecisionEngine.
+      const SKIP_SKILL_PATTERNS = [
+        /^(hi|hello|hey|你好|嗨|哈喽|早|晚上好|下午好)\b/i,
+        /^(thanks|thank you|thx|谢谢|多谢|感谢)\b/i,
+        /^(bye|goodbye|再见|拜拜)\b/i,
+        /^(ok|okay|好的|嗯|ok啦)\s*[.!?]?$/i,
+      ];
+      const isCasualMessage = SKIP_SKILL_PATTERNS.some((p) => p.test(input.message.trim()));
       const tSkills = Date.now();
-      if (this.deps.listSkills) {
+      const MAX_SKILLS_IN_CONTEXT = 10;
+      if (this.deps.listSkills && !isCasualMessage) {
         const skillsFailed = skillsSettled.status === "rejected";
         if (skillsResult.length > 0) {
-          availableSkills = skillsResult.map((skill) => ({
+          // §2.2: Cap to MAX_SKILLS_IN_CONTEXT to save tokens
+          const cappedSkills = skillsResult.slice(0, MAX_SKILLS_IN_CONTEXT);
+          availableSkills = cappedSkills.map((skill) => ({
             id: skill.id,
             name: skill.name,
             description: skill.description,
             category: skill.category,
           }));
-          const skillSummaries = skillsResult
+          const skillSummaries = cappedSkills
             .map((s) => `- ${s.name} (${s.id}): ${s.description} [${s.category}]`)
             .join("\n");
+          const catalogNote =
+            skillsResult.length > MAX_SKILLS_IN_CONTEXT
+              ? `\n(${skillsResult.length - MAX_SKILLS_IN_CONTEXT} more skills available — ask if you need other tools)`
+              : "";
           chunks.push({
             id: `skill_catalog`,
             source: "skill_catalog",
             title: "Available Skills",
             content:
-              skillSummaries ||
+              skillSummaries + catalogNote ||
               "No skills available. Respond as a conversational assistant.",
             priority: 20,
-            tokenEstimate: estimateTokens(skillSummaries),
-            metadata: { skillCount: skillsResult.length },
+            tokenEstimate: estimateTokens(skillSummaries + catalogNote),
+            metadata: {
+              skillCount: skillsResult.length,
+              cappedCount: cappedSkills.length,
+            },
             trust: "system",
           });
         } else if (skillsFailed) {
@@ -1061,11 +1185,21 @@ export class ContextBuilder implements ContextBuilderInterface {
     // Before budget trimming, apply source-specific truncation so that
     // long chunks don't get dropped entirely. This preserves key info
     // while freeing tokens for other sources.
-    const MAX_TOOL_RESULT_CHARS = 2000;
-    const MAX_ARTIFACT_CHARS = 1000;
-    const MAX_MEMORY_CHARS = 800;
-    const MAX_HISTORY_MSG_CHARS = 4000;
-    const memoryCompressor = new MemoryCompressor({ maxCharsPerMemory: MAX_MEMORY_CHARS });
+    //
+    // §2.5: Dynamic thresholds based on available token budget — smaller
+    // context windows get tighter caps so a single chunk can't dominate.
+    const availableTokens =
+      (this.deps.maxContextTokens ?? 128_000) -
+      (this.deps.reservedOutputTokens ?? 16_000);
+    const MAX_TOOL_RESULT_CHARS = Math.min(2000, Math.floor(availableTokens * 0.05 * 4));
+    const MAX_ARTIFACT_CHARS = Math.min(1000, Math.floor(availableTokens * 0.025 * 4));
+    const MAX_MEMORY_CHARS = Math.min(800, Math.floor(availableTokens * 0.02 * 4));
+    const MAX_HISTORY_MSG_CHARS = Math.min(4000, Math.floor(availableTokens * 0.1 * 4));
+    const memoryCompressor = new MemoryCompressor({
+      maxCharsPerMemory: MAX_MEMORY_CHARS,
+      // §7.4: Wire LLM summarizer for high-value memory compression
+      summarize: this.deps.summarizeMemory,
+    });
     for (const chunk of chunks) {
       if (chunk.content.length <= 500) continue; // skip already-short chunks
 
@@ -1099,18 +1233,40 @@ export class ContextBuilder implements ContextBuilderInterface {
         case "memory": {
           if (chunk.content.length > MAX_MEMORY_CHARS) {
             const originalLength = chunk.content.length;
-            // Use MemoryCompressor for intelligent first-N-sentence extraction
-            const result = memoryCompressor.compress([{
-              id: chunk.id.replace("memory_", ""),
-              type: "manual_note",
-              title: chunk.title ?? "",
-              content: chunk.content,
-              confidence: 0.8,
-              importance: 0.5,
-              createdAt: new Date().toISOString(),
-            }]);
-            const compressed = result[0]?.memory.content ?? chunk.content.slice(0, MAX_MEMORY_CHARS - 3) + "...";
-            chunk.content = compressed;
+            // §7.4: Use MemoryCompressor with LLM summarization for high-value
+            // memory types (user_preference, project_profile). Other types use
+            // the sync path (sentence extraction + truncation).
+            const memType = (chunk.metadata.type as string) ?? "manual_note";
+            const isHighValue = memType === "user_preference" || memType === "project_profile";
+            const importance = isHighValue ? 0.9 : 0.5;
+
+            if (isHighValue && this.deps.summarizeMemory) {
+              // Async path: LLM summarization for high-value memories
+              const result = await memoryCompressor.compressAsync([{
+                id: chunk.id.replace("memory_", ""),
+                type: memType,
+                title: chunk.title ?? "",
+                content: chunk.content,
+                confidence: (chunk.metadata.confidence as number) ?? 0.8,
+                importance,
+                createdAt: new Date().toISOString(),
+              }]);
+              const compressed = result[0]?.memory.content ?? chunk.content.slice(0, MAX_MEMORY_CHARS - 3) + "...";
+              chunk.content = compressed;
+            } else {
+              // Sync path: sentence extraction + truncation
+              const result = memoryCompressor.compress([{
+                id: chunk.id.replace("memory_", ""),
+                type: memType,
+                title: chunk.title ?? "",
+                content: chunk.content,
+                confidence: (chunk.metadata.confidence as number) ?? 0.8,
+                importance,
+                createdAt: new Date().toISOString(),
+              }]);
+              const compressed = result[0]?.memory.content ?? chunk.content.slice(0, MAX_MEMORY_CHARS - 3) + "...";
+              chunk.content = compressed;
+            }
             chunk.tokenEstimate = estimateTokens(chunk.content);
             chunk.metadata.truncated = true;
             chunk.metadata.originalLength = originalLength;
@@ -1326,4 +1482,24 @@ async function raceWithTimeout<T>(
     // won, the .then above already cleared it; this is a safety net.
     if (timer) clearTimeout(timer);
   }
+}
+
+// ── §2.1: Extract the first sentence of a message, capped at maxChars ──────
+// Used by the sliding-window history truncation to keep older messages
+// compact while preserving their gist.
+function extractFirstSentence(text: string, maxChars: number): string {
+  if (text.length <= maxChars) return text;
+  // Try to cut at the first sentence boundary within the limit
+  const slice = text.slice(0, maxChars);
+  const lastStop = Math.max(
+    slice.lastIndexOf('。'),
+    slice.lastIndexOf('.'),
+    slice.lastIndexOf('!'),
+    slice.lastIndexOf('?'),
+    slice.lastIndexOf('\n'),
+  );
+  if (lastStop > maxChars * 0.5) {
+    return slice.slice(0, lastStop + 1);
+  }
+  return slice + '…';
 }

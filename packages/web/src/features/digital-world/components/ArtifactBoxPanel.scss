@@ -1,6 +1,14 @@
+@use "./panel" as *;
+
 .artifact-box-panel {
   .artifact-box-panel__item {
     width: 100%;
+    transition: all 0.2s ease;
+
+    &:hover {
+      transform: translateY(-1px);
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
+    }
   }
 
   .artifact-box-panel__item-header {

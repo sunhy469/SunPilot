@@ -24,10 +24,21 @@ export function useWorldApp(
       }
     });
 
+    // §9.2.4: debounce resize so high-frequency resize events (e.g. dragging
+    // the window edge) don't trigger an expensive grid redraw on every frame.
+    let resizeTimer: number | null = null;
+    const RESIZE_DEBOUNCE_MS = 200;
+
     const observer = new ResizeObserver(([entry]) => {
       if (!entry) return;
       const { width, height } = entry.contentRect;
-      world.resize(width, height);
+      if (resizeTimer !== null) {
+        clearTimeout(resizeTimer);
+      }
+      resizeTimer = window.setTimeout(() => {
+        resizeTimer = null;
+        world.resize(width, height);
+      }, RESIZE_DEBOUNCE_MS);
     });
     observer.observe(container);
 
@@ -35,6 +46,10 @@ export function useWorldApp(
       disposed = true;
       worldRef.current = null;
       mountedRef.current = false;
+      if (resizeTimer !== null) {
+        clearTimeout(resizeTimer);
+        resizeTimer = null;
+      }
       observer.disconnect();
       world.destroy();
     };

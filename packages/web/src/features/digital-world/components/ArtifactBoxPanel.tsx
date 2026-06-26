@@ -1,7 +1,9 @@
 import { Drawer, List, Tag, Empty } from "antd";
+import { InboxOutlined } from "@ant-design/icons";
 import { useState, useEffect, useMemo } from "react";
 import { createRequest } from "../../../shared/api/client";
 import { listArtifacts } from "../api";
+import { useIsMobile } from "../hooks/useIsMobile";
 import "./ArtifactBoxPanel.scss";
 
 interface ArtifactRecord {
@@ -38,6 +40,8 @@ const STATUS_COLORS: Record<string, string> = {
 export function ArtifactBoxPanel({ open, beingId, onClose }: ArtifactBoxPanelProps) {
   const [artifacts, setArtifacts] = useState<ArtifactRecord[]>([]);
   const request = useMemo(() => createRequest(), []);
+  // Task 17 (§9.4.5): full-screen Drawer on mobile (<768px).
+  const isMobile = useIsMobile();
 
   useEffect(() => {
     if (!open || !beingId) return;
@@ -47,7 +51,17 @@ export function ArtifactBoxPanel({ open, beingId, onClose }: ArtifactBoxPanelPro
   }, [open, beingId, request]);
 
   return (
-    <Drawer title="产物箱" open={open} onClose={onClose} width={360}>
+    <Drawer
+      title={
+        <div className="dw-panel-header">
+          <InboxOutlined className="dw-panel-header__icon" />
+          <span className="dw-panel-header__title">产物箱</span>
+        </div>
+      }
+      open={open}
+      onClose={onClose}
+      width={isMobile ? "100%" : 360}
+    >
       <div className="artifact-box-panel">
         {artifacts.length === 0 ? (
           <Empty description="暂无产物" />

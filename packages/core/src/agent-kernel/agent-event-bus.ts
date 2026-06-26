@@ -139,3 +139,51 @@ export class InMemoryAgentEventBus implements AgentEventBus {
     return this.listeners.length;
   }
 }
+
+/**
+ * §6.5: Throttled delta emitter — batches `agent.model.delta` events
+ * so at most one is emitted per `intervalMs` (default 50ms). This
+ * prevents WebSocket broadcast flooding when the LLM streams many small
+ * chunks in rapid succession.
+ *
+ * The accumulated delta is emitted as a single batched event. Call
+ * `flush()` when streaming completes to emit any remaining buffered text.
+ */
+export class DeltaThrottle {
+  private buffer = "";
+  private lastEmit = 0;
+  private timer: ReturnType<typeof setTimeout> | undefined;
+
+  constructor(
+    private readonly emit: (delta: string) => void,
+    private readonly intervalMs: number = 50,
+  ) {}
+
+  /** Add a delta chunk. Emits a batched event if the interval has elapsed. */
+  push(delta: string): void {
+    this.buffer += delta;
+    const now = Date.now();
+    if (now - this.lastEmit >= this.intervalMs) {
+      this.flush();
+    } else if (!this.timer) {
+      // Schedule a flush to ensure buffered deltas aren't held too long
+      this.timer = setTimeout(() => {
+        this.timer = undefined;
+        if (this.buffer) this.flush();
+      }, this.intervalMs);
+    }
+  }
+
+  /** Emit any buffered delta immediately. */
+  flush(): void {
+    if (this.timer) {
+      clearTimeout(this.timer);
+      this.timer = undefined;
+    }
+    if (this.buffer) {
+      this.lastEmit = Date.now();
+      this.emit(this.buffer);
+      this.buffer = "";
+    }
+  }
+}

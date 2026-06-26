@@ -236,7 +236,17 @@ export class ToolRetriever {
     // await-per-skill latency. Uses same concurrency limit as IntentRouter.
     if (embeddingService && embeddingService.hasRealProvider) {
       try {
-        const queryEmbedding = await embeddingService.embed(query);
+        // §4.4: Reuse query embedding from IntentRouter when available.
+        // IntentRouter computes the same query embedding during Layer 1
+        // matching and stores it in the shared SkillEmbeddingCache. This
+        // avoids a duplicate embedding API call per turn.
+        const queryEmbedding =
+          skillEmbeddingCache?.getQueryEmbedding(query) ??
+          (await embeddingService.embed(query));
+        if (skillEmbeddingCache && !skillEmbeddingCache.getQueryEmbedding(query)) {
+          // Populate cache for downstream consumers
+          skillEmbeddingCache.setQueryEmbedding(query, queryEmbedding);
+        }
 
         // Re-check after query embed: the provider may have failed
         // during this call and fallen back to lexical hash. If it did,

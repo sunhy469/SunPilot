@@ -1,4 +1,5 @@
 import type { AgentEventBus } from "../agent-event-bus.js";
+import { DeltaThrottle } from "../agent-event-bus.js";
 import type {
   AgentContext,
   AgentLoopInput,
@@ -42,14 +43,16 @@ export class ResponseComposer implements ResponseComposerInterface {
     },
     signal: AbortSignal,
   ): Promise<ComposeResult> {
-    const messages = this.buildMessages(input.context);
+    const messages = this.buildMessages(input.context, input.intent);
+    // §5.3: Don't pass contextSnapshot to the LLM provider — it's for
+    // observability/persistence only and bloats the HTTP payload.
     return this.streamAndSave(
       messages,
       input.input.runId,
       input.input.conversationId,
       signal,
       undefined,
-      input.context.contextSnapshot,
+      undefined,
       undefined,
       input.modelId,
       input.stream,
@@ -127,6 +130,15 @@ export class ResponseComposer implements ResponseComposerInterface {
         { runId, conversationId },
       );
 
+      // §6.5: Throttle agent.model.delta events to reduce WebSocket load.
+      const deltaThrottle = new DeltaThrottle((delta) => {
+        this.deps.eventBus.emit(
+          "agent.model.delta",
+          { runId, modelCallId, delta },
+          { runId, conversationId },
+        );
+      }, 50);
+
       for await (const chunk of this.deps.llm.streamChat({
         messages: messages.map((m) => ({
           role: m.role as "system" | "user" | "assistant",
@@ -139,7 +151,9 @@ export class ResponseComposer implements ResponseComposerInterface {
         // the in-flight HTTP request when the caller aborts, instead of
         // relying on the post-chunk signal.aborted check below.
         signal,
-        metadata: contextSnapshot ? { context: contextSnapshot } : undefined,
+        // §5.3: contextSnapshot is NOT sent to the LLM provider — it's
+        // observability-only data that bloats the HTTP payload.
+        metadata: undefined,
       })) {
         if (signal.aborted) {
           throw Object.assign(new Error("Response generation aborted"), {
@@ -149,21 +163,18 @@ export class ResponseComposer implements ResponseComposerInterface {
         }
         content += chunk.delta;
 
-        this.deps.eventBus.emit(
-          "agent.model.delta",
-          {
-            runId,
-            modelCallId,
-            delta: chunk.delta,
-          },
-          { runId, conversationId },
-        );
+        // §6.5: Throttle agent.model.delta events to 50ms intervals to
+        // avoid WebSocket broadcast flooding. The user-visible stream
+        // (appendText) is NOT throttled — only the observability event.
+        deltaThrottle.push(chunk.delta);
 
         // Route delta through stream when available (§P0-1)
         if (streamOpts) {
           streamOpts.stream.appendText(streamOpts.textPartId, chunk.delta);
         }
       }
+      // Flush any remaining buffered delta before emitting model.completed
+      deltaThrottle.flush();
 
       // Model call persistence handled by ModelRouter (§P1-5)
       this.deps.eventBus.emit(
@@ -224,15 +235,36 @@ export class ResponseComposer implements ResponseComposerInterface {
   /**
    * Build messages array from AgentContext for the LLM call.
    * Includes attachment URLs so the LLM can reference uploaded files.
+   *
+   * §5.1: Skill catalog is omitted when the intent doesn't require tools
+   *        (saves ~400 tokens for casual_chat / question_answering).
+   * §5.2: MARKDOWN_RESPONSE_POLICY is omitted for trivial responses
+   *        (casual_chat) to save ~125 tokens.
+   * §5.4: Persona is omitted when context.messages already contains a
+   *        system-role message (avoids duplicate persona sends).
    */
   private buildMessages(
     context: AgentContext,
+    intent?: { type: string; requiresTool: boolean; candidateSkills?: string[] },
   ): Array<{ role: string; content: string }> {
     const messages: Array<{ role: string; content: string }> = [];
 
+    // §5.4: Skip persona if context.messages already has a system message
+    const hasSystemInHistory = context.messages.some(
+      (m) => m.role === "system",
+    );
+
     // System prompt: persona + rules + safety
-    const systemParts = [context.system.persona];
-    systemParts.push(MARKDOWN_RESPONSE_POLICY);
+    const systemParts: string[] = [];
+    if (!hasSystemInHistory) {
+      systemParts.push(context.system.persona);
+    }
+
+    // §5.2: Only load markdown policy for non-trivial responses
+    const isCasualChat = intent?.type === "casual_chat";
+    if (!isCasualChat) {
+      systemParts.push(MARKDOWN_RESPONSE_POLICY);
+    }
 
     if (context.system.rules.length > 0) {
       systemParts.push(
@@ -246,10 +278,12 @@ export class ResponseComposer implements ResponseComposerInterface {
       );
     }
 
-    messages.push({
-      role: "system",
-      content: systemParts.join("\n"),
-    });
+    if (systemParts.length > 0) {
+      messages.push({
+        role: "system",
+        content: systemParts.join("\n"),
+      });
+    }
 
     // Memories as system context
     if (context.memories.length > 0) {
@@ -263,9 +297,21 @@ export class ResponseComposer implements ResponseComposerInterface {
       });
     }
 
-    // Skill catalog as system context
-    if (context.availableSkills.length > 0) {
-      const skillLines = context.availableSkills.map(
+    // §5.1: Skill catalog — only send when the intent requires tools.
+    // For casual_chat / question_answering, skip entirely to save tokens.
+    const intentRequiresTools = intent ? intent.requiresTool : true;
+    if (intentRequiresTools && context.availableSkills.length > 0) {
+      // §5.1: When candidateSkills are available, filter to only those
+      // relevant to the intent rather than sending the full catalog.
+      const candidates = new Set(intent?.candidateSkills ?? []);
+      const relevantSkills =
+        candidates.size > 0
+          ? context.availableSkills.filter((s) => candidates.has(s.id))
+          : context.availableSkills;
+      // Fall back to full catalog if filtering produced nothing
+      const skillsToSend =
+        relevantSkills.length > 0 ? relevantSkills : context.availableSkills;
+      const skillLines = skillsToSend.map(
         (s) => `- ${s.name} (${s.id}): ${s.description}`,
       );
       messages.push({
