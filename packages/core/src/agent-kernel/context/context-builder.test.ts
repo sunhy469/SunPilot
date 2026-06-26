@@ -12,11 +12,21 @@ const input: AgentLoopInput = {
   client: { source: "web" },
 };
 
+// §2.3: ContextBuilder skips memory search for conversations with ≤5 messages.
+// Tests that exercise memory search must provide >5 messages to trigger the
+// memory retrieval path.
+const sixMessages = Array.from({ length: 6 }, (_, i) => ({
+  id: `msg_${i}`,
+  role: i % 2 === 0 ? "user" : "assistant",
+  content: `message ${i}`,
+  createdAt: new Date(2026, 0, i + 1).toISOString(),
+}));
+
 describe("ContextBuilder", () => {
   test("passes scope-aware input to memory search and includes retrieved metadata", async () => {
     const calls: unknown[] = [];
     const builder = new ContextBuilder({
-      listMessages: async () => [],
+      listMessages: async () => sixMessages,
       searchMemories: async (searchInput) => {
         calls.push(searchInput);
         return [
@@ -495,7 +505,7 @@ describe("ContextBuilder", () => {
 
   test("scenario 8 — memory metrics: contextSnapshot includes memoryMetrics with all fields", async () => {
     const builder = new ContextBuilder({
-      listMessages: async () => [],
+      listMessages: async () => sixMessages,
       searchMemories: async () => [
         {
           id: "memory_1",
@@ -593,7 +603,7 @@ describe("ContextBuilder", () => {
     }));
 
     const builder = new ContextBuilder({
-      listMessages: async () => [],
+      listMessages: async () => sixMessages,
       searchMemories: async () => manyMemories,
       maxContextTokens: 2000, // Tight budget to force trimming
       reservedOutputTokens: 200,

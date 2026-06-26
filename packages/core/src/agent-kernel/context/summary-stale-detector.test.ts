@@ -242,7 +242,11 @@ describe("SummaryStaleDetector", () => {
         }),
       );
       // "dark mode editor" has no overlap with "github actions CI/CD"
-      expect(result.stale).toBe(false);
+      // → preference-conflict check does NOT trigger (requires ≥2 topic words overlap)
+      expect(result.reasons.some((r) => r.includes("preference may override"))).toBe(false);
+      // BUT topic drift IS detected (§7.5): conversation moved from CI/CD to editor settings
+      expect(result.stale).toBe(true);
+      expect(result.reasons.some((r) => r.includes("Topic drift"))).toBe(true);
     });
 
     test("detects always/never keywords", () => {
