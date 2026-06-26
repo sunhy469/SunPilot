@@ -106,12 +106,20 @@ export class IntentRouter implements IntentRouterInterface {
     const message = context.currentMessage.content.trim();
     // §P3: Track which layer decided the intent for trace observability
     let routingLayer: "form_match" | "embedding_short_circuit" | "llm" | "pre_inference" | "default" = "default";
+    // §P0-3: Per-layer timing for detailed trace breakdown
+    let layer0FormMatchMs = 0;
+    let layer1QueryEmbedMs = 0;
+    let layer1SkillEmbedMs = 0;
+    let layer2LlmMs = 0;
+    let layer2TtftMs = 0;
 
     // ── Layer 0: Form-match rules (slash commands + formulaic) ──────
+    const tLayer0 = Date.now();
     for (const rule of this.rules) {
       for (const pattern of rule.patterns) {
         if (pattern.test(message)) {
           routingLayer = "form_match";
+          layer0FormMatchMs = Date.now() - tLayer0;
           return {
             type: rule.type,
             confidence: rule.type === "casual_chat" ? 0.9 : 0.85,
@@ -121,11 +129,16 @@ export class IntentRouter implements IntentRouterInterface {
             riskLevel: rule.riskLevel,
             candidateSkills: rule.candidateSkills,
             reason: `Form-match: ${pattern.source}`,
-            trace: { formMatch: true, routingLayer: routingLayer },
+            trace: {
+              formMatch: true,
+              routingLayer: routingLayer,
+              layer0FormMatchMs,
+            },
           };
         }
       }
     }
+    layer0FormMatchMs = Date.now() - tLayer0;
 
     // ── Layer 1: Embedding semantic skill matching ──────────────────
     // Only allowed to short-circuit when a REAL embedding provider is
@@ -140,6 +153,8 @@ export class IntentRouter implements IntentRouterInterface {
       try {
         const embeddingResult = await this.matchSkillWithEmbedding(context);
         if (embeddingResult) {
+          layer1QueryEmbedMs = embeddingResult.queryEmbedMs;
+          layer1SkillEmbedMs = embeddingResult.skillEmbedMs;
           // P0 fix: only short-circuit when real embeddings are available.
           // Fallback (keyword/hash) vectors express lexical overlap, not
           // semantic similarity — they cannot be trusted to skip the LLM.
@@ -149,12 +164,21 @@ export class IntentRouter implements IntentRouterInterface {
           // lexical scores.
           const isRealEmbedding = this.deps.embeddingService.hasRealProvider;
           // §P3 opt: Use configurable threshold (default 0.95)
-          if (isRealEmbedding && embeddingResult.confidence >= this.embeddingThreshold) {
+          if (isRealEmbedding && embeddingResult.intent.confidence >= this.embeddingThreshold) {
             routingLayer = "embedding_short_circuit";
-            return { ...embeddingResult, trace: { ...embeddingResult.trace, routingLayer } };
+            return {
+              ...embeddingResult.intent,
+              trace: {
+                ...embeddingResult.intent.trace,
+                routingLayer,
+                layer0FormMatchMs,
+                layer1QueryEmbedMs,
+                layer1SkillEmbedMs,
+              },
+            };
           }
           // Save hints for Layer 2 even when below threshold or in fallback mode
-          embeddingHints = embeddingResult;
+          embeddingHints = embeddingResult.intent;
         }
       } catch {
         // Embedding failed — fall through to LLM
@@ -182,10 +206,18 @@ export class IntentRouter implements IntentRouterInterface {
           intent.trace = {
             ...embeddingHints.trace,
             routingLayer,
+            layer0FormMatchMs,
+            layer1QueryEmbedMs,
+            layer1SkillEmbedMs,
           };
         } else {
           intent.reason = `Pre-inference: ${preIntentType} (conf=${preConfidence.toFixed(2)})`;
-          intent.trace = { routingLayer };
+          intent.trace = {
+            routingLayer,
+            layer0FormMatchMs,
+            layer1QueryEmbedMs,
+            layer1SkillEmbedMs,
+          };
         }
         intent.confidence = preConfidence;
         return intent;
@@ -195,10 +227,23 @@ export class IntentRouter implements IntentRouterInterface {
     // ── Layer 2: LLM classification + skill selection ───────────────
     if (this.deps.llm) {
       try {
-        const intent = await this.classifyWithLlm(context, embeddingHints);
-        if (intent) {
+        const tLayer2 = Date.now();
+        const result = await this.classifyWithLlm(context, embeddingHints, (ttft) => { layer2TtftMs = ttft; });
+        layer2LlmMs = Date.now() - tLayer2;
+        if (result) {
           routingLayer = "llm";
-          return { ...intent, trace: { ...intent.trace, routingLayer } };
+          return {
+            ...result,
+            trace: {
+              ...result.trace,
+              routingLayer,
+              layer0FormMatchMs,
+              layer1QueryEmbedMs,
+              layer1SkillEmbedMs,
+              layer2LlmMs,
+              layer2TtftMs,
+            },
+          };
         }
       } catch {
         // LLM unavailable — fall through to default
@@ -216,7 +261,14 @@ export class IntentRouter implements IntentRouterInterface {
       riskLevel: "low",
       candidateSkills: [],
       reason: "No form-match, embedding, or LLM match — defaulting to unknown",
-      trace: { routingLayer },
+      trace: {
+        routingLayer,
+        layer0FormMatchMs,
+        layer1QueryEmbedMs,
+        layer1SkillEmbedMs,
+        layer2LlmMs,
+        layer2TtftMs,
+      },
     };
   }
 
@@ -239,7 +291,7 @@ export class IntentRouter implements IntentRouterInterface {
    */
   private async matchSkillWithEmbedding(
     context: AgentContext,
-  ): Promise<RoutedIntent | null> {
+  ): Promise<{ intent: RoutedIntent; queryEmbedMs: number; skillEmbedMs: number } | null> {
     const embeddingService = this.deps.embeddingService!;
     const skills = context.availableSkills;
 
@@ -251,7 +303,9 @@ export class IntentRouter implements IntentRouterInterface {
     // §4.4: Cache the query embedding so ToolRetriever can reuse it
     // without a duplicate embedding API call.
     const cache = this.deps.skillEmbeddingCache;
+    const tQueryEmbed = Date.now();
     const queryEmbedding = await embeddingService.embed(message);
+    const queryEmbedMs = Date.now() - tQueryEmbed;
     if (cache) {
       cache.setQueryEmbedding(message, queryEmbedding);
     }
@@ -262,6 +316,7 @@ export class IntentRouter implements IntentRouterInterface {
     // Parallelized with concurrency limit to avoid overwhelming the
     // embedding service (local or remote rate-limited APIs).
     // §P1-2: Use shared cache when available to avoid duplicate embeddings.
+    const tSkillEmbed = Date.now();
     const MAX_EMBEDDING_CONCURRENCY = 8;
     const scored: Array<{ skillId: string; similarity: number }> = [];
 
@@ -285,6 +340,8 @@ export class IntentRouter implements IntentRouterInterface {
       }
     }
 
+    const skillEmbedMs = Date.now() - tSkillEmbed;
+
     if (scored.length === 0) return null;
 
     // Sort by similarity descending
@@ -300,50 +357,56 @@ export class IntentRouter implements IntentRouterInterface {
     // tool selection authority is ToolRetriever/ToolDecisionEngine.
     if (best.similarity >= this.embeddingThreshold && (best.similarity - runnerUp.similarity) > 0.3) {
       return {
-        type: "use_skill",
-        confidence: best.similarity,
-        requiresPlanning: false,
-        requiresTool: true,
-        requiresApproval: false,
-        riskLevel: "medium",
-        candidateSkills: [best.skillId],
-        reason: `Embedding short-circuit: "${best.skillId}" (sim=${best.similarity.toFixed(3)}, gap=${(best.similarity - runnerUp.similarity).toFixed(3)})`,
-        trace: {
-          embeddingMode: this.deps.embeddingService?.hasRealProvider
-            ? "real"
-            : this.deps.embeddingService?.isDegraded
-              ? "degraded"
-              : "lexical_fallback",
-          embeddingTopScore: best.similarity,
-          embeddingCandidateCount: skills.length,
+        intent: {
+          type: "use_skill",
+          confidence: best.similarity,
+          requiresPlanning: false,
+          requiresTool: true,
+          requiresApproval: false,
+          riskLevel: "medium",
+          candidateSkills: [best.skillId],
+          reason: `Embedding short-circuit: "${best.skillId}" (sim=${best.similarity.toFixed(3)}, gap=${(best.similarity - runnerUp.similarity).toFixed(3)})`,
+          trace: {
+            embeddingMode: this.deps.embeddingService?.hasRealProvider
+              ? "real"
+              : this.deps.embeddingService?.isDegraded
+                ? "degraded"
+                : "lexical_fallback",
+            embeddingTopScore: best.similarity,
+            embeddingCandidateCount: skills.length,
+          },
         },
+        queryEmbedMs,
+        skillEmbedMs,
       };
     }
 
-    // Below threshold — return null so Layer 2 (LLM) takes over.
-    // We still return the embedding result but with low confidence
-    // so callers can use candidate skills as hints for the LLM.
+    // Below threshold — return hints so Layer 2 (LLM) can use them.
     if (best.similarity >= 0.5) {
       return {
-        type: "use_skill",
-        confidence: best.similarity,
-        requiresPlanning: false,
-        requiresTool: true,
-        requiresApproval: false,
-        riskLevel: "medium",
-        candidateSkills: scored
-          .slice(0, 5)
-          .map((s) => s.skillId),
-        reason: `Embedding hints (top sim=${best.similarity.toFixed(3)} < ${this.embeddingThreshold}) — escalate to LLM`,
-        trace: {
-          embeddingMode: this.deps.embeddingService?.hasRealProvider
-            ? "real"
-            : this.deps.embeddingService?.isDegraded
-              ? "degraded"
-              : "lexical_fallback",
-          embeddingTopScore: best.similarity,
-          embeddingCandidateCount: skills.length,
+        intent: {
+          type: "use_skill",
+          confidence: best.similarity,
+          requiresPlanning: false,
+          requiresTool: true,
+          requiresApproval: false,
+          riskLevel: "medium",
+          candidateSkills: scored
+            .slice(0, 5)
+            .map((s) => s.skillId),
+          reason: `Embedding hints (top sim=${best.similarity.toFixed(3)} < ${this.embeddingThreshold}) — escalate to LLM`,
+          trace: {
+            embeddingMode: this.deps.embeddingService?.hasRealProvider
+              ? "real"
+              : this.deps.embeddingService?.isDegraded
+                ? "degraded"
+                : "lexical_fallback",
+            embeddingTopScore: best.similarity,
+            embeddingCandidateCount: skills.length,
+          },
         },
+        queryEmbedMs,
+        skillEmbedMs,
       };
     }
 
@@ -364,7 +427,8 @@ export class IntentRouter implements IntentRouterInterface {
    */
   private async classifyWithLlm(
     context: AgentContext,
-    embeddingHints?: RoutedIntent | null,
+    embeddingHints: RoutedIntent | null | undefined,
+    onFirstToken?: (ttftMs: number) => void,
   ): Promise<RoutedIntent | null> {
     if (!this.deps.llm) return null;
 
@@ -425,10 +489,15 @@ Respond in this exact format:
 
 User message: "${message}"
 `;
-    const messages = [{ role: "user" as const, content: prompt }];
+    const tLlmStart = Date.now();
     let response = "";
+    let firstTokenSeen = false;
 
-    for await (const chunk of this.deps.llm.streamChat({ messages })) {
+    for await (const chunk of this.deps.llm.streamChat({ messages: [{ role: "user" as const, content: prompt }], runId: context.runId })) {
+      if (!firstTokenSeen && chunk.delta.length > 0) {
+        firstTokenSeen = true;
+        onFirstToken?.(Date.now() - tLlmStart);
+      }
       response += chunk.delta;
     }
 

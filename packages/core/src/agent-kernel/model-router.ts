@@ -97,6 +97,8 @@ export interface ModelCallRecord {
   providerId: string;
   /** Latency in milliseconds. */
   latencyMs: number;
+  /** Time-to-first-token in milliseconds. */
+  firstTokenMs?: number;
   /** Estimated input tokens. */
   inputTokensEstimate: number;
   /** Estimated output tokens. */
@@ -205,6 +207,7 @@ export class ModelRouter {
     const startedAt = new Date().toISOString();
     const startTime = Date.now();
     let outputTokens = 0;
+    let firstTokenMs = 0;
     let fallbackUsed = false;
     let fallbackReason: string | undefined;
     let usedModel = "unknown";
@@ -233,6 +236,9 @@ export class ModelRouter {
         for await (const delta of config.provider.streamChat(
           requestWithSignal,
         )) {
+          if (firstTokenMs === 0 && delta.delta.length > 0) {
+            firstTokenMs = Date.now() - startTime;
+          }
           outputTokens += estimateDeltaTokens(delta.delta);
           yield delta;
           emittedAny = true;
@@ -248,6 +254,7 @@ export class ModelRouter {
           model: usedModel,
           providerId: usedProviderId,
           latencyMs,
+          firstTokenMs: firstTokenMs || undefined,
           inputTokensEstimate: inputTokens,
           outputTokensEstimate: outputTokens,
           fallbackUsed,
@@ -266,7 +273,10 @@ export class ModelRouter {
             outputTokens,
             latencyMs,
             status: "completed",
-            metadata: request.metadata,
+            metadata: {
+              ...(request.metadata ?? {}),
+              firstTokenMs: firstTokenMs || undefined,
+            },
             createdAt: startedAt,
           }).catch(() => { this.persistFailures++; this.onPersistFailure?.({ runId: request.runId, error: "DB persist failed for completed model call" }); });
         }
