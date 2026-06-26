@@ -1,6 +1,14 @@
 import { Graphics } from "pixi.js";
-import { GRID_COLOR, GRID_SPACING } from "../constants";
+import { GRID_DOT_RADIUS, GRID_SPACING, getCurrentWorldTheme } from "../constants";
 
+/**
+ * Renders the world grid as a dotted grid (§9.3.3). Each grid intersection
+ * is drawn as a small filled circle instead of solid lines, giving a
+ * lighter, more modern look that fades into the background.
+ *
+ * Task 13 (§9.5.4): the dot color is read from the active WorldTheme so the
+ * grid recolors when the theme is toggled.
+ */
 export class WorldGrid {
   private graphics?: Graphics;
 
@@ -8,16 +16,17 @@ export class WorldGrid {
     this.destroy();
 
     const g = new Graphics();
-    g.setStrokeStyle({ width: 1, color: GRID_COLOR });
+    const theme = getCurrentWorldTheme();
 
+    // Draw a small dot at each grid intersection. Using a single fill batch
+    // for all circles keeps this efficient even for large grids.
     for (let x = 0; x <= width; x += GRID_SPACING) {
-      g.moveTo(x, 0).lineTo(x, height);
+      for (let y = 0; y <= height; y += GRID_SPACING) {
+        g.circle(x, y, GRID_DOT_RADIUS);
+      }
     }
-    for (let y = 0; y <= height; y += GRID_SPACING) {
-      g.moveTo(0, y).lineTo(width, y);
-    }
+    g.fill({ color: theme.gridColor, alpha: 0.5 });
 
-    g.stroke();
     this.graphics = g;
     return g;
   }

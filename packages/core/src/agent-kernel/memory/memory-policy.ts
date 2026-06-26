@@ -113,6 +113,24 @@ export class DefaultMemoryPolicy implements MemoryPolicy {
       };
     }
 
+    // ── §7.6: Dedup for same (scope, scopeId, type) with close confidence ──
+    // Within a single run, consecutive tool turns produce near-identical
+    // observations. Skip writing if an existing memory has the same scope,
+    // scopeId, and type AND confidence within ±0.1 — it's a duplicate.
+    const duplicate = similar.find(
+      (memory) =>
+        memory.type === candidate.type &&
+        memory.scope === candidate.scope &&
+        (memory.scopeId ?? "") === (candidate.scopeId ?? "") &&
+        Math.abs((memory.confidence ?? 0.5) - (candidate.confidence ?? 0.5)) <= 0.1,
+    );
+    if (duplicate) {
+      return {
+        action: "reject",
+        reason: `duplicate of existing memory ${duplicate.id} (same scope/type, confidence within ±0.1)`,
+      };
+    }
+
     return { action: "create", reason: candidate.reason };
   }
 
