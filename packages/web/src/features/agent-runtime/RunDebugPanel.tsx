@@ -64,8 +64,20 @@ interface SpanRecord {
   error?: string;
   // §P0-3: Sub-phase timing metrics from SpanMetrics
   contextGroupAMs?: number;
+  summaryGenerationMs?: number;
+  summaryProcessingMs?: number;
+  historyProcessingMs?: number;
   memorySearchMs?: number;
+  sourceCompressionMs?: number;
+  tokenBudgetMs?: number;
+  contextAssemblyMs?: number;
   intentRouteMs?: number;
+  // §P0-3: Per-layer timing breakdown for intent routing
+  layer0FormMatchMs?: number;
+  layer1QueryEmbedMs?: number;
+  layer1SkillEmbedMs?: number;
+  layer2LlmMs?: number;
+  layer2TtftMs?: number;
   toolRetrievalMs?: number;
   firstTokenMs?: number;
   toolExecutionMs?: number;
@@ -106,6 +118,7 @@ interface ModelCallRecord {
   inputTokens: number;
   outputTokens: number;
   latencyMs: number;
+  firstTokenMs?: number;
   error?: unknown;
 }
 
@@ -584,8 +597,19 @@ function SpansTab({ spans }: { spans: SpanRecord[] }) {
   function phaseTimingLines(s: SpanRecord): string[] {
     const lines: string[] = [];
     if (s.contextGroupAMs !== undefined) lines.push(`context_group_a: ${fmtMs(s.contextGroupAMs)}`);
+    if (s.summaryGenerationMs !== undefined) lines.push(`summary_generation: ${fmtMs(s.summaryGenerationMs)}`);
+    if (s.summaryProcessingMs !== undefined) lines.push(`summary_processing: ${fmtMs(s.summaryProcessingMs)}`);
+    if (s.historyProcessingMs !== undefined) lines.push(`history_processing: ${fmtMs(s.historyProcessingMs)}`);
     if (s.memorySearchMs !== undefined) lines.push(`memory_search: ${fmtMs(s.memorySearchMs)}`);
+    if (s.sourceCompressionMs !== undefined) lines.push(`source_compression: ${fmtMs(s.sourceCompressionMs)}`);
+    if (s.tokenBudgetMs !== undefined) lines.push(`token_budget: ${fmtMs(s.tokenBudgetMs)}`);
+    if (s.contextAssemblyMs !== undefined) lines.push(`context_assembly: ${fmtMs(s.contextAssemblyMs)}`);
     if (s.intentRouteMs !== undefined) lines.push(`intent_route: ${fmtMs(s.intentRouteMs)}`);
+    if (s.layer0FormMatchMs !== undefined) lines.push(`  layer0_form_match: ${fmtMs(s.layer0FormMatchMs)}`);
+    if (s.layer1QueryEmbedMs !== undefined) lines.push(`  layer1_query_embed: ${fmtMs(s.layer1QueryEmbedMs)}`);
+    if (s.layer1SkillEmbedMs !== undefined) lines.push(`  layer1_skill_embed: ${fmtMs(s.layer1SkillEmbedMs)}`);
+    if (s.layer2LlmMs !== undefined) lines.push(`  layer2_llm: ${fmtMs(s.layer2LlmMs)}`);
+    if (s.layer2TtftMs !== undefined) lines.push(`  layer2_ttft: ${fmtMs(s.layer2TtftMs)}`);
     if (s.toolRetrievalMs !== undefined) lines.push(`tool_retrieval: ${fmtMs(s.toolRetrievalMs)}`);
     if (s.firstTokenMs !== undefined) lines.push(`first_token: ${fmtMs(s.firstTokenMs)}`);
     if (s.toolExecutionMs !== undefined) lines.push(`tool_exec: ${fmtMs(s.toolExecutionMs)}`);
@@ -722,6 +746,11 @@ function ModelsTab({ modelCalls }: { modelCalls: ModelCallRecord[] }) {
             <Text style={{ fontSize: 13 }}>
               ⏱ <Text strong>{fmtMs(mc.latencyMs)}</Text>
             </Text>
+            {mc.firstTokenMs != null && (
+              <Text style={{ fontSize: 13 }}>
+                🎯 TTFT <Text strong>{fmtMs(mc.firstTokenMs)}</Text>
+              </Text>
+            )}
           </Flex>
           {mc.error != null && (
             <Alert type="error" message={String(mc.error)} style={{ marginTop: 8 }} />

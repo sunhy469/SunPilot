@@ -628,7 +628,13 @@ Keep your response to the JSON object ONLY — no preamble, no explanation.`;
         // §P0-3: Phase latency metrics for observability
         latencyMs: Date.now() - ctxStart,
         contextGroupAMs: context.timing?.groupAParallelMs,
+        summaryGenerationMs: context.timing?.summaryGenerationMs,
+        summaryProcessingMs: context.timing?.summaryProcessingMs,
+        historyProcessingMs: context.timing?.historyProcessingMs,
         memorySearchMs: context.timing?.memorySearchMs,
+        sourceCompressionMs: context.timing?.sourceCompressionMs,
+        tokenBudgetMs: context.timing?.tokenBudgetMs,
+        contextAssemblyMs: context.timing?.contextAssemblyMs,
       },
     );
 
@@ -729,6 +735,12 @@ Keep your response to the JSON object ONLY — no preamble, no explanation.`;
         embeddingTopScore: intent.trace?.embeddingTopScore,
         embeddingCandidateCount: intent.trace?.embeddingCandidateCount,
         formMatch: intent.trace?.formMatch,
+        // §P0-3: Per-layer timing breakdown for intent routing
+        layer0FormMatchMs: intent.trace?.layer0FormMatchMs,
+        layer1QueryEmbedMs: intent.trace?.layer1QueryEmbedMs,
+        layer1SkillEmbedMs: intent.trace?.layer1SkillEmbedMs,
+        layer2LlmMs: intent.trace?.layer2LlmMs,
+        layer2TtftMs: intent.trace?.layer2TtftMs,
       },
     );
 
@@ -987,7 +999,11 @@ Keep your response to the JSON object ONLY — no preamble, no explanation.`;
           observation: toolCalls.length > 0
             ? { runId, toolCalls, artifacts, summary: toolCalls.map((t) => t.summary).join("\n") }
             : undefined,
-          forceSummary: tokenRatio > 0.4 || toolCalls.length >= 15,
+          // Trigger summary every ~20 messages (pure-chat convos never hit
+          // token/tool thresholds). The memory writer's extractCandidates
+          // will generate a conversation_summary that replaces old history.
+          forceSummary: tokenRatio > 0.4 || toolCalls.length >= 15
+            || context.messages.length >= 20,
         });
       } catch (err) {
         // Memory write failed even after retries — logged by MemoryRetryWrapper

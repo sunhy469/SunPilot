@@ -238,7 +238,7 @@ export class DefaultMemoryWriter {
     // produce tool calls — without this, "你好" + 52 messages never
     // summarizes because none of the original 3 triggers fire.
     const shouldSummarizeByMessageCount =
-      input.context.messages.length >= 30 && !input.observation;
+      input.context.messages.length >= 20 && !input.observation;
     const shouldSummarize =
       (input.observation &&
         (input.reflection?.goalAchieved ||
