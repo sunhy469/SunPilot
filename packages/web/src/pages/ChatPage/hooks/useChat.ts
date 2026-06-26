@@ -343,7 +343,7 @@ function assistantMessageReducer(
       conversationId?: string;
       messageId: string;
       content: string;
-      parts: Array<Record<string, unknown>>;
+      parts?: Array<Record<string, unknown>>;
       cards?: Array<{
         type: string;
         title?: import("../../../rich-cards/types").RichTextValue;
@@ -351,12 +351,16 @@ function assistantMessageReducer(
         data: Record<string, unknown>;
       }>;
     };
-    const completedParts = normalizeCompletedAssistantParts(
-      completedParams.parts,
-    );
 
     // Idempotent: if message already completed with same content, skip to avoid re-render
     const existing = items.find((m) => m.id === completedParams.messageId);
+    const completedParts = normalizeCompletedAssistantParts(
+      resolveCompletedAssistantParts(
+        completedParams.parts,
+        existing,
+        completedParams.content,
+      ),
+    );
     if (
       existing &&
       existing.status === "completed" &&
@@ -465,6 +469,33 @@ function normalizeCompletedAssistantParts(
     }
     return part as unknown as AssistantMessagePart;
   });
+}
+
+function resolveCompletedAssistantParts(
+  incomingParts: Array<Record<string, unknown>> | undefined,
+  existing: ChatMessage | undefined,
+  content: string,
+): Array<Record<string, unknown>> {
+  if (Array.isArray(incomingParts)) return incomingParts;
+
+  const existingParts = existing?.parts?.filter(
+    (part) => part.id !== "__local_pending",
+  );
+  if (existingParts && existingParts.length > 0) {
+    return existingParts as unknown as Array<Record<string, unknown>>;
+  }
+
+  if (content.trim().length === 0) return [];
+  return [
+    {
+      id: "final_text",
+      type: "text",
+      content,
+      source: "model",
+      status: "completed",
+      createdAt: new Date().toISOString(),
+    },
+  ];
 }
 
 function findActiveAssistantMessageIndex(messages: ChatMessage[]): number {
@@ -957,7 +988,15 @@ export function useChat(
         }
       }
       if (
-        method === "agent.run.completed" ||
+        method === "agent.run.completed"
+      ) {
+        activeRunIdRef.current = null;
+        setActiveRunId(null);
+        // §P0: Clear stale errors when a run completes successfully.
+        // Prevents "result is correct but page still shows error" mismatch.
+        setError?.("");
+      }
+      if (
         method === "agent.run.failed" ||
         method === "agent.run.cancelled" ||
         method === "agent.run.interrupted"
@@ -988,7 +1027,7 @@ export function useChat(
         return;
       }
     },
-    [conversationId, setConversationId, setMessages],
+    [conversationId, setConversationId, setMessages, setError],
   );
 
   const appendAssistantActivity = useCallback(
@@ -1401,6 +1440,10 @@ export function useChat(
   useEffect(() => {
     if (!conversationId) return;
     let cancelled = false;
+    // Reset replay state when switching conversations so events from the
+    // new conversation are replayed from scratch.
+    seenEventIdsRef.current.clear();
+    lastSequenceRef.current = 0;
     void (async () => {
       try {
         const replay = await replayConversationEvents(

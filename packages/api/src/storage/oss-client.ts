@@ -46,6 +46,10 @@ function uriEncode(value: string): string {
     .replace(/[!'()*]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
 }
 
+function canonicalResourcePath(bucket: string, key: string): string {
+  return `/${uriEncode(bucket)}/${uriEncode(key)}`;
+}
+
 export class OssClient {
   private readonly config: OssConfig;
   private readonly signatureVersion: SignatureVersion;
@@ -176,7 +180,7 @@ export class OssClient {
 
     const canonicalRequest = [
       "PUT",
-      `/${uriEncode(key)}`,
+      canonicalResourcePath(this.config.bucket, key),
       canonicalQueryString,
       `host:${host}\n`,
       "host",
@@ -214,7 +218,7 @@ export class OssClient {
 
     const canonicalRequest = [
       method,
-      `/${uriEncode(key)}`,
+      canonicalResourcePath(this.config.bucket, key),
       "",
       `host:${host}\n`,
       "host",
