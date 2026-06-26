@@ -288,12 +288,15 @@ export class AgentLoopEngine {
         });
       }
 
-      // Get pre-inference result (may have already been consumed inside
-      // buildContextAndIntent — this is a no-op if it resolved there).
-      // §P3 opt: Increased grace timeout to 1500ms so pre-inference has
-      // enough time to complete before we need it for tool decisions.
+      // §6.6: Get pre-inference result for tool hints. This is the SINGLE
+      // place that may wait for pre-inference — and only with a short grace
+      // period (200ms) so we don't block decideTools significantly. By this
+      // point context building + intent routing have completed, so
+      // pre-inference is very likely already resolved.
+      // §3.2: If pre-inference still isn't ready, we proceed WITHOUT tool
+      // hints rather than blocking the pipeline.
       const preliminary = preliminaryPromise
-        ? await racePreliminaryWithTimeout(preliminaryPromise, 1500)
+        ? await racePreliminaryWithTimeout(preliminaryPromise, 200)
         : undefined;
 
       // §P1-1: Update progress status when entering planning
@@ -467,17 +470,24 @@ export class AgentLoopEngine {
 
   /** Build a minimal system prompt for the pre-inference LLM call.
    *  §P2: Changed from natural language acknowledgment to structured JSON
-   *  hint — avoids generating useless text and produces parseable tool hints. */
+   *  hint — avoids generating useless text and produces parseable tool hints.
+   *  §3.3: Expanded categories to cover diagnostics, automation, and
+   *  artifact_generation so more queries can skip Layer 2 LLM routing. */
   private buildPreliminarySystemPrompt(): string {
     return `You are SunPilot's internal router. Analyze the user message and respond with ONLY a JSON object containing routing hints. Do NOT produce natural language.
 
 Output format:
-{"intentCategory": "product_search"|"image_analysis"|"casual_chat"|"data_analysis"|"web_search"|"file_operation"|"unknown", "toolHints": [{"category": "product sourcing|image analysis|camera|data|web", "confidence": 0.0-1.0}], "isSimpleChat": true|false}
+{"intentCategory": "product_search"|"image_analysis"|"casual_chat"|"data_analysis"|"web_search"|"file_operation"|"diagnostics"|"automation"|"artifact_generation"|"unknown", "toolHints": [{"category": "product sourcing|image analysis|camera|data|web|diagnostics|automation|artifact", "confidence": 0.0-1.0}], "isSimpleChat": true|false}
 
 Rules:
 - "intentCategory": best-guess category of the user's request
 - "toolHints": up to 3 relevant tool categories with confidence scores
 - "isSimpleChat": true if this is clearly just conversation (greetings, thanks, small talk)
+
+Category guidance:
+- "diagnostics": troubleshooting, error analysis, system inspection
+- "automation": multi-step workflow execution, batch operations
+- "artifact_generation": creating documents, reports, code files, images
 
 Keep your response to the JSON object ONLY — no preamble, no explanation.`;
   }
@@ -506,6 +516,7 @@ Keep your response to the JSON object ONLY — no preamble, no explanation.`;
       // §P3: Map pre-inference intentCategory to AgentLoop intent type.
       // The pre-inference prompt categories are broader than the intent
       // router's categories — we need to bridge them.
+      // §3.3: Added diagnostics, automation, artifact_generation mappings.
       const intentTypeMap: Record<string, string> = {
         "casual_chat": "casual_chat",
         "product_search": "use_skill",
@@ -513,6 +524,9 @@ Keep your response to the JSON object ONLY — no preamble, no explanation.`;
         "data_analysis": "question_answering",
         "web_search": "question_answering",
         "file_operation": "file_operation",
+        "diagnostics": "diagnostics",
+        "automation": "automation_execution",
+        "artifact_generation": "artifact_generation",
         "unknown": "unknown",
       };
       const rawCategory = parsed.intentCategory ?? "unknown";
@@ -521,16 +535,20 @@ Keep your response to the JSON object ONLY — no preamble, no explanation.`;
       // Bump to 0.9 for casual_chat (very reliable) and 0.7 for unknown (less reliable).
       let intentConfidence: number;
       if (rawCategory === "casual_chat") intentConfidence = 0.9;
-      else if (rawCategory === "unknown") intentConfidence = 0.7;
+      else if (rawCategory === "unknown") intentConfidence = 0.6; // §3.1: < 0.7 to trigger Layer 2 fallback
       else intentConfidence = 0.8;
 
       // Tool hints (existing logic)
+      // §3.3: Added diagnostics, automation, artifact categories.
       const categoryToSkillMap: Record<string, string[]> = {
         "product sourcing": ["jaderoad:product.source.search1688"],
         "image analysis": ["image.analyze"],
         "data analysis": ["data.analyze"],
         "web search": ["web.search"],
         "file operation": ["filesystem.read", "filesystem.write"],
+        "diagnostics": ["shell.exec", "filesystem.read"],
+        "automation": ["shell.exec", "filesystem.write"],
+        "artifact": ["filesystem.write"],
       };
       const hints = (parsed.toolHints ?? [])
         .filter((h: { confidence: number }) => h.confidence >= 0.5)
@@ -614,24 +632,27 @@ Keep your response to the JSON object ONLY — no preamble, no explanation.`;
       },
     );
 
-    // §P3 opt: After context is built, await the pre-inference promise
-    // with a timeout. If it completed during context building (common case),
-    // this returns instantly. Otherwise wait up to 1500ms. The pre-inference
-    // result lets us skip the main IntentRouter Layer 2 LLM call.
+    // §3.2/§6.1: Pre-inference RACE — do NOT block on pre-inference here.
+    // Pre-inference runs concurrently with context building. By the time
+    // context is built, it MAY have resolved. We do a non-blocking peek
+    // (0ms race): if it's ready, use it to skip Layer 2; if not, proceed
+    // with the full IntentRouter.route() without waiting. This ensures
+    // pre-inference never adds latency to the critical path.
     let preInferenceResult: { intentType?: string; intentConfidence?: number } | undefined = preInference;
     if (preInferencePromise) {
       const prelimStart = Date.now();
-      const resolved = await racePreliminaryWithTimeout(preInferencePromise, 1500);
+      // §3.2: Non-blocking peek — resolves immediately with undefined if
+      // pre-inference hasn't completed yet.
+      const resolved = await peekResolvedPromise(preInferencePromise);
       if (resolved) {
         preInferenceResult = {
           intentType: resolved.intentType,
           intentConfidence: resolved.intentConfidence,
         };
-        // §P3: Track pre-inference timing for observability
         if (this.deps.traceManager) {
           const waitMs = Date.now() - prelimStart;
           const { endSpan } = this.deps.traceManager.startSpan(runId, "pre_inference_await");
-          endSpan("pre_inference_resolved", {
+          endSpan("pre_inference_resolved_inline", {
             latencyMs: waitMs,
             preInferenceLatencyMs: waitMs,
             preInferenceIntentType: preInferenceResult.intentType,
@@ -639,13 +660,14 @@ Keep your response to the JSON object ONLY — no preamble, no explanation.`;
           });
         }
       } else {
-        // §P3: Pre-inference timed out — track as miss
+        // §3.2: Pre-inference not yet ready — record as "skipped" so
+        // operators can see how often pre-inference misses the window.
         if (this.deps.traceManager) {
           const waitMs = Date.now() - prelimStart;
           const { endSpan } = this.deps.traceManager.startSpan(runId, "pre_inference_await");
-          endSpan("pre_inference_timeout", {
+          endSpan("pre_inference_not_ready", {
             latencyMs: waitMs,
-            preInferenceTimeoutMs: 1500,
+            preInferenceTimeoutMs: 0,
           });
         }
       }
@@ -2164,4 +2186,21 @@ async function racePreliminaryWithTimeout<T>(
   } finally {
     if (timer) clearTimeout(timer);
   }
+}
+
+/**
+ * §3.2: Non-blocking peek at a promise — returns the resolved value
+ * immediately if the promise has already settled, or `undefined` if it's
+ * still pending. Used to check pre-inference availability WITHOUT adding
+ * latency to the critical path.
+ *
+ * Implementation: races the primary promise against a microtask-deferred
+ * `undefined`. If the primary is already settled, it wins the race in the
+ * same microtask; otherwise the deferred `undefined` resolves first.
+ */
+async function peekResolvedPromise<T>(primary: Promise<T>): Promise<T | undefined> {
+  return Promise.race([
+    primary,
+    Promise.resolve().then(() => undefined as T | undefined),
+  ]);
 }

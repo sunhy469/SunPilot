@@ -299,8 +299,53 @@ export function createAgentLoopService(deps: {
   // preference-conflict (§P0 of context optimization).
   const staleDetector = new SummaryStaleDetector();
 
+  // §7.3: Forward-reference holder for the early summary generator.
+  // ContextBuilder needs to trigger summary generation BEFORE the full
+  // AgentContext is built (so the current request benefits from
+  // compaction). But MemoryWriter is constructed later in this file.
+  // We declare a mutable holder here and bind it after MemoryWriter
+  // is created. The closure passed into ContextBuilderDeps reads from
+  // this holder at call time.
+  let earlySummaryGenerator:
+    | ((input: {
+        conversationId: string;
+        runId: string;
+        userId?: string;
+        messages: Array<{
+          id: string;
+          role: string;
+          content: string;
+          createdAt: string;
+        }>;
+      }) => Promise<void>)
+    | undefined;
+
   const contextBuilder = new ContextBuilder({
     staleDetector,
+    // §7.4: LLM-based memory summarizer for high-value memories
+    // (user_preference, project_profile). Uses the reflection model
+    // (lightweight) to compress long memories while preserving semantics.
+    summarizeMemory: async (content: string, maxChars: number) => {
+      let summary = "";
+      for await (const chunk of reflectionLlm.streamChat({
+        messages: [
+          {
+            role: "system",
+            content: `Summarize the following memory content in under ${maxChars} characters. Preserve key facts, preferences, and decisions. Output only the summary, no preamble.`,
+          },
+          { role: "user", content },
+        ],
+      })) {
+        summary += chunk.delta;
+      }
+      return summary.trim();
+    },
+    // §7.3: Wired after MemoryWriter construction below.
+    generateSummaryIfNeeded: async (input) => {
+      if (earlySummaryGenerator) {
+        await earlySummaryGenerator(input);
+      }
+    },
     listMessages: async (conversationId, limit) => {
       const messages =
         await deps.database.messages.listByConversationId(conversationId);
@@ -662,6 +707,84 @@ export function createAgentLoopService(deps: {
     maxRetries: 2,
     baseDelayMs: 500,
   });
+
+  // §7.3: Bind the early summary generator. ContextBuilder invokes this
+  // when it detects a long conversation (≥30 messages) with no existing
+  // summary, so the current request benefits from compaction instead of
+  // waiting for the next turn. We construct a minimal AgentContext +
+  // RoutedIntent so writeFromTurn's §7.1 pure-chat summary path fires.
+  earlySummaryGenerator = async (input) => {
+    // Skip the most recent user message — it's the current turn that
+    // triggered this request and shouldn't be summarized yet.
+    const historyMessages = input.messages.slice(0, -1);
+    if (historyMessages.length < 30) return;
+
+    const persona =
+      deps.systemPrompt ??
+      "You are SunPilot, a concise and capable local agent assistant.";
+    const stubContext: import("@sunpilot/core").AgentContext = {
+      runId: input.runId,
+      conversationId: input.conversationId,
+      userId: input.userId,
+      system: {
+        persona,
+        rules: [
+          "Always respond in the same language as the user.",
+          "Use tools when they help complete the task more effectively.",
+          "Cite memory sources when using remembered information.",
+        ],
+        safety: [
+          "Never expose secrets, API keys, or passwords in responses.",
+          "Never execute destructive commands without explicit user approval.",
+        ],
+      },
+      currentMessage: {
+        id: input.messages[input.messages.length - 1]!.id,
+        content: input.messages[input.messages.length - 1]!.content,
+        attachments: [],
+      },
+      messages: historyMessages.map((m) => ({
+        role: (m.role === "assistant" ? "assistant" : "user") as
+          | "user"
+          | "assistant",
+        content: m.content,
+      })),
+      memories: [],
+      artifacts: [],
+      toolResults: [],
+      availableSkills: [],
+      limits: {
+        maxTokens: 128_000,
+        reservedForOutput: 16_000,
+        usedTokensEstimate: 0,
+      },
+      tokenEstimate: 0,
+    };
+    const stubIntent: import("@sunpilot/core").RoutedIntent = {
+      type: "casual_chat",
+      confidence: 0.6,
+      requiresPlanning: false,
+      requiresTool: false,
+      requiresApproval: false,
+      riskLevel: "low",
+      candidateSkills: [],
+      reason: "early-summary trigger (pure-chat)",
+    };
+    await memoryWriter.writeFromTurn({
+      input: {
+        runId: input.runId,
+        conversationId: input.conversationId,
+        userMessageId: input.messages[input.messages.length - 1]!.id,
+        userId: input.userId,
+        message: input.messages[input.messages.length - 1]!.content,
+        mode: "chat",
+        client: { source: "web" },
+      },
+      context: stubContext,
+      intent: stubIntent,
+      forceSummary: true,
+    });
+  };
 
   // ── Safety Hardening (§3, §4 of architecture next steps) ───────
   // PromptInjectionDetector — scans untrusted content for injection patterns.

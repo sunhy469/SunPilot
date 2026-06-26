@@ -7,14 +7,18 @@
   flex-direction: column;
   gap: 4px;
   z-index: 10;
-  background: rgba(255, 255, 255, 0.85);
+  background: rgba(255, 255, 255, 0.7);
   border-radius: 12px;
   padding: 6px;
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
-  backdrop-filter: blur(4px);
+  // §9.4.1: frosted glass effect — stronger blur for the glassy look.
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  border: 1px solid rgba(255, 255, 255, 0.5);
 }
 
 .world-floating-dock__btn {
+  position: relative;
   width: 36px;
   height: 36px;
   border-radius: 8px;
@@ -28,4 +32,85 @@
     background: #f3f4f6;
     color: #374151;
   }
+
+  // §9.4.1: active panel highlight — a small dot at the bottom-center
+  // indicates which panel is currently open.
+  &::after {
+    content: "";
+    position: absolute;
+    bottom: 3px;
+    left: 50%;
+    transform: translateX(-50%) scale(0);
+    width: 4px;
+    height: 4px;
+    border-radius: 50%;
+    background: #2563eb;
+    opacity: 0;
+    transition: transform 0.15s ease, opacity 0.15s ease;
+  }
+
+  &--active {
+    color: #2563eb;
+    background: rgba(37, 99, 235, 0.08);
+
+    &:hover {
+      background: rgba(37, 99, 235, 0.14);
+      color: #1d4ed8;
+    }
+
+    &::after {
+      transform: translateX(-50%) scale(1);
+      opacity: 1;
+    }
+  }
+
+  // §9.4.1: sleep/wake button reflects being status.
+  // Sleeping → calm indigo (resting); awake → emerald (active).
+  &--sleeping {
+    color: #6366f1;
+
+    &:hover {
+      background: rgba(99, 102, 241, 0.12);
+      color: #4f46e5;
+    }
+  }
+
+  &--awake {
+    color: #10b981;
+
+    &:hover {
+      background: rgba(16, 185, 129, 0.12);
+      color: #059669;
+    }
+  }
 }
+
+// Task 17 (§9.4.5): on mobile (<768px) the dock switches from a vertical
+// rail on the right to a horizontal bar pinned to the bottom center, so it
+// stays reachable on narrow viewports.
+@media (max-width: 767px) {
+  .world-floating-dock {
+    right: 50%;
+    left: 50%;
+    top: auto;
+    bottom: 16px;
+    transform: translateX(-50%);
+    flex-direction: row;
+    gap: 2px;
+    padding: 4px;
+  }
+
+  // Move the active-panel dot to the top of the button (was bottom) so it
+  // reads correctly in the horizontal layout.
+  .world-floating-dock__btn {
+    &::after {
+      bottom: auto;
+      top: 3px;
+    }
+
+    &--active::after {
+      transform: translateX(-50%) scale(1);
+    }
+  }
+}
+

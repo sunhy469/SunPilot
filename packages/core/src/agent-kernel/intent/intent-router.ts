@@ -248,7 +248,13 @@ export class IntentRouter implements IntentRouterInterface {
     const message = context.currentMessage.content;
 
     // Embed user query once
+    // §4.4: Cache the query embedding so ToolRetriever can reuse it
+    // without a duplicate embedding API call.
+    const cache = this.deps.skillEmbeddingCache;
     const queryEmbedding = await embeddingService.embed(message);
+    if (cache) {
+      cache.setQueryEmbedding(message, queryEmbedding);
+    }
 
     // Embed each skill using rich text: name + description + category.
     // Category adds semantic context (e.g. "web" vs "filesystem") that
@@ -258,7 +264,6 @@ export class IntentRouter implements IntentRouterInterface {
     // §P1-2: Use shared cache when available to avoid duplicate embeddings.
     const MAX_EMBEDDING_CONCURRENCY = 8;
     const scored: Array<{ skillId: string; similarity: number }> = [];
-    const cache = this.deps.skillEmbeddingCache;
 
     // Process skills in batches to limit concurrency
     for (let i = 0; i < skills.length; i += MAX_EMBEDDING_CONCURRENCY) {
@@ -364,17 +369,19 @@ export class IntentRouter implements IntentRouterInterface {
     if (!this.deps.llm) return null;
 
     const message = context.currentMessage.content;
-    const skillList = context.availableSkills
-      .map((s) => `- ${s.id}: ${s.name} — ${s.description}`)
-      .join("\n");
 
-    // Build embedding hints section when available
-    let hintsSection = "";
+    // §3.4: When embedding hints provide Top-5 candidates, only send those
+    // instead of the full catalog. The LLM can still pick any other skill
+    // (we tell it so), but showing only the most relevant reduces prompt
+    // tokens and helps the LLM focus.
     const hintIds = embeddingHints?.candidateSkills?.length
       ? embeddingHints.candidateSkills
       : [];
+
+    let skillCatalogSection: string;
     if (hintIds.length > 0) {
-      const hintDetails = hintIds
+      // Show only the Top-5 candidates (hintIds is already Top-5 from Layer 1)
+      const topSkills = hintIds
         .map((id) => {
           const skill = context.availableSkills.find((s) => s.id === id);
           return skill
@@ -382,20 +389,21 @@ export class IntentRouter implements IntentRouterInterface {
             : `- ${id}`;
         })
         .join("\n");
-      const hintSource =
-        this.deps.embeddingService?.hasRealProvider
-          ? "semantic embedding (real)"
-          : "lexical embedding (fallback — treat as weak signal)";
-      hintsSection = `Suggested candidates (from ${hintSource}, similarity ${(embeddingHints?.confidence ?? 0).toFixed(3)}):
-${hintDetails}
+      skillCatalogSection = `Top candidate skills (from semantic matching):
+${topSkills}
 
-`;
+You may also pick any other skill from the full catalog if the candidates above are not relevant.`;
+    } else {
+      const skillList = context.availableSkills
+        .map((s) => `- ${s.id}: ${s.name} — ${s.description}`)
+        .join("\n");
+      skillCatalogSection = `Full skill catalog:
+${skillList || "(none)"}`;
     }
 
-    const prompt = `Full skill catalog:
-${skillList || "(none)"}
+    const prompt = `${skillCatalogSection}
 
-${hintsSection}Classify the user's intent into EXACTLY ONE of these categories:
+Classify the user's intent into EXACTLY ONE of these categories:
 - casual_chat: greetings, small talk, thanks
 - question_answering: asking for information or explanation
 - project_analysis: reviewing or analyzing code/project structure
