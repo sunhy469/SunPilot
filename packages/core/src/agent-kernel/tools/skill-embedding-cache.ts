@@ -23,6 +23,8 @@ export class SkillEmbeddingCache {
   // embedding for its Layer 4 semantic scoring. Without this cache, the
   // query gets re-embedded on every ToolRetriever.retrieve() call,
   // wasting one embedding API call per turn.
+  /** §B7: Maximum query cache entries before LRU eviction kicks in. */
+  private static readonly QUERY_CACHE_MAX_SIZE = 100;
   private queryCache = new Map<string, number[]>();
 
   constructor(private readonly embeddingService: EmbeddingService) {}
@@ -128,6 +130,14 @@ export class SkillEmbeddingCache {
    * computes the query embedding during Layer 1 matching.
    */
   setQueryEmbedding(query: string, embedding: number[]): void {
+    // LRU eviction: when at capacity and this is a new key, remove oldest entry.
+    if (
+      this.queryCache.size >= SkillEmbeddingCache.QUERY_CACHE_MAX_SIZE &&
+      !this.queryCache.has(query)
+    ) {
+      const oldestKey = this.queryCache.keys().next().value;
+      if (oldestKey !== undefined) this.queryCache.delete(oldestKey);
+    }
     this.queryCache.set(query, embedding);
   }
 
@@ -136,7 +146,12 @@ export class SkillEmbeddingCache {
    * ToolRetriever calls this before computing its own embedding.
    */
   getQueryEmbedding(query: string): number[] | undefined {
-    return this.queryCache.get(query);
+    const value = this.queryCache.get(query);
+    if (value === undefined) return undefined;
+    // Move to end (most recently used) by deleting + re-inserting.
+    this.queryCache.delete(query);
+    this.queryCache.set(query, value);
+    return value;
   }
 
   /** Clear the query embedding cache (e.g., between unrelated runs). */
