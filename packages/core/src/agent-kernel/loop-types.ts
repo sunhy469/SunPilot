@@ -686,6 +686,10 @@ export interface ToolDecisionEngine {
         reason: string;
         argumentsHint?: Record<string, unknown>;
       }>;
+      /** Skill IDs pre-matched by ToolSelector. When provided,
+       *  executeStreaming() uses these directly instead of
+       *  independently re-retrieving tools. */
+      toolSkillIds?: string[];
       /** Optional stream for content-block parts emission (§Phase 3). */
       stream?: IAssistantMessageStream;
     },

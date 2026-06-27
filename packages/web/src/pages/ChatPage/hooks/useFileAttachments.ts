@@ -1,13 +1,10 @@
 import { useState, useCallback, useEffect, useRef } from "react";
 import { message } from "antd";
 import type { UploadFile } from "antd/es/upload";
-import { uploadFilesToAttachmentRefs, isImageType } from "../../../features/chat/attachment-utils";
+import { uploadFilesToAttachmentRefs } from "../../../features/chat/attachment-utils";
 import type { AttachmentRef } from "../../../features/chat/types";
 import { useOssUpload } from "./useOssUpload";
 import { useDragDrop } from "./useDragDrop";
-
-/** Max file size (bytes) for dataUrl fallback. Larger files must use OSS URL. */
-const MAX_DATAURL_BYTES = 4 * 1024 * 1024; // 4 MB
 
 // W3: attachment upload limits — kept in sync with ChatComposer's `accept`.
 const MAX_FILE_SIZE_BYTES = 50 * 1024 * 1024; // 50 MB per file
@@ -28,21 +25,6 @@ function isAllowedFile(file: File): boolean {
   const dotIndex = file.name.lastIndexOf(".");
   const ext = dotIndex >= 0 ? file.name.slice(dotIndex + 1).toLowerCase() : "";
   return ALLOWED_EXTENSIONS.includes(ext);
-}
-
-/**
- * Read a File as a base64 data URL.
- * Returns undefined on failure or if the file exceeds the size limit.
- */
-function readFileAsDataUrl(file: File): Promise<string | undefined> {
-  if (file.size > MAX_DATAURL_BYTES) return Promise.resolve(undefined);
-  if (!isImageType(file)) return Promise.resolve(undefined);
-  return new Promise((resolve) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(reader.result as string | undefined);
-    reader.onerror = () => resolve(undefined);
-    reader.readAsDataURL(file);
-  });
 }
 
 export interface FileAttachmentsState {
@@ -121,47 +103,31 @@ export function useFileAttachments() {
           try {
             const { url, key } = await uploadFile(file, entry.uid);
             if (!mountedRef.current) return;
-            // §P0: When OSS returns no URL (or OSS is unavailable), generate
-            // a dataUrl fallback for small images so the backend can still
-            // use the image for search/lookup operations.
-            let dataUrl: string | undefined;
-            if (!url && isImageType(file)) {
-              dataUrl = await readFileAsDataUrl(file);
-            }
+            if (!url) throw new Error("OSS upload completed without a public URL");
             setFiles((prev) =>
               prev.map((f) =>
                 f.uid === entry.uid
                   ? {
                       ...f,
                       status: "done",
-                      url: url || undefined,
-                      // Prefer the OSS URL for the thumbnail so it survives
-                      // page reload; keep the local blob URL as fallback.
-                      thumbUrl: url || f.thumbUrl,
-                      response: { key, dataUrl },
+                      url,
+                      thumbUrl: url,
+                      response: { key },
                     }
                   : f,
               ),
             );
           } catch {
             if (!mountedRef.current) return;
-            // §P0: On upload failure, still try to generate a dataUrl for
-            // small images so the user can at least search by image.
-            let dataUrl: string | undefined;
-            if (isImageType(file)) {
-              dataUrl = await readFileAsDataUrl(file);
-            }
             setFiles((prev) =>
               prev.map((f) =>
                 f.uid === entry.uid
                   ? {
                       ...f,
-                      status: dataUrl ? "done" : "error",
+                      status: "error",
                       url: undefined,
-                      // Use the dataUrl as thumbUrl so the image still shows
-                      // in the thumbnail strip even when OSS is unavailable.
-                      thumbUrl: dataUrl || f.thumbUrl,
-                      response: dataUrl ? { dataUrl } : undefined,
+                      thumbUrl: undefined,
+                      response: undefined,
                     }
                   : f,
               ),
@@ -196,24 +162,11 @@ export function useFileAttachments() {
   // ── Remove / clear ───────────────────────────────────────────────
 
   const removeFile = useCallback((uid: string) => {
-    setFiles((prev) => {
-      const file = prev.find((f) => f.uid === uid);
-      if (file?.thumbUrl?.startsWith("blob:")) {
-        URL.revokeObjectURL(file.thumbUrl);
-      }
-      return prev.filter((f) => f.uid !== uid);
-    });
+    setFiles((prev) => prev.filter((f) => f.uid !== uid));
   }, []);
 
   const clearFiles = useCallback(() => {
-    setFiles((prev) => {
-      for (const f of prev) {
-        if (f.thumbUrl?.startsWith("blob:")) {
-          URL.revokeObjectURL(f.thumbUrl);
-        }
-      }
-      return [];
-    });
+    setFiles([]);
   }, []);
 
   // ── Convert for sending ──────────────────────────────────────────

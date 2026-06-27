@@ -275,6 +275,47 @@ describe("JsonRpcRouter", () => {
     ]);
   });
 
+  test("subscribes to future conversation events without replaying history", async () => {
+    const db = new InMemoryDatabaseContext();
+    await db.events.append({
+      id: "evt_history",
+      runId: "run_1",
+      conversationId: "conv_1",
+      type: "agent.message.completed",
+      payload: { messageId: "msg_1" },
+      createdAt: "2026-06-06T00:00:00.000Z",
+    });
+    const notifications: unknown[] = [];
+    const ctx = createContext(notifications);
+    const router = new JsonRpcRouter({
+      database: db,
+      getChatAgent: async () => ({}) as any,
+    });
+
+    await expect(
+      router.handle(
+        {
+          method: "conversation.subscribe",
+          params: {
+            conversationId: "conv_1",
+            replayMissedEvents: false,
+          },
+        },
+        ctx,
+      ),
+    ).resolves.toEqual({
+      result: {
+        conversationId: "conv_1",
+        subscribed: true,
+        replayed: 0,
+        latestSequence: 0,
+      },
+    });
+
+    expect(ctx.conversationSubscriptions.has("conv_1")).toBe(true);
+    expect(notifications).toEqual([]);
+  });
+
   test("surfaces Agent run.cancel errors without falling back to the legacy runtime", async () => {
     const router = new JsonRpcRouter({
       database: new InMemoryDatabaseContext(),

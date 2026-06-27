@@ -39,6 +39,8 @@ export const chatStopSchema = z.object({
 export const conversationSubscribeSchema = z.object({
   conversationId: z.string().min(1),
   lastSeenSequence: z.number().int().min(0).optional(),
+  /** False when opening persisted history: subscribe to future events only. */
+  replayMissedEvents: z.boolean().default(true),
 });
 
 export const conversationUnsubscribeSchema = z.object({

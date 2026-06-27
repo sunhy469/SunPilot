@@ -112,27 +112,10 @@ export class RunPreparationCoordinator {
           intentType: resolved.intentType,
           intentConfidence: resolved.intentConfidence,
         };
-        if (this.deps.traceManager) {
-          const waitMs = Date.now() - prelimStart;
-          const { endSpan } = this.deps.traceManager.startSpan(runId, "pre_inference_await");
-          endSpan("pre_inference_resolved_inline", {
-            latencyMs: waitMs,
-            preInferenceLatencyMs: waitMs,
-            preInferenceIntentType: preInferenceResult.intentType,
-            preInferenceConfidence: preInferenceResult.intentConfidence,
-          });
-        }
+        // Span removed — pre-inference timing already captured in preliminary-inference.ts
       } else {
-        // §3.2: Pre-inference not yet ready — record as "skipped" so
-        // operators can see how often pre-inference misses the window.
-        if (this.deps.traceManager) {
-          const waitMs = Date.now() - prelimStart;
-          const { endSpan } = this.deps.traceManager.startSpan(runId, "pre_inference_await");
-          endSpan("pre_inference_not_ready", {
-            latencyMs: waitMs,
-            preInferenceTimeoutMs: 0,
-          });
-        }
+        // §3.2: Pre-inference not yet ready — proceed without it.
+        // Span removed — pre-inference timing already captured in preliminary-inference.ts
       }
     }
 
