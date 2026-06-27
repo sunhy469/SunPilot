@@ -221,7 +221,7 @@ export function ChatComposer({
 
     // §Phase 2b: Validate image attachments have usable refs before auto-send
     const validation = validateAttachmentsForSend(files);
-    if (validation.missingImageRef) {
+    if (validation.hasError || validation.missingImageRef) {
       setUploadFailed(true);
       onSendStateChange?.("failed");
       return;
@@ -252,11 +252,10 @@ export function ChatComposer({
       return;
     }
 
-    // §Phase 2b: Send gate — validate image attachments have usable references.
-    // Block send when image files exist but lack both url and dataUrl.
-    // This prevents the "UI shows image but backend gets nothing" illusion.
+    // Send gate: every attachment must finish OSS upload successfully, and
+    // images must have a public OSS URL before the message can be sent.
     const validation = validateAttachmentsForSend(files);
-    if (validation.missingImageRef) {
+    if (validation.hasError || validation.missingImageRef) {
       setUploadFailed(true);
       onSendStateChange?.("failed");
       return;

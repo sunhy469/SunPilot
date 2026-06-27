@@ -94,7 +94,7 @@ export interface NormalizedToolResult {
  */
 export const INTENT_SKILL_MAP: Record<string, string[]> = {
   casual_chat: [],
-  question_answering: [],
+  question_answering: ["filesystem.read"],
   project_analysis: ["filesystem.read"],
   code_generation: ["filesystem.write", "filesystem.read"],
   code_modification: ["filesystem.read", "filesystem.write"],

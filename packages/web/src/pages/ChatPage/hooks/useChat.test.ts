@@ -8,50 +8,7 @@ import type {
   ChatMessage,
   AssistantMessagePart,
 } from "../../../features/conversations/types";
-
-// History reconciliation remains local to useConversations; message-stream
-// state transitions above are imported from the production module.
-
-function mergeMessagesById(
-  localMessages: ChatMessage[],
-  serverMessages: ChatMessage[],
-): ChatMessage[] {
-  const serverById = new Map<string, ChatMessage>();
-  for (const msg of serverMessages) {
-    serverById.set(msg.id, msg);
-  }
-
-  const result: ChatMessage[] = [];
-  const seenIds = new Set<string>();
-
-  for (const local of localMessages) {
-    const serverVersion = serverById.get(local.id);
-    if (serverVersion) {
-      result.push(serverVersion);
-      seenIds.add(local.id);
-    } else if (
-      local.role === "assistant" &&
-      (local.status === "pending" || local.status === "streaming")
-    ) {
-      result.push(local);
-      seenIds.add(local.id);
-    } else if (local.conversationId === "pending") {
-      result.push(local);
-      seenIds.add(local.id);
-    } else {
-      result.push(local);
-      seenIds.add(local.id);
-    }
-  }
-
-  for (const server of serverMessages) {
-    if (!seenIds.has(server.id)) {
-      result.push(server);
-    }
-  }
-
-  return result;
-}
+import { mergeMessagesById } from "./conversation-message-merge";
 
 // ── Helper to create test messages ──
 
@@ -549,6 +506,31 @@ describe("assistantMessageReducer", () => {
 });
 
 describe("mergeMessagesById", () => {
+  test("preserves canonical interleaved history when local replay has assistants only", () => {
+    const serverUser = makeUserMessage({
+      id: "user_history",
+      createdAt: "2026-06-27T01:00:00.000Z",
+    });
+    const serverAssistant = makeStreamingAssistant({
+      id: "assistant_history",
+      content: "done",
+      status: "completed",
+      createdAt: "2026-06-27T01:00:01.000Z",
+    });
+    const localAssistant = { ...serverAssistant, content: "event replay" };
+
+    const result = mergeMessagesById(
+      [localAssistant],
+      [serverUser, serverAssistant],
+    );
+
+    expect(result.map((message) => message.role)).toEqual(["user", "assistant"]);
+    expect(result.map((message) => message.id)).toEqual([
+      "user_history",
+      "assistant_history",
+    ]);
+  });
+
   test("keeps local pending assistant when server has no match", () => {
     const local: ChatMessage[] = [
       makeUserMessage({ conversationId: "pending" }),

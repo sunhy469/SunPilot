@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, useRef } from "react";
+import { useState, useCallback } from "react";
 import { Flex, Button, Image, Typography, Spin } from "antd";
 import { FileOutlined, CloseOutlined, LoadingOutlined } from "@ant-design/icons";
 import type { UploadFile } from "antd/es/upload";
@@ -19,31 +19,11 @@ export interface AttachmentPreviewProps {
 export function AttachmentPreview({ files, onRemove }: AttachmentPreviewProps) {
   const [previewVisible, setPreviewVisible] = useState(false);
   const [previewSrc, setPreviewSrc] = useState("");
-  const mountedRef = useRef(true);
-  useEffect(() => () => { mountedRef.current = false; }, []);
 
   const handlePreview = useCallback((file: UploadFile) => {
-    // Prefer OSS URL, then antd preview, then our local blob thumbUrl.
-    const src = (file.url ?? file.preview ?? file.thumbUrl) as string | undefined;
-    if (src) {
-      setPreviewSrc(src);
+    if (file.url) {
+      setPreviewSrc(file.url);
       setPreviewVisible(true);
-      return;
-    }
-    if (file.originFileObj) {
-      const reader = new FileReader();
-      reader.onload = () => {
-        if (mountedRef.current) {
-          setPreviewSrc(reader.result as string);
-          setPreviewVisible(true);
-        }
-      };
-      reader.onerror = () => {
-        if (mountedRef.current) {
-          setPreviewSrc("");
-        }
-      };
-      reader.readAsDataURL(file.originFileObj);
     }
   }, []);
 
@@ -56,12 +36,14 @@ export function AttachmentPreview({ files, onRemove }: AttachmentPreviewProps) {
           const isUploading = file.status === "uploading";
 
           if (isImageType(file)) {
-            const thumbSrc = file.thumbUrl ?? file.url;
+            const thumbSrc = file.url;
             return (
               <Flex
                 key={file.uid}
                 className="chat-composer__attachment-card"
-                onClick={() => handlePreview(file)}
+                onClick={() => {
+                  if (!isUploading && file.url) handlePreview(file);
+                }}
                 style={{ position: "relative" }}
               >
                 {thumbSrc ? (
@@ -104,14 +86,19 @@ export function AttachmentPreview({ files, onRemove }: AttachmentPreviewProps) {
                     <Spin indicator={<LoadingOutlined style={{ fontSize: 20 }} spin />} />
                   </Flex>
                 ) : (
-                  <Image
-                    src={undefined}
-                    alt={file.name}
-                    width={72}
-                    height={72}
-                    style={{ borderRadius: 10, objectFit: "cover" }}
-                    preview={false}
-                  />
+                  <Flex
+                    align="center"
+                    justify="center"
+                    style={{
+                      width: 72,
+                      height: 72,
+                      borderRadius: 10,
+                      background: "var(--sp-surface-soft)",
+                      border: "1px solid var(--sp-border-soft)",
+                    }}
+                  >
+                    <FileOutlined style={{ fontSize: 22, color: "var(--sp-red)" }} />
+                  </Flex>
                 )}
                 <Button
                   type="text"

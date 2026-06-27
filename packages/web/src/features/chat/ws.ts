@@ -60,6 +60,7 @@ export function sendConversationSubscribe(
   socket: WebSocket,
   conversationId: string,
   lastSeenSequence?: number,
+  replayMissedEvents = true,
 ): string {
   const id = crypto.randomUUID();
   socket.send(
@@ -67,7 +68,7 @@ export function sendConversationSubscribe(
       jsonrpc: "2.0",
       id,
       method: "conversation.subscribe",
-      params: { conversationId, lastSeenSequence },
+      params: { conversationId, lastSeenSequence, replayMissedEvents },
     }),
   );
   return id;
