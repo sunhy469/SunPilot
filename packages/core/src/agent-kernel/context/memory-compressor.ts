@@ -97,10 +97,24 @@ export class MemoryCompressor {
       importance: number;
       createdAt: string;
     }>,
+    concurrency = 4,
   ): Promise<CompressedMemory[]> {
     const results: CompressedMemory[] = [];
-    for (const mem of memories) {
-      results.push(await this.compressOneAsync(mem));
+    for (let i = 0; i < memories.length; i += concurrency) {
+      const batch = memories.slice(i, i + concurrency);
+      const batchResults = await Promise.allSettled(
+        batch.map((mem) => this.compressOneAsync(mem)),
+      );
+      for (let j = 0; j < batchResults.length; j++) {
+        const r = batchResults[j]!;
+        if (r.status === "fulfilled") {
+          results.push(r.value);
+        } else {
+          // Fall back to synchronous compression on failure
+          const mem = batch[j]!;
+          results.push(this.compressOne(mem));
+        }
+      }
     }
     return results;
   }

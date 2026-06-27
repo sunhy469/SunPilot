@@ -359,4 +359,35 @@ describe("MemoryCompressor — LLM summarization (compressAsync)", () => {
     expect(result[0]!.compressed).toBe(true);
     expect(result[0]!.llmSummarized).toBeUndefined();
   });
+
+  test("processes in parallel batches respecting concurrency limit", async () => {
+    const callOrder: number[] = [];
+    // Each LLM summary takes 50ms; we track start order
+    const summarize = async (_content: string, _maxChars: number) => {
+      callOrder.push(Date.now());
+      await new Promise((r) => setTimeout(r, 20));
+      return "summary";
+    };
+
+    const compressor = new MemoryCompressor({
+      maxCharsPerMemory: 50,
+      summarize,
+      summarizeMinChars: 30,
+    });
+
+    const longContent = "This is a long content string that will be summarized. ".repeat(3);
+    const memories = Array.from({ length: 6 }, (_, i) =>
+      makeMem(String(i), longContent),
+    );
+
+    const start = Date.now();
+    // With concurrency 2, 6 memories → 3 batches → ~60ms total
+    const result = await compressor.compressAsync(memories, 2);
+    const elapsed = Date.now() - start;
+
+    expect(result).toHaveLength(6);
+    // Should have taken roughly 3 batches * 20ms each ≈ 60ms
+    // (vs 6 * 20ms = 120ms if serial)
+    expect(elapsed).toBeLessThan(100);
+  });
 });

@@ -4,7 +4,7 @@ import { dirname, join, resolve } from "node:path";
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import fastifyStatic from "@fastify/static";
-import Fastify from "fastify";
+import Fastify, { type FastifyReply } from "fastify";
 import { ZodError } from "zod";
 import {
   AgentService,
@@ -213,11 +213,13 @@ export async function createDaemon(options: DaemonOptions = {}) {
   let chatAgentInit: Promise<AgentService> | undefined;
   let modelRouterRef: { getStats(): { persistFailures: number; totalCalls: number; fallbackCount: number } } | undefined;
   let _updateMemory: ((id: string, input: { content?: string; title?: string; summary?: string; confidence?: number; importance?: number }) => Promise<{ id: string } | null>) | undefined;
+  let _skillEmbeddingCache: { invalidate(skillIds?: string[]): void } | undefined;
+  let _embeddingService: { invalidateCache(): void } | undefined;
   const getChatAgent = async (): Promise<AgentService> => {
     if (chatAgent) return chatAgent as AgentService;
     chatAgentInit ??= (async () => {
       const llmProvider = createDefaultLlmProvider();
-      const { service, modelRouter, updateMemory } = createAgentLoopService({
+      const { service, modelRouter, updateMemory, skillEmbeddingCache, embeddingService } = createAgentLoopService({
         database,
         skillRegistry,
         skillRunner,
@@ -229,6 +231,8 @@ export async function createDaemon(options: DaemonOptions = {}) {
       chatAgent = service;
       modelRouterRef = modelRouter;
       _updateMemory = updateMemory;
+      _skillEmbeddingCache = skillEmbeddingCache;
+      _embeddingService = embeddingService;
       return chatAgent as AgentService;
     })();
     return chatAgentInit;
@@ -310,7 +314,14 @@ export async function createDaemon(options: DaemonOptions = {}) {
     paths,
     getChatAgent,
     skills: {
-      reload: async () => skillRegistry.reload(),
+      reload: async () => {
+        const result = await skillRegistry.reload();
+        // Invalidate embedding caches so stale skill embeddings are
+        // recomputed on next access with the reloaded descriptions.
+        _skillEmbeddingCache?.invalidate();
+        _embeddingService?.invalidateCache();
+        return result;
+      },
       list: () => skillRegistry.list(),
       setEnabled: async (id: string, enabled: boolean) =>
         skillRegistry.setEnabled(id, enabled),
@@ -437,7 +448,50 @@ export async function createDaemon(options: DaemonOptions = {}) {
   const webDist = existsSync(workspaceWebDist)
     ? workspaceWebDist
     : packagedWebDist;
+  // ── Domain-based landing page for tradeagent.asia ─────────────────
+  // When accessed via the tradeagent.asia domain, serve the static
+  // landing page instead of the SPA. Other domains / localhost continue
+  // to serve the normal React app.
   if (existsSync(webDist)) {
+    const LANDING_DOMAIN = "tradeagent.asia";
+
+    // Helper: serve the SPA index.html
+    const serveSpaIndex = (reply: FastifyReply) => {
+      const indexPath = join(webDist, "index.html");
+      if (existsSync(indexPath)) {
+        const html = readFileSync(indexPath, "utf-8");
+        return reply.type("text/html").send(html);
+      }
+      return reply.callNotFound();
+    };
+
+    // GET / — landing page for tradeagent.asia, SPA otherwise.
+    // When ?app query param is present, skip the landing page so
+    // /sunpilot can redirect here and land on the normal SPA.
+    app.get("/", async (request, reply) => {
+      const host = request.hostname;
+      const isLandingDomain =
+        host === LANDING_DOMAIN || host?.endsWith("." + LANDING_DOMAIN);
+      const hasAppParam = "app" in (request.query as Record<string, unknown>);
+      if (isLandingDomain && !hasAppParam) {
+        const landingPath = join(webDist, "landing.html");
+        if (existsSync(landingPath)) {
+          const html = readFileSync(landingPath, "utf-8");
+          return reply.type("text/html").send(html);
+        }
+      }
+      return serveSpaIndex(reply);
+    });
+
+    // /sunpilot and /sunpilot/* — redirect to /?app so the SPA loads
+    // at the root path, bypassing the tradeagent.asia landing page.
+    app.get("/sunpilot", async (_request, reply) => {
+      return reply.redirect("/?app", 302);
+    });
+    app.get("/sunpilot/*", async (_request, reply) => {
+      return reply.redirect("/?app", 302);
+    });
+
     await app.register(fastifyStatic, { root: webDist, prefix: "/" });
   } else {
     app.get("/", async () => ({

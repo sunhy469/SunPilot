@@ -93,7 +93,13 @@ export function createAgentLoopService(deps: {
    *  Created internally if not provided. */
   liveEventBus?: AgentEventBus;
   systemPrompt?: string;
-}): { service: AgentService; modelRouter: ModelRouter; updateMemory: (id: string, input: { content?: string; title?: string; summary?: string; confidence?: number; importance?: number }) => Promise<{ id: string } | null> } {
+}): {
+  service: AgentService;
+  modelRouter: ModelRouter;
+  updateMemory: (id: string, input: { content?: string; title?: string; summary?: string; confidence?: number; importance?: number }) => Promise<{ id: string } | null>;
+  skillEmbeddingCache: SkillEmbeddingCache;
+  embeddingService: LlmEmbeddingService;
+} {
   const env = parseEnv(process.env);
   // ── Foundation ─────────────────────────────────────────────────
   const rawEventBus = deps.eventBus ?? new InMemoryAgentEventBus();
@@ -883,6 +889,10 @@ export function createAgentLoopService(deps: {
     /** Expose updateMemory for API layer to trigger re-embedding on PATCH. */
     updateMemory: (id: string, input: { content?: string; title?: string; summary?: string; confidence?: number; importance?: number }) =>
       rawMemoryWriter.updateMemory(id, input),
+    /** Expose for cache invalidation on skill registry reload. */
+    skillEmbeddingCache,
+    /** Expose for cache invalidation on skill registry reload. */
+    embeddingService,
   };
 }
 
