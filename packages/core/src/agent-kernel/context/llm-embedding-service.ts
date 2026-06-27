@@ -42,6 +42,14 @@ export class LlmEmbeddingService implements EmbeddingService {
   /** Cache: text → embedding vector. Shared across all callers. */
   private readonly cache = new Map<string, number[]>();
 
+  /**
+   * In-flight embedding requests for deduplication of concurrent calls
+   * for the same text. When two callers request the same uncached text
+   * simultaneously, only one API call is made and both receive the same
+   * promise.
+   */
+  private readonly pending = new Map<string, Promise<number[]>>();
+
   /** Cache statistics for trace/debug observability. */
   private _cacheStats = { hits: 0, misses: 0 };
 
@@ -83,38 +91,59 @@ export class LlmEmbeddingService implements EmbeddingService {
     }
     this._cacheStats.misses++;
 
-    // Tier 1: Real embedding provider
-    if (this.deps.embeddingProvider && this.shouldTryRealProvider()) {
-      try {
-        const vector = await this.deps.embeddingProvider.embed(text);
-        // §B6: provider succeeded — clear degraded state so future calls
-        // can use the real provider without waiting for the recovery window.
-        if (this._degraded) {
-          this._degraded = false;
-          this._degradedAt = 0;
-        }
-        this.cacheSet(text, vector);
-        return vector;
-      } catch {
-        // Provider failed — mark degraded so callers know similarity
-        // scores from this point forward are lexical, not semantic.
-        // §B6: record the timestamp so we can retry after the recovery
-        // window instead of staying degraded forever.
-        if (!this._degraded) {
-          this._degraded = true;
-          this._degradedAt = Date.now();
-          console.warn(
-            "[embedding] Provider API call failed, switching to lexical fallback. " +
-            "Semantic short-circuit (IntentRouter Layer 1) is now disabled. " +
-            `Will retry the real provider in ${LlmEmbeddingService.DEGRADED_RECOVERY_MS / 1000}s.`,
-          );
+    // Dedup: reuse in-flight request for the same text.
+    const pending = this.pending.get(text);
+    if (pending) return pending;
+
+    // Compute and cache with pending tracking.
+    const promise = this.embedUncached(text);
+    this.pending.set(text, promise);
+    return promise;
+  }
+
+  /**
+   * Compute an embedding for uncached text (Tier 1: real provider,
+   * Tier 2: lexical fallback). The pending map entry for `text` is
+   * cleaned up in the finally block so concurrent callers are
+   * deduplicated for the full lifecycle.
+   */
+  private async embedUncached(text: string): Promise<number[]> {
+    try {
+      // Tier 1: Real embedding provider
+      if (this.deps.embeddingProvider && this.shouldTryRealProvider()) {
+        try {
+          const vector = await this.deps.embeddingProvider.embed(text);
+          // §B6: provider succeeded — clear degraded state so future calls
+          // can use the real provider without waiting for the recovery window.
+          if (this._degraded) {
+            this._degraded = false;
+            this._degradedAt = 0;
+          }
+          this.cacheSet(text, vector);
+          return vector;
+        } catch {
+          // Provider failed — mark degraded so callers know similarity
+          // scores from this point forward are lexical, not semantic.
+          // §B6: record the timestamp so we can retry after the recovery
+          // window instead of staying degraded forever.
+          if (!this._degraded) {
+            this._degraded = true;
+            this._degradedAt = Date.now();
+            console.warn(
+              "[embedding] Provider API call failed, switching to lexical fallback. " +
+              "Semantic short-circuit (IntentRouter Layer 1) is now disabled. " +
+              `Will retry the real provider in ${LlmEmbeddingService.DEGRADED_RECOVERY_MS / 1000}s.`,
+            );
+          }
         }
       }
+      // Tier 2: Lexical keyword fallback (NOT semantic — lexical overlap only)
+      const fallbackVector = this.keywordEmbed(text);
+      this.cacheSet(text, fallbackVector);
+      return fallbackVector;
+    } finally {
+      this.pending.delete(text);
     }
-    // Tier 2: Lexical keyword fallback (NOT semantic — lexical overlap only)
-    const fallbackVector = this.keywordEmbed(text);
-    this.cacheSet(text, fallbackVector);
-    return fallbackVector;
   }
 
   async embedBatch(texts: string[]): Promise<number[][]> {
@@ -285,6 +314,7 @@ export class LlmEmbeddingService implements EmbeddingService {
    */
   invalidateCache(): void {
     this.cache.clear();
+    this.pending.clear();
     this._cacheStats = { hits: 0, misses: 0 };
   }
 
