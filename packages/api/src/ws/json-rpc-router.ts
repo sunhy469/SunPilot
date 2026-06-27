@@ -152,7 +152,7 @@ export class JsonRpcRouter {
       case "conversation.subscribe": {
         const params = conversationSubscribeSchema.parse(command.params ?? {});
         ctx.conversationSubscriptions.add(params.conversationId);
-        const events = this.deps.database.events.listByConversationId
+        const events = params.replayMissedEvents && this.deps.database.events.listByConversationId
           ? await this.deps.database.events.listByConversationId(
               params.conversationId,
               params.lastSeenSequence ?? 0,

@@ -68,6 +68,7 @@ export function ChatPage() {
           onSelect={(id) => {
             setActivePanel("chat");
             void conversations.selectConversation(id);
+            chat.preconnect();
           }}
           onOpenAutomation={() => setActivePanel("automation")}
           onOpenPlugins={() => setActivePanel("plugins")}
