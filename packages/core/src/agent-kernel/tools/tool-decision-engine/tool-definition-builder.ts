@@ -3,7 +3,7 @@ import type { ToolRetrievalResult } from "../tool-retriever.js";
 
 const TOPK_BY_INTENT: Partial<Record<string, number>> = {
   casual_chat: 0,
-  question_answering: 0,
+  question_answering: 5,
   memory_update: 0,
   image_analysis: 5,
   product_search: 5,
@@ -16,13 +16,14 @@ const TOPK_BY_INTENT: Partial<Record<string, number>> = {
 export function buildStreamingToolDefinitions(
   retrieval: ToolRetrievalResult,
   intent?: { type: string; candidateSkills?: string[] },
+  overrideLimit?: number,
 ): {
   tools: ToolDefinition[];
   nameMap: Map<string, string>;
 } {
-  const limit = intent
+  const limit = overrideLimit ?? (intent
     ? (TOPK_BY_INTENT[intent.type] ?? TOPK_BY_INTENT.default!)
-    : TOPK_BY_INTENT.default!;
+    : TOPK_BY_INTENT.default!);
 
   const candidates = new Set(intent?.candidateSkills ?? []);
   const sorted = [...retrieval.tools].sort((a, b) => {

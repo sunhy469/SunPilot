@@ -104,6 +104,10 @@ export class NativeToolLoopExecutor {
         reason: string;
         argumentsHint?: Record<string, unknown>;
       }>;
+      /** Skill IDs pre-matched by ToolSelector. When provided,
+       *  executeStreaming() uses these directly instead of
+       *  independently re-retrieving tools. */
+      toolSkillIds?: string[];
       /** Optional IAssistantMessageStream for content-block parts emission (§Phase 3). */
       stream?: IAssistantMessageStream;
     },
@@ -122,6 +126,7 @@ export class NativeToolLoopExecutor {
     };
   }> {
     const { runId, conversationId, context, intent, plan } = input;
+    const toolSkillIds = input.toolSkillIds;
     const messageId = input.messageId ?? `msg_${crypto.randomUUID()}`;
     const stream = input.stream;
     let fullContent = "";
@@ -146,16 +151,44 @@ export class NativeToolLoopExecutor {
       // 2. Load full skill catalog
       const allSkills = await this.deps.listSkills();
 
-      // 3. Get candidate tools from ToolRetriever (§P0-3: track timing)
+      // 3. Get candidate tools (§P0-3: track timing)
+      // Prefer ToolSelector's pre-matched skills when available.
+      // Otherwise fall back to independent retrieval + topK filtering.
       const retrievalStart = Date.now();
-      const retrieval = await this.retrieveStreamingTools(
-        context,
-        intent,
-        allSkills,
-        input.permissionMode,
-      );
-      const toolRetrievalMs = Date.now() - retrievalStart;
-      const { tools, nameMap } = buildStreamingToolDefinitions(retrieval, intent);
+      let toolRetrievalMs: number;
+      let tools: ToolDefinition[];
+      let nameMap: Map<string, string>;
+
+      if (toolSkillIds && toolSkillIds.length > 0) {
+        // Use ToolSelector's pre-matched skills — bypass independent retrieval
+        const selectedSkills = allSkills.filter((s) => toolSkillIds.includes(s.id));
+        const syntheticRetrieval: ToolRetrievalResult = {
+          tools: selectedSkills.map((skill) => ({
+            skill,
+            score: 1.0,
+            matchReasons: ["ToolSelector: pre-matched skill"],
+          })),
+          topK: selectedSkills.length,
+          fallbackUsed: false,
+          topKReason: "ToolSelector pre-matched skills",
+        };
+        ({ tools, nameMap } = buildStreamingToolDefinitions(
+          syntheticRetrieval,
+          intent,
+          selectedSkills.length, // overrideLimit — include all selected skills
+        ));
+        toolRetrievalMs = Date.now() - retrievalStart;
+      } else {
+        // Backward-compatible path: independent retrieval + intent-based topK
+        const retrieval = await this.retrieveStreamingTools(
+          context,
+          intent,
+          allSkills,
+          input.permissionMode,
+        );
+        toolRetrievalMs = Date.now() - retrievalStart;
+        ({ tools, nameMap } = buildStreamingToolDefinitions(retrieval, intent));
+      }
 
       // 4. Streaming loop: interleave text + tool calls
       let iteration = 0;

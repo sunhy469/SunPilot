@@ -1,5 +1,6 @@
-import { memo, useRef } from "react";
-import { Spin, Flex, Typography } from "antd";
+import { memo, useLayoutEffect, useRef } from "react";
+import { Flex, Typography } from "antd";
+import { HourglassOutlined } from "@ant-design/icons";
 import type { ChatMessage } from "../../../../features/conversations/types";
 import type { ChatViewState, LocalSendState } from "../../types";
 import type { RichCardAction } from "../../../../rich-cards/types";
@@ -10,6 +11,15 @@ import "./MessageList.scss";
 
 const MemoUserMessage = memo(UserMessage);
 const MemoAssistantMessage = memo(AssistantMessage);
+
+function HistoryLoadingIndicator() {
+  return (
+    <Flex vertical align="center" justify="center" gap={10} className="message-list__loading">
+      <HourglassOutlined className="message-list__hourglass" />
+      <Typography.Text type="secondary">正在加载历史会话...</Typography.Text>
+    </Flex>
+  );
+}
 
 export function MessageList({
   messages,
@@ -32,6 +42,10 @@ export function MessageList({
   // Force-scroll ref: when a new user message appears, we scroll to it
   // even if the user had previously scrolled up.
   const forceScrollRef = useRef({ value: false });
+  const historyLoadPendingRef = useRef(false);
+  if (loadingMessages) historyLoadPendingRef.current = true;
+  const shouldSnapHistoryToBottom =
+    !loadingMessages && historyLoadPendingRef.current && messages.length > 0;
   const prevUserMsgCountRef = useRef(0);
   const currentUserMsgCount = messages.filter((m) => m.role === "user").length;
   if (currentUserMsgCount > prevUserMsgCountRef.current) {
@@ -39,7 +53,46 @@ export function MessageList({
   }
   prevUserMsgCountRef.current = currentUserMsgCount;
 
-  const scrollRef = useAutoScroll([messages, status], isStreaming, forceScrollRef);
+  const scrollRef = useAutoScroll(
+    [messages, status],
+    isStreaming || shouldSnapHistoryToBottom,
+    forceScrollRef,
+  );
+
+  useLayoutEffect(() => {
+    if (!shouldSnapHistoryToBottom) return;
+    historyLoadPendingRef.current = false;
+    const container = scrollRef.current;
+    if (!container) return;
+
+    let keepPinned = true;
+    const scrollToLatest = () => {
+      if (keepPinned) container.scrollTop = container.scrollHeight;
+    };
+    const stopPinning = () => {
+      keepPinned = false;
+    };
+
+    scrollToLatest();
+    const frame = window.requestAnimationFrame(scrollToLatest);
+    container.addEventListener("wheel", stopPinning, { passive: true });
+    container.addEventListener("touchstart", stopPinning, { passive: true });
+
+    const observer = typeof ResizeObserver === "undefined"
+      ? undefined
+      : new ResizeObserver(scrollToLatest);
+    const messageInner = container.querySelector(".message-inner");
+    if (messageInner) observer?.observe(messageInner);
+    const timer = window.setTimeout(() => observer?.disconnect(), 2_000);
+
+    return () => {
+      window.cancelAnimationFrame(frame);
+      window.clearTimeout(timer);
+      observer?.disconnect();
+      container.removeEventListener("wheel", stopPinning);
+      container.removeEventListener("touchstart", stopPinning);
+    };
+  }, [scrollRef, shouldSnapHistoryToBottom]);
 
   // Find the active assistant: the last assistant message with pending/streaming status.
   // This ensures sendState/toolName/isStreaming are passed to the correct message
@@ -71,10 +124,7 @@ export function MessageList({
   if (messages.length === 0 && loadingMessages) {
     return (
       <div className="message-list">
-        <Flex align="center" justify="center" className="message-list__loading">
-          <Spin size="default" />
-          <Typography.Text type="secondary" style={{ marginLeft: 10 }}>加载对话中...</Typography.Text>
-        </Flex>
+        <HistoryLoadingIndicator />
       </div>
     );
   }
@@ -108,10 +158,7 @@ export function MessageList({
         })}
 
         {status === "loadingConversation" && (
-          <Flex align="center" justify="center" gap={8} className="message-list__loading">
-            <Spin size="small" />
-            <Typography.Text type="secondary">加载对话中...</Typography.Text>
-          </Flex>
+          <HistoryLoadingIndicator />
         )}
       </div>
     </div>
