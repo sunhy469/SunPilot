@@ -7,10 +7,8 @@ import {
   getAgentArtifactContent,
   listPendingApprovals,
   rejectAgentApproval,
-  replayConversationEvents,
   type AgentApproval,
   type AgentArtifact,
-  type AgentEventRecord,
 } from "../../../features/agent-runtime/api";
 import type {
   AttachmentRef,
@@ -83,8 +81,10 @@ export function useChat(
   const [artifacts, setArtifacts] = useState<AgentArtifactPreview[]>([]);
   const [selectedArtifact, setSelectedArtifact] =
     useState<AgentArtifactSelection | null>(null);
-  const seenEventIdsRef = useRef(new Set<string>());
   const lastSequenceRef = useRef(0);
+  const conversationIdRef = useRef(conversationId);
+  conversationIdRef.current = conversationId;
+  const subscribedConversationRef = useRef<string | null>(null);
   /** Maps JSON-RPC request id → clientRequestId for chat.send ack binding */
   const pendingAcksRef = useRef(new Map<string, string>());
 
@@ -164,10 +164,9 @@ export function useChat(
   }, []);
 
   const applyAgentEvent = useCallback(
-    (event: ChatSocketEvent | AgentEventRecord) => {
-      const method = "method" in event ? event.method : event.type;
-      const params = "method" in event ? event.params : event.payload;
-      if ("id" in event && event.id) seenEventIdsRef.current.add(event.id);
+    (event: ChatSocketEvent) => {
+      const method = event.method;
+      const params = event.params;
       if ("sequence" in event && typeof event.sequence === "number") {
         lastSequenceRef.current = Math.max(
           lastSequenceRef.current,
@@ -334,7 +333,7 @@ export function useChat(
       // ── Message content-block events (§P0: unified reducer) ──
       // All agent.message.* mutations go through assistantMessageReducer
       // for idempotent guarantees. Both live WebSocket events AND
-      // replayConversationEvents() results share this path.
+      // Live WebSocket notifications share this reducer path.
       const messageMethods = [
         "agent.message.started",
         "agent.message.part.started",
@@ -415,6 +414,17 @@ export function useChat(
       reconnectAttemptsRef.current = 0;
       setStatus((current) => (current === "thinking" ? "thinking" : "online"));
       setError("");
+      const currentConversationId = conversationIdRef.current;
+      if (currentConversationId) {
+        const shouldReplayMissed = lastSequenceRef.current > 0;
+        sendConversationSubscribe(
+          socket,
+          currentConversationId,
+          lastSequenceRef.current,
+          shouldReplayMissed,
+        );
+        subscribedConversationRef.current = currentConversationId;
+      }
       if (keepAliveTimerRef.current !== null)
         window.clearInterval(keepAliveTimerRef.current);
       keepAliveTimerRef.current = window.setInterval(() => {
@@ -763,40 +773,11 @@ export function useChat(
     void refreshApprovals();
   }, [refreshApprovals]);
 
-  useEffect(() => {
-    if (!conversationId) return;
-    let cancelled = false;
-    // Reset replay state when switching conversations so events from the
-    // new conversation are replayed from scratch.
-    seenEventIdsRef.current.clear();
-    lastSequenceRef.current = 0;
-    void (async () => {
-      try {
-        const replay = await replayConversationEvents(
-          requestRef.current,
-          conversationId,
-          lastSequenceRef.current,
-        );
-        if (cancelled) return;
-        const events = Array.isArray(replay.items) ? replay.items : [];
-        for (const event of events) {
-          if (seenEventIdsRef.current.has(event.id)) continue;
-          applyAgentEvent(event);
-        }
-      } catch {
-        // Best effort replay. Live chat continues even if replay is unavailable.
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [applyAgentEvent, conversationId]);
-
   // §P1-4: Subscribe to conversation events via WebSocket for real-time
   // multi-window support. When conversationId changes, unsubscribe from
   // the old conversation and subscribe to the new one.
-  const subscribedConversationRef = useRef<string | null>(null);
   useEffect(() => {
+    lastSequenceRef.current = 0;
     const socket = socketRef.current;
     if (!socket || socket.readyState !== WebSocket.OPEN) return;
 
@@ -806,7 +787,14 @@ export function useChat(
     }
 
     if (conversationId && conversationId !== prev) {
-      sendConversationSubscribe(socket, conversationId, lastSequenceRef.current);
+      // Persisted history comes from /messages. Subscribe without replaying
+      // the conversation's complete event log; only future events are needed.
+      sendConversationSubscribe(
+        socket,
+        conversationId,
+        lastSequenceRef.current,
+        false,
+      );
       subscribedConversationRef.current = conversationId;
     }
 
@@ -838,7 +826,7 @@ export function useChat(
       // §5.2: Final gate — validate AttachmentRef[] (not just UploadFile[] UI state).
       // Defense-in-depth: ChatComposer validates at the UploadFile level, but we
       // re-check the final AttachmentRef[] here to catch any edge case where the
-      // UploadFile→AttachmentRef conversion drops dataUrl/url/storageKey.
+      // UploadFile→AttachmentRef conversion drops the public OSS URL.
       if (attachments && attachments.length > 0) {
         const refCheck = validateAttachmentRefsForSend(attachments);
         if (refCheck.missingImageRef) {

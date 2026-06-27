@@ -376,7 +376,7 @@ export class AgentLoopEngine {
       // §P1-1: Update progress status after tool decision
       if (stream && progressStatusId) {
         const decisionLabel = decision.type === "use_tool"
-          ? `匹配到 ${decision.toolCalls.length} 个工具，准备执行...`
+          ? `正在使用 ${decision.toolCalls.length} 个工具处理...`
           : decision.type === "no_tool"
             ? "正在生成回答..."
             : undefined;
@@ -495,6 +495,7 @@ export class AgentLoopEngine {
             modelId: input.modelId,
             permissionMode: input.permissionMode,
             stream,
+            toolSkillIds: decision.toolCalls?.map((tc) => tc.skillId),
           },
           signal,
         );

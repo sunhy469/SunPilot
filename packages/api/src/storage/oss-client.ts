@@ -46,8 +46,13 @@ function uriEncode(value: string): string {
     .replace(/[!'()*]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
 }
 
+/** Encode an OSS path without encoding its forward-slash separators. */
+function uriEncodePath(value: string): string {
+  return value.split("/").map(uriEncode).join("/");
+}
+
 function canonicalResourcePath(bucket: string, key: string): string {
-  return `/${uriEncode(bucket)}/${uriEncode(key)}`;
+  return `/${uriEncode(bucket)}/${uriEncodePath(key)}`;
 }
 
 export class OssClient {
@@ -103,7 +108,12 @@ export class OssClient {
     const expires = 600;
 
     if (this.signatureVersion === "v4") {
-      return this.createV4PresignedPutUrl(host, key, expires);
+      return this.createV4PresignedPutUrl(
+        host,
+        key,
+        input.contentType,
+        expires,
+      );
     }
     return this.createV1PresignedPutUrl(host, key, input.contentType, expires);
   }
@@ -158,7 +168,12 @@ export class OssClient {
    *   host\n
    *   UNSIGNED-PAYLOAD
    */
-  private createV4PresignedPutUrl(host: string, key: string, expires: number): string {
+  private createV4PresignedPutUrl(
+    host: string,
+    key: string,
+    contentType: string | undefined,
+    expires: number,
+  ): string {
     const region = extractRegion(this.config.endpoint);
     const now = new Date();
     const isoDate = now.toISOString().replace(/[-:]/g, "").replace(/\.\d{3}Z$/, "Z");
@@ -170,7 +185,7 @@ export class OssClient {
       "x-oss-credential": `${this.config.accessKeyId}/${scope}`,
       "x-oss-date": isoDate,
       "x-oss-expires": String(expires),
-      "x-oss-signedHeaders": "host",
+      "x-oss-additional-headers": "host",
     };
 
     const canonicalQueryString = Object.keys(signedParams)
@@ -178,11 +193,19 @@ export class OssClient {
       .map((k) => `${uriEncode(k)}=${uriEncode(signedParams[k]!)}`)
       .join("&");
 
+    // OSS V4 implicitly signs Content-Type whenever the request contains it.
+    // The browser PUT sends file.type, so the presigner must bind the exact
+    // same value or OSS calculates a different canonical request.
+    const canonicalHeaders = [
+      ...(contentType ? [`content-type:${contentType.trim()}`] : []),
+      `host:${host}`,
+    ].join("\n") + "\n";
+
     const canonicalRequest = [
       "PUT",
       canonicalResourcePath(this.config.bucket, key),
       canonicalQueryString,
-      `host:${host}\n`,
+      canonicalHeaders,
       "host",
       "UNSIGNED-PAYLOAD",
     ].join("\n");
@@ -196,7 +219,7 @@ export class OssClient {
 
     const signature = this.v4Signature(stringToSign, shortDate, region);
     const finalQuery = `${canonicalQueryString}&x-oss-signature=${signature}`;
-    return `https://${host}/${key}?${finalQuery}`;
+    return `https://${host}/${uriEncodePath(key)}?${finalQuery}`;
   }
 
   /**
