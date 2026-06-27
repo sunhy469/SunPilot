@@ -1,4 +1,4 @@
-import { MAX_TOOL_ITERATIONS } from "../../agent-loop-engine.js";
+import { MAX_TOOL_ITERATIONS } from "../../agent-loop-engine/constants.js";
 import type { AgentPlan, RoutedIntent, ToolDecision } from "../../loop-types.js";
 import type { SkillSummary } from "../tool-types.js";
 import type { DecisionMetadata, ScoredSkill } from "./types.js";
