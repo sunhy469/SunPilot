@@ -6,6 +6,27 @@
 
 <p align="center"><strong>Daemon-first local business agent runtime</strong></p>
 
+<p align="center">
+  <img alt="Product" src="https://img.shields.io/badge/PRODUCT-SUNPILOT-2563eb?style=for-the-badge" />
+  <img alt="Positioning" src="https://img.shields.io/badge/POSITIONING-LOCAL_AGENT-10b981?style=for-the-badge" />
+  <img alt="Runtime" src="https://img.shields.io/badge/RUNTIME-DAEMON_FIRST-f59e0b?style=for-the-badge" />
+  <img alt="Interface" src="https://img.shields.io/badge/INTERFACE-CHAT_WORKSPACE-8b5cf6?style=for-the-badge" />
+</p>
+
+<p align="center">
+  <img alt="Frontend" src="https://img.shields.io/badge/FRONTEND-React_19-1677ff?style=flat-square" />
+  <img alt="Backend" src="https://img.shields.io/badge/BACKEND-Fastify-111827?style=flat-square" />
+  <img alt="Language" src="https://img.shields.io/badge/LANGUAGE-TypeScript-3178c6?style=flat-square" />
+  <img alt="Database" src="https://img.shields.io/badge/DATABASE-PostgreSQL+pgvector-336791?style=flat-square" />
+  <img alt="Streaming" src="https://img.shields.io/badge/STREAMING-WebSocket_JSON--RPC-ef4444?style=flat-square" />
+  <img alt="LLM" src="https://img.shields.io/badge/LLM-OpenAI--compatible-0f766e?style=flat-square" />
+  <img alt="Node" src="https://img.shields.io/badge/NODE-%3E%3D22.22.2%20%3C23-3c873a?style=flat-square" />
+  <img alt="Package manager" src="https://img.shields.io/badge/PNPM-%3E%3D11.5.1-f69220?style=flat-square" />
+  <img alt="License" src="https://img.shields.io/badge/LICENSE-AGPL_v3-blue?style=flat-square" />
+</p>
+
+---
+
 SunPilot is a local-first AI agent product built around an always-on Fastify daemon. It combines a React chat workspace, a persistent multi-step agent runtime, an extensible skill system, PostgreSQL/pgvector storage, and an experimental PixiJS “Digital World” task view.
 
 > Project status: active development (`0.1.0`). The main chat/agent path is implemented and tested; the Digital World and third-party skill isolation still contain experimental or MVP-level behavior.
