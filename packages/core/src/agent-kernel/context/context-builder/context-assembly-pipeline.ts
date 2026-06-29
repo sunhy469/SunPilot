@@ -143,7 +143,7 @@ export class ContextAssemblyPipeline {
       trust: "user",
     });
 
-    // External attachment warning is handled by ResponseComposer
+    // External attachment trust is preserved for the ReAct system context.
     // (appendAttachmentLines adds [EXTERNAL — unverified source] prefix).
     // No separate chunk needed here — it would consume budget without
     // being mapped into the model input (pack section has no "external"
@@ -925,11 +925,9 @@ export class ContextAssemblyPipeline {
       }
 
       // ── Skill catalog (from Group A result) ───────────────────────
-      // §2.2: Skip skill catalog for casual chat / question_answering
-      // patterns. Context building runs before intent routing, so we use
-      // a lightweight form-match heuristic (similar to IntentRouter Layer 0)
-      // to detect obvious casual messages and skip the catalog entirely.
-      // Full intent-based filtering happens in ResponseComposer/ToolDecisionEngine.
+      // Avoid spending context tokens on the descriptive skill catalog for
+      // obvious greetings. This does not decide Action availability: the
+      // ReAct runner independently retrieves and exposes its tool snapshot.
       const SKIP_SKILL_PATTERNS = [
         /^(hi|hello|hey|你好|嗨|哈喽|早|晚上好|下午好)\b/i,
         /^(thanks|thank you|thx|谢谢|多谢|感谢)\b/i,

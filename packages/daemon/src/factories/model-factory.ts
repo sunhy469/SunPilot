@@ -1,7 +1,7 @@
 /**
  * Model factory — wires the embedding provider, dual-model router (DP/Seed),
- * shared skill embedding cache, saveMessage helper, and purpose-specific
- * LlmProvider adapters.
+ * shared skill embedding cache, saveMessage helper, and the memory-summary
+ * adapter. ReAct dialogue turns use ModelRouter directly.
  *
  * Extracted from composition-root.ts (Batch 4 §3).
  */
@@ -37,12 +37,7 @@ export interface ModelFactoryResult {
     metadata?: Record<string, unknown>;
   }) => Promise<void>;
   modelRouter: ModelRouter;
-  intentLlm: LlmProvider;
-  toolArgLlm: LlmProvider;
-  reflectionLlm: LlmProvider;
-  responseLlm: LlmProvider;
-  planningLlm: LlmProvider;
-  replanningLlm: LlmProvider;
+  summaryLlm: LlmProvider;
 }
 
 export function createModelLayer(deps: ModelFactoryDeps): ModelFactoryResult {
@@ -90,8 +85,7 @@ export function createModelLayer(deps: ModelFactoryDeps): ModelFactoryResult {
     });
   };
 
-  // §P1-2: Shared skill embedding cache — pre-warmed at startup to avoid
-  // duplicate embedding API calls between IntentRouter and ToolRetriever.
+  // Shared cache for capability-catalog retrieval.
   const skillEmbeddingCache = new SkillEmbeddingCache(embeddingService);
 
   // Log embedding mode at startup so operators know what's active
@@ -107,14 +101,8 @@ export function createModelLayer(deps: ModelFactoryDeps): ModelFactoryResult {
 
   // ── Dual-Model Router (§dual-model) ──────────────────────────────
   const allPurposes: ModelPurpose[] = [
-    "intent_classification",
-    "tool_argument_generation",
-    "reflection",
     "response_composition",
     "summary_compression",
-    "planning",
-    "replanning",
-    "clarification",
   ];
 
   const dpBaseUrl = env.SUNPILOT_DP_LLM_BASE_URL ?? env.SUNPILOT_LLM_BASE_URL;
@@ -193,12 +181,7 @@ export function createModelLayer(deps: ModelFactoryDeps): ModelFactoryResult {
     };
   }
 
-  const intentLlm = createPurposeProvider("intent_classification");
-  const toolArgLlm = createPurposeProvider("tool_argument_generation");
-  const reflectionLlm = createPurposeProvider("reflection");
-  const responseLlm = createPurposeProvider("response_composition");
-  const planningLlm = createPurposeProvider("planning");
-  const replanningLlm = createPurposeProvider("replanning");
+  const summaryLlm = createPurposeProvider("summary_compression");
 
   return {
     embeddingService,
@@ -206,11 +189,6 @@ export function createModelLayer(deps: ModelFactoryDeps): ModelFactoryResult {
     skillEmbeddingCache,
     saveMessage,
     modelRouter,
-    intentLlm,
-    toolArgLlm,
-    reflectionLlm,
-    responseLlm,
-    planningLlm,
-    replanningLlm,
+    summaryLlm,
   };
 }

@@ -22,31 +22,17 @@ export type { CompressedMemory, MemoryCompressorDeps } from "./agent-kernel/cont
 export * from "./agent-kernel/context/context-types.js";
 export * from "./agent-kernel/context/embedding-service.js";
 export { LlmEmbeddingService } from "./agent-kernel/context/llm-embedding-service.js";
-export { IntentRouter } from "./agent-kernel/intent/intent-router.js";
-export * from "./agent-kernel/intent/intent-types.js";
-export { ToolDecisionEngine } from "./agent-kernel/tools/tool-decision-engine.js";
-export type { DecisionMetadata, LlmToolDecision, ToolDecisionEngineDeps } from "./agent-kernel/tools/tool-decision-engine.js";
-export { DefaultToolArgumentBuilder } from "./agent-kernel/tools/tool-argument-builder.js";
-export type {
-  ToolArgumentBuilder,
-  ToolArgumentBuilderInput,
-  ToolArgumentBuilderResult,
-} from "./agent-kernel/tools/tool-argument-builder.js";
 export * from "./agent-kernel/tools/tool-types.js";
-export { ToolRetriever, computeDynamicTopK } from "./agent-kernel/tools/tool-retriever.js";
-export type {
-  ToolRetrievalInput,
-  ToolCallHistoryEntry,
-  ScoredTool,
-  ToolRetrievalResult,
-} from "./agent-kernel/tools/tool-retriever.js";
+export { ToolCatalogRetriever } from "./agent-kernel/tools/tool-catalog-retriever.js";
+export type { ToolCatalogRetrieverDeps, ToolCatalogResult } from "./agent-kernel/tools/tool-catalog-retriever.js";
 export { SkillEmbeddingCache } from "./agent-kernel/tools/skill-embedding-cache.js";
-export { RuleBasedPlanner } from "./agent-kernel/planning/rule-based-planner.js";
-export { PlanValidator } from "./agent-kernel/planning/plan-validator.js";
-export type { PlanValidatorDeps, PlanValidationIssue, PlanValidationResult } from "./agent-kernel/planning/plan-validator.js";
-export { Replanner } from "./agent-kernel/planning/replanner.js";
-export type { ReplannerDeps, ReplanTrigger, ReplanInput, ReplanResult } from "./agent-kernel/planning/replanner.js";
-export { BasicReflectionEngine } from "./agent-kernel/reflection/basic-reflection-engine.js";
+export { ReactLoopRunner } from "./agent-kernel/react-loop/react-loop-runner.js";
+export type { ReactLoopRunnerDeps } from "./agent-kernel/react-loop/react-loop-runner.js";
+export { ReactModelTurn } from "./agent-kernel/react-loop/react-model-turn.js";
+export { ReactToolExecutor } from "./agent-kernel/react-loop/react-tool-executor.js";
+export { ToolCallGuard } from "./agent-kernel/react-loop/tool-call-guard.js";
+export { ObservationBuilder } from "./agent-kernel/react-loop/observation-builder.js";
+export * from "./agent-kernel/react-loop/react-types.js";
 export * from "./agent-kernel/memory/memory-types.js";
 export { DefaultMemoryPolicy } from "./agent-kernel/memory/memory-policy.js";
 export { DefaultMemoryWriter } from "./agent-kernel/memory/memory-writer.js";
@@ -101,10 +87,6 @@ export { RepositoryApprovalExpiryService } from "./agent-kernel/persistence/repo
 export { RepositoryApprovalRequestService } from "./agent-kernel/persistence/repository-approval-request-service.js";
 export { RepositoryApprovalGate } from "./agent-kernel/persistence/repository-approval-gate.js";
 export { RepositoryRunStateManager } from "./agent-kernel/persistence/repository-run-state-manager.js";
-export {
-  ResponseComposer,
-} from "./agent-kernel/response/response-composer.js";
-export * from "./agent-kernel/response/response-types.js";
 export { ModelRouter, createSingleModelRouter, createTieredModelRouter } from "./agent-kernel/model-router.js";
 export type {
   ModelPurpose,

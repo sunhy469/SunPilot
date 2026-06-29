@@ -43,7 +43,7 @@ interface OpenAIChatStreamChunk {
  * 2. 读取 Response body 的 ReadableStream
  * 3. 按 SSE (Server-Sent Events) 协议解析：data: {...}\n\n
  * 4. 从 choices[].delta.content 提取增量文本
- * 5. 通过 async generator yield 给上层调用方（ResponseComposer）
+ * 5. 通过 async generator yield 给 ReAct model turn
  *
  * 支持 OpenAI API 和 DeepSeek API 两种后端（通过 DEEPSEEK_API_KEY_ENV 环境变量切换）。
  */

@@ -3,7 +3,7 @@
  *
  * §5.5 of agent_1688_attachment_duplicate_streaming_bugfix_plan.md:
  * Unifies anyOf/oneOf disjunction checks previously duplicated between
- * ToolDecisionEngine and DefaultToolArgumentBuilder.
+ * ReAct ToolCallGuard and the defensive execution boundary.
  */
 
 /**

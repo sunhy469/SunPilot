@@ -4,7 +4,7 @@
  * Generates RichCardView-compatible objects from artifacts, tool outputs,
  * and skill results. Every card includes an `id` field for frontend rendering.
  *
- * Replaces the narrow `buildStreamingRichCards()` in ToolDecisionEngine.
+ * Converts accumulated ReAct artifacts into UI cards.
  */
 
 import type { RichCardType, RichCardOutput, RichTextValue } from "@sunpilot/protocol";

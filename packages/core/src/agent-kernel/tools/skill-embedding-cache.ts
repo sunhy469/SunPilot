@@ -4,25 +4,15 @@ import type { EmbeddingService } from "../context/embedding-service.js";
  * SkillEmbeddingCache — shared, pre-warmed embedding index for skill
  * semantic matching (§P1-2).
  *
- * Problem: IntentRouter and ToolRetriever both compute skill embeddings
- * independently per turn, causing duplicate embedding API calls. On cold
- * start or after skill registry changes, this adds 50-200ms per call.
- *
- * Solution: Pre-warm embeddings at startup, share across consumers, and
- * invalidate incrementally on skill registry changes. Both IntentRouter
- * and ToolRetriever read from this cache instead of calling the embedding
- * service directly.
+ * Pre-warm embeddings at startup and invalidate incrementally on skill
+ * registry changes so capability retrieval avoids duplicate API calls.
  *
  * Cache key: `${skillId}::${name} — ${description} — category: ${category}`
  */
 export class SkillEmbeddingCache {
   private cache = new Map<string, number[]>();
   private pending = new Map<string, Promise<number[] | undefined>>();
-  // §4.4: Query embedding cache — IntentRouter computes the query
-  // embedding during Layer 1 matching, and ToolRetriever needs the SAME
-  // embedding for its Layer 4 semantic scoring. Without this cache, the
-  // query gets re-embedded on every ToolRetriever.retrieve() call,
-  // wasting one embedding API call per turn.
+  // Query embedding cache avoids re-embedding repeated catalog queries.
   /** §B7: Maximum query cache entries before LRU eviction kicks in. */
   private static readonly QUERY_CACHE_MAX_SIZE = 100;
   private queryCache = new Map<string, number[]>();
@@ -125,9 +115,8 @@ export class SkillEmbeddingCache {
   // ── §4.4: Query embedding cache ──────────────────────────────────
 
   /**
-   * Store a query embedding so ToolRetriever can reuse it without
-   * re-calling the embedding API. Called by IntentRouter after it
-   * computes the query embedding during Layer 1 matching.
+   * Store a query embedding so catalog retrieval can reuse it without
+   * re-calling the embedding API.
    */
   setQueryEmbedding(query: string, embedding: number[]): void {
     // LRU eviction: when at capacity and this is a new key, remove oldest entry.
@@ -143,7 +132,7 @@ export class SkillEmbeddingCache {
 
   /**
    * Get a previously-stored query embedding, or undefined if not cached.
-   * ToolRetriever calls this before computing its own embedding.
+   * Catalog retrieval calls this before computing a new embedding.
    */
   getQueryEmbedding(query: string): number[] | undefined {
     const value = this.queryCache.get(query);

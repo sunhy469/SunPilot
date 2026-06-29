@@ -10,15 +10,14 @@
 
 export type SpanKind =
   | "context_building"
-  | "intent_routing"
-  | "planning"
-  | "tool_deciding"
+  | "tool_retrieval"
+  | "react_model_turn"
+  | "tool_guard"
   | "tool_executing"
-  | "reflecting"
-  | "responding"
+  | "observation_building"
+  | "checkpoint_persistence"
   | "memory_writing"
-  | "approval_handling"
-  | "pre_inference_await";
+  | "approval_handling";
 
 export interface SpanTiming {
   startMs: number;
@@ -49,13 +48,6 @@ export interface SpanMetrics {
   sourceCompressionMs?: number;
   tokenBudgetMs?: number;
   contextAssemblyMs?: number;
-  intentRouteMs?: number;
-  // §P0-3: Per-layer timing breakdown for intent routing
-  layer0FormMatchMs?: number;
-  layer1QueryEmbedMs?: number;
-  layer1SkillEmbedMs?: number;
-  layer2LlmMs?: number;
-  layer2TtftMs?: number;
   toolRetrievalMs?: number;
   firstTokenMs?: number;
   toolExecutionMs?: number;
@@ -63,35 +55,16 @@ export interface SpanMetrics {
   // ── Tool selection trace metadata (§P2) ─────────────────────────
   /** Embedding mode: "real" | "lexical_fallback" | "none". */
   embeddingMode?: string;
-  /** Top embedding similarity score from intent routing. */
+  /** Top capability-catalog embedding similarity score. */
   embeddingTopScore?: number;
   /** Number of skills considered in embedding pass. */
   embeddingCandidateCount?: number;
-  /** Whether intent was determined by form-match rules. */
-  formMatch?: boolean;
-  /** Tool decision path (plan/intent_match/deterministic_scorer/llm_semantic/scorer_fallback). */
-  decisionPath?: string;
   /** Top-K value from tool retrieval. */
   retrievalTopK?: number;
   /** Number of candidates in retrieval result. */
   retrievalCandidateCount?: number;
   /** Whether retrieval fell back to broader search. */
   retrievalFallback?: boolean;
-  // ── §P3: Pre-inference observability metrics ───────────────────
-  /** Intent type from pre-inference classification. */
-  preInferenceIntentType?: string;
-  /** Confidence score from pre-inference (0-1). */
-  preInferenceConfidence?: number;
-  /** Wall-clock latency of the pre-inference LLM call (ms). */
-  preInferenceLatencyMs?: number;
-  /** Error message if pre-inference failed. */
-  preInferenceError?: string;
-  /** Timeout duration if pre-inference was cut short (ms). */
-  preInferenceTimeoutMs?: number;
-  /** Which routing layer decided the final intent. */
-  routingLayer?: string;
-  /** Whether pre-inference result was used to skip Layer 2. */
-  preInferenceUsed?: string;
 }
 
 export interface Span {
@@ -170,7 +143,7 @@ export interface KeyMetrics {
  * - Spans for each distinct phase of the Agent Loop
  * - Metrics collected per-span and aggregated at trace level
  * - Enables debugging: trace an anomalous response back to specific
- *   context, tool result, reflection, or memory recall
+ *   context, model Action, tool Observation, or memory recall
  */
 export class TraceManager {
   private readonly activeTraces = new Map<string, Trace>();

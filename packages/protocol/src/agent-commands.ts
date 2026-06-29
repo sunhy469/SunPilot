@@ -72,6 +72,7 @@ export const runCancelSchema = z.object({
 
 export const runResumeSchema = z.object({
   runId: z.string().min(1),
+  message: z.string().min(1).optional(),
 });
 
 export const runRetrySchema = z.object({

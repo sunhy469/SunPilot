@@ -9,15 +9,9 @@ export type RunMode = (typeof RUN_MODES)[number];
 
 export const RUN_STATUSES = [
   "created",
-  "context_building",
-  "intent_routing",
-  "planning",
-  "tool_deciding",
+  "running",
   "waiting_approval",
-  "executing",
-  "observing",
-  "reflecting",
-  "responding",
+  "waiting_user",
   "completed",
   "failed",
   "cancelled",
@@ -27,15 +21,9 @@ export const RUN_STATUSES = [
 export type RunStatus = (typeof RUN_STATUSES)[number];
 
 export const AGENT_ACTIVE_STATUSES = [
-  "context_building",
-  "intent_routing",
-  "planning",
-  "tool_deciding",
+  "running",
   "waiting_approval",
-  "executing",
-  "observing",
-  "reflecting",
-  "responding",
+  "waiting_user",
 ] as const satisfies readonly RunStatus[];
 
 // ── Step status ────────────────────────────────────────────────────

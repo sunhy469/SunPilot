@@ -64,16 +64,13 @@ export function registerSunPilotApiRoutes(
     await database.runs.list({ limit: 1 });
     const databaseLatencyMs = Date.now() - startedAt;
     const skillsList = skills.list() as Array<{ enabled: boolean }>;
-    const [waitingApproval, executing, planning, reflecting, responding] =
+    const [waitingApproval, waitingUser, running] =
       await Promise.all([
         database.runs.list({ status: "waiting_approval", limit: 200 }),
-        database.runs.list({ status: "executing", limit: 200 }),
-        database.runs.list({ status: "planning", limit: 200 }),
-        database.runs.list({ status: "reflecting", limit: 200 }),
-        database.runs.list({ status: "responding", limit: 200 }),
+        database.runs.list({ status: "waiting_user", limit: 200 }),
+        database.runs.list({ status: "running", limit: 200 }),
       ]);
-    const activeCount =
-      executing.length + planning.length + reflecting.length + responding.length;
+    const activeCount = running.length;
     const llmConfig = diagnostics?.getLlmConfig?.() ?? {
       provider: "unknown",
       model: "unknown",
@@ -88,7 +85,11 @@ export function registerSunPilotApiRoutes(
         count: skillsList.length,
         enabled: skillsList.filter((s) => s.enabled).length,
       },
-      runs: { active: activeCount, waitingApproval: waitingApproval.length },
+      runs: {
+        active: activeCount,
+        waitingApproval: waitingApproval.length,
+        waitingUser: waitingUser.length,
+      },
       websocket: { connections: diagnostics?.websocketConnections?.() ?? 0 },
       modelRouter: modelRouterStats,
     };
@@ -601,12 +602,12 @@ export function registerSunPilotApiRoutes(
       return agent.retryRun(request.params.id);
     },
   );
-  app.post<{ Params: { id: string } }>(
+  app.post<{ Params: { id: string }; Body: { message?: string } }>(
     "/v1/runs/:id/resume",
     async (request, reply) => {
       const agent = await getChatAgent();
       try {
-        return await agent.resumeRun(request.params.id);
+        return await agent.resumeRun(request.params.id, request.body?.message);
       } catch (error) {
         if ((error as { code?: string }).code === "AGENT_RUN_NOT_FOUND") {
           return reply.code(404).send({ error: "not_found" });

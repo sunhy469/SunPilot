@@ -1,12 +1,10 @@
 import type { Permission, RiskLevel } from "../loop-types.js";
 
-/** Re-export tool-related types */
-export type { PlannedToolCall, ToolDecision } from "../loop-types.js";
+/** Re-export the validated executable call shape. */
+export type { PlannedToolCall } from "../loop-types.js";
 
 /**
- * Skill manifest summary — the minimum information ToolDecisionEngine
- * needs to select a skill. Mirrors the full SkillManifest from protocol
- * but only carries decision-relevant fields.
+ * Skill manifest summary used by candidate retrieval and Action validation.
  */
 export interface SkillSummary {
   id: string;
@@ -87,23 +85,3 @@ export interface NormalizedToolResult {
   tokenEstimate: number;
   redacted: boolean;
 }
-
-/**
- * Map intent types to likely skill ids for fallback selection
- * when the LLM doesn't specify which skill to use.
- */
-export const INTENT_SKILL_MAP: Record<string, string[]> = {
-  casual_chat: [],
-  question_answering: ["filesystem.read"],
-  project_analysis: ["filesystem.read"],
-  code_generation: ["filesystem.write", "filesystem.read"],
-  code_modification: ["filesystem.read", "filesystem.write"],
-  file_operation: ["filesystem.read", "filesystem.write"],
-  shell_operation: ["shell.execute"],
-  automation_execution: [],
-  artifact_generation: ["artifact.write"],
-  memory_update: ["memory.write"],
-  diagnostics: ["filesystem.read", "shell.execute"],
-  use_skill: [],
-  unknown: [],
-};

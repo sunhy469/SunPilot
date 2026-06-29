@@ -2,22 +2,16 @@ import type { RunRecord, RunStatus } from "@sunpilot/protocol";
 import type { DatabaseContext } from "@sunpilot/storage";
 
 const AGENT_RECOVERY_INTERRUPT_STATUSES: readonly RunStatus[] = [
-  "context_building",
-  "intent_routing",
-  "planning",
-  "tool_deciding",
-  "executing",
-  "observing",
-  "reflecting",
+  "running",
 ];
 
 /**
  * Daemon 重启恢复扫描。
  *
  * 扫描所有处于"非终态"的 Run，根据状态分类处理：
- * - 中间状态（context_building 等）→ 标记为 interrupted（用户可 resume）
- * - responding 状态 → 标记为 failed（响应生成中途中断，不可安全续接）
+ * - running → 标记为 interrupted（从持久化 ReAct checkpoint 恢复）
  * - waiting_approval 状态 → 重新发送审批事件，通知前端恢复审批 UI
+ * - waiting_user 状态 → 保持等待，用户输入后从 checkpoint 恢复
  */
 export async function recoverAgentRuntimeRuns(
   database: DatabaseContext,
@@ -39,37 +33,6 @@ export async function recoverAgentRuntimeRuns(
       recoveredRuns.push(run.id);
       interruptedRuns.push(run.id);
     }
-  }
-
-  for (const run of await database.runs.list({
-    status: "responding",
-    limit: 200,
-  })) {
-    const error = {
-      code: "AGENT_RUN_RECOVERY_REQUIRED",
-      message: "Daemon restarted while the run was responding.",
-      category: "run_state",
-      retryable: true,
-    };
-    await database.runs.updateStatus(run.id, { status: "failed", updatedAt: now, error });
-    await database.runStatusHistory.append({
-      runId: run.id,
-      previousStatus: run.status,
-      nextStatus: "failed",
-      reason: "daemon restarted during response generation",
-      actor: "daemon",
-      createdAt: now,
-    });
-    await database.events.append({
-      id: `evt_${crypto.randomUUID()}`,
-      runId: run.id,
-      conversationId: run.conversationId,
-      type: "agent.run.failed",
-      payload: { runId: run.id, error },
-      createdAt: now,
-    });
-    recoveredRuns.push(run.id);
-    failedRuns.push(run.id);
   }
 
   for (const run of await database.runs.list({

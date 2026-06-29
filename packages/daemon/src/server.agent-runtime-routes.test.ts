@@ -352,6 +352,7 @@ describe("daemon Agent runtime REST routes", () => {
       runs: {
         active: 0,
         waitingApproval: 1,
+        waitingUser: 0,
       },
       websocket: {
         connections: 0,
@@ -488,21 +489,16 @@ describe("daemon Agent runtime REST routes", () => {
     };
     await db.runs.create({
       ...baseRun,
-      id: "run_executing",
-      status: "executing",
+      id: "run_running",
+      status: "running",
     });
     await db.steps.create({
-      id: "step_executing",
-      runId: "run_executing",
+      id: "step_running",
+      runId: "run_running",
       type: "skill",
       name: "Execute tool",
       status: "running",
       input: {},
-    });
-    await db.runs.create({
-      ...baseRun,
-      id: "run_responding",
-      status: "responding",
     });
     await db.runs.create({
       ...baseRun,
@@ -525,7 +521,13 @@ describe("daemon Agent runtime REST routes", () => {
       port: 3737,
     });
 
-    await expect(db.runs.findById("run_executing")).resolves.toEqual(
+    await db.runs.create({
+      ...baseRun,
+      id: "run_waiting_user",
+      status: "waiting_user",
+    });
+
+    await expect(db.runs.findById("run_running")).resolves.toEqual(
       expect.objectContaining({
         status: "interrupted",
         error: expect.objectContaining({
@@ -534,29 +536,18 @@ describe("daemon Agent runtime REST routes", () => {
         }),
       }),
     );
-    await expect(db.steps.listByRunId("run_executing")).resolves.toEqual([
-      expect.objectContaining({ id: "step_executing", status: "interrupted" }),
+    await expect(db.steps.listByRunId("run_running")).resolves.toEqual([
+      expect.objectContaining({ id: "step_running", status: "interrupted" }),
     ]);
-    await expect(db.runs.findById("run_responding")).resolves.toEqual(
-      expect.objectContaining({
-        status: "failed",
-        error: expect.objectContaining({
-          code: "AGENT_RUN_RECOVERY_REQUIRED",
-          retryable: true,
-        }),
-      }),
-    );
     await expect(db.runs.findById("run_waiting")).resolves.toEqual(
       expect.objectContaining({ status: "waiting_approval" }),
     );
-    await expect(db.events.listByRunId("run_executing")).resolves.toEqual(
+    await expect(db.runs.findById("run_waiting_user")).resolves.toEqual(
+      expect.objectContaining({ status: "waiting_user" }),
+    );
+    await expect(db.events.listByRunId("run_running")).resolves.toEqual(
       expect.arrayContaining([
         expect.objectContaining({ type: "agent.run.interrupted" }),
-      ]),
-    );
-    await expect(db.events.listByRunId("run_responding")).resolves.toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ type: "agent.run.failed" }),
       ]),
     );
     await expect(db.events.listByRunId("run_waiting")).resolves.toEqual(
@@ -576,8 +567,8 @@ describe("daemon Agent runtime REST routes", () => {
           action: "daemon.recovery_scan",
           target: "agent-runtime",
           payload: expect.objectContaining({
-            interruptedRuns: ["run_executing"],
-            failedRuns: ["run_responding"],
+            interruptedRuns: ["run_running"],
+            failedRuns: [],
             snapshottedApprovals: ["approval_waiting"],
           }),
         }),
@@ -813,7 +804,7 @@ describe("daemon Agent runtime REST routes", () => {
 
   test("resumes Agent runs through the Agent service REST path", async () => {
     const db = new InMemoryDatabaseContext();
-    const resumed: string[] = [];
+    const resumed: Array<{ runId: string; message?: string }> = [];
     daemon = await createDaemon({
       database: db,
       port: 3737,
@@ -830,8 +821,8 @@ describe("daemon Agent runtime REST routes", () => {
           runId,
           stopped: false,
         }),
-        resumeRun: async (runId: string) => {
-          resumed.push(runId);
+        resumeRun: async (runId: string, message?: string) => {
+          resumed.push({ runId, message });
           return {
             resumed: true,
             originalRunId: runId,
@@ -857,6 +848,7 @@ describe("daemon Agent runtime REST routes", () => {
     const response = await daemon.app.inject({
       method: "POST",
       url: "/v1/runs/run_old/resume",
+      payload: { message: "补充信息" },
     });
 
     expect(response.statusCode).toBe(200);
@@ -868,7 +860,7 @@ describe("daemon Agent runtime REST routes", () => {
       messageId: "msg_resumed",
       status: "completed",
     });
-    expect(resumed).toEqual(["run_old"]);
+    expect(resumed).toEqual([{ runId: "run_old", message: "补充信息" }]);
   });
 
   test("approves Agent approvals through the Agent service REST path", async () => {

@@ -1,9 +1,6 @@
 /**
- * Tool factory — wires the tool pipeline: argument builder, retriever, skill
- * summary lister (with schema loading + side-effect classification), the
- * skill tool executor, the execution orchestrator, and the unified tool
- * decision engine. Also owns the PlanValidator and Replanner (which consume
- * the same `listSkills` summary list).
+ * Tool factory — wires the capability catalog and deterministic execution
+ * boundary. Semantic action selection belongs exclusively to ReactLoopRunner.
  *
  * Extracted from composition-root.ts (Batch 4 §3).
  */
@@ -13,22 +10,12 @@ import type { StepRecord } from "@sunpilot/protocol";
 import type { DatabaseContext } from "@sunpilot/storage";
 import type { SkillRegistry, SkillRunner } from "@sunpilot/skill-runner";
 import {
-  DefaultToolArgumentBuilder,
   ExecutionOrchestrator,
-  PlanValidator,
-  Replanner,
-  RuleBasedPlanner,
   SkillToolExecutor,
-  ToolDecisionEngine,
-  ToolRetriever,
   type AgentEventBus,
-  type LlmProvider,
-  type ModelRouter,
   type Permission,
-  type LlmEmbeddingService,
-  type SkillEmbeddingCache,
   type ToolSafetyBoundary,
-  type PermissionPolicy,
+  type SkillSummary,
 } from "@sunpilot/core";
 
 export interface ToolFactoryDeps {
@@ -36,57 +23,13 @@ export interface ToolFactoryDeps {
   rawEventBus: AgentEventBus;
   skillRegistry: SkillRegistry;
   skillRunner?: SkillRunner;
-  /** LlmProvider used for tool argument generation. */
-  toolArgLlm: LlmProvider;
-  /** LlmProvider used for planning (drives ToolDecisionEngine). */
-  planningLlm: LlmProvider;
-  /** LlmProvider used for replanning. */
-  replanningLlm: LlmProvider;
-  embeddingService: LlmEmbeddingService;
-  skillEmbeddingCache: SkillEmbeddingCache;
-  modelRouter: ModelRouter;
-  permissionPolicy: PermissionPolicy;
   toolSafetyBoundary: ToolSafetyBoundary;
-  /**
-   * Saves an assistant message with embedding. Reused from the model factory
-   * so the streaming tool path and the response composer share one writer.
-   */
-  saveMessage: (input: {
-    id: string;
-    conversationId: string;
-    role: string;
-    content: string;
-    metadata?: Record<string, unknown>;
-  }) => Promise<void>;
 }
 
 export interface ToolFactoryResult {
-  toolArgBuilder: DefaultToolArgumentBuilder;
-  toolRetriever: ToolRetriever;
-  listSkillSummaries: () => Promise<
-    Array<{
-      id: string;
-      name: string;
-      description: string;
-      category: string;
-      enabled: boolean;
-      permissions: Permission[];
-      defaultTimeoutMs: number;
-      maxTimeoutMs: number;
-      supportsAbort: boolean;
-      idempotent: boolean;
-      inputSchema: Record<string, unknown> | undefined;
-      outputSchema: Record<string, unknown> | undefined;
-      sideEffects: "none" | "readonly" | "mutation" | "network" | "destructive";
-      riskHints: { defaultRisk: "low" | "medium" | "high" | "critical" };
-    }>
-  >;
-  planner: RuleBasedPlanner;
-  planValidator: PlanValidator;
-  replanner: Replanner;
+  listSkillSummaries: () => Promise<SkillSummary[]>;
   skillExecutor: SkillToolExecutor;
   executionOrchestrator: ExecutionOrchestrator;
-  toolDecisionEngine: ToolDecisionEngine;
 }
 
 export function createToolLayer(deps: ToolFactoryDeps): ToolFactoryResult {
@@ -95,27 +38,8 @@ export function createToolLayer(deps: ToolFactoryDeps): ToolFactoryResult {
     rawEventBus,
     skillRegistry,
     skillRunner,
-    toolArgLlm,
-    planningLlm,
-    replanningLlm,
-    embeddingService,
-    skillEmbeddingCache,
-    modelRouter,
-    permissionPolicy,
     toolSafetyBoundary,
-    saveMessage,
   } = deps;
-
-  // ── Tools ──────────────────────────────────────────────────────
-  // Shared argument builder — used by both ToolDecisionEngine (build)
-  // and ExecutionOrchestrator (repair loop).
-  const toolArgBuilder = new DefaultToolArgumentBuilder({
-    llm: toolArgLlm,
-  });
-
-  // ToolRetriever — multi-layer tool retrieval pipeline (§2)
-  // Uses embedding service for semantic similarity scoring when available.
-  const toolRetriever = new ToolRetriever();
 
   // §Bugfix: Load JSON schema from file path when inputSchema is a string
   const loadSchema = (
@@ -134,7 +58,7 @@ export function createToolLayer(deps: ToolFactoryDeps): ToolFactoryResult {
   };
 
   // Shared helper — builds SkillSummary[] from skill registry (§refactor)
-  const listSkillSummaries = async () => {
+  const listSkillSummaries: ToolFactoryResult["listSkillSummaries"] = async () => {
     const skills = skillRegistry.list();
     return skills.flatMap((s) =>
       s.manifest.capabilities.map((capability) => {
@@ -169,50 +93,6 @@ export function createToolLayer(deps: ToolFactoryDeps): ToolFactoryResult {
     );
   };
 
-  // ── Pre-warm embedding cache at startup ────────────────────────
-  // §P1-2: Use shared SkillEmbeddingCache instead of raw embedding service.
-  // Pre-warm with skill id/name/description/category so both IntentRouter
-  // and ToolRetriever can serve from cache without duplicate API calls.
-  // Fire-and-forget — cache is an optimization, first request falls back
-  // to on-demand computation if pre-warm hasn't completed.
-  listSkillSummaries()
-    .then((skills) => {
-      const skillRecords = skills.map((s) => ({
-        id: s.id,
-        name: s.name,
-        description: s.description,
-        category: s.category,
-      }));
-      if (skillRecords.length > 0) {
-        skillEmbeddingCache.preWarm(skillRecords).catch((err) => {
-          console.warn(
-            "[embedding] pre-warm batch failed:",
-            (err as Error).message,
-          );
-        });
-      }
-      console.log(
-        `[embedding] pre-warm queued for ${skillRecords.length} skills (cache size: ${skillEmbeddingCache.size})`,
-      );
-    })
-    .catch(() => {
-      // Skill registry unavailable at startup — cache will populate on demand
-    });
-
-  // ── Planner ────────────────────────────────────────────────────
-  const planner = new RuleBasedPlanner();
-
-  // ── Plan Validator (§1 of architecture next steps) ──────────────
-  const planValidator = new PlanValidator({
-    listSkills: listSkillSummaries,
-  });
-
-  // ── Replanner (§1 of architecture next steps) ──────────────────
-  const replanner = new Replanner({
-    listSkills: listSkillSummaries,
-    llm: replanningLlm,
-  });
-
   // ── Execution ──────────────────────────────────────────────────
   // Skill executor: delegates to SkillToolExecutor in core.
   const skillExecutor = new SkillToolExecutor({
@@ -245,47 +125,13 @@ export function createToolLayer(deps: ToolFactoryDeps): ToolFactoryResult {
     toolExecutor: skillExecutor,
     eventBus: rawEventBus,
     toolCalls: database.toolCalls,
-    argumentBuilder: toolArgBuilder,
     safetyBoundary: toolSafetyBoundary,
   });
 
-  // ── Tool Decision Engine ────────────────────────────────────────
-  // Unified tool decision + streaming execution engine.
-  // LLM native function calling interleaves text + tool calls —
-  // Claude Code-style streaming UX. Falls back to traditional
-  // safety + execution path on error.
-  const toolDecisionEngine = new ToolDecisionEngine({
-    listSkills: listSkillSummaries,
-    llm: planningLlm,
-    argumentBuilder: toolArgBuilder,
-    toolRetriever,
-    embeddingService,
-    skillEmbeddingCache,
-    // Streaming execution deps
-    eventBus: rawEventBus,
-    modelRouter,
-    permissionPolicy,
-    executionOrchestrator,
-    saveMessage: saveMessage as (msg: {
-      id: string;
-      conversationId: string;
-      role: "assistant";
-      content: string;
-      runId: string;
-      metadata?: Record<string, unknown>;
-    }) => Promise<void>,
-  });
-
   return {
-    toolArgBuilder,
-    toolRetriever,
     listSkillSummaries,
-    planner,
-    planValidator,
-    replanner,
     skillExecutor,
     executionOrchestrator,
-    toolDecisionEngine,
   };
 }
 

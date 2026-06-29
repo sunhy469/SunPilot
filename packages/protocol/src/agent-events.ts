@@ -49,6 +49,7 @@ export const AGENT_EVENT_TYPES = [
   "agent.model.delta",
   "agent.model.completed",
   "agent.model.failed",
+  "agent.react.turn.completed",
   "agent.clarification.requested",
   // Error
   "agent.error",

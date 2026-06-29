@@ -5,20 +5,16 @@ import type {
   AgentObservation,
   ArtifactRef,
   ExecutionOrchestrator as ExecutionOrchestratorInterface,
-  IntentRouter,
   PlannedToolCall,
   ToolCallSummary,
-  ToolDecision,
 } from "../loop-types.js";
 import {
   DEFAULT_CONCURRENCY,
   MAX_RETRIES,
-  MAX_REPAIR_ATTEMPTS,
   RETRY_BACKOFF,
   isRetryable,
   type ToolExecutor,
 } from "./execution-types.js";
-import type { ToolArgumentBuilder } from "../tools/tool-argument-builder.js";
 import type {
   ApprovedToolScope,
   ToolSafetyBoundary,
@@ -31,8 +27,6 @@ export interface ExecutionOrchestratorDeps {
   eventBus: AgentEventBus;
   /** Durable audit log for tool invocations. */
   toolCalls?: ToolCallRepository;
-  /** Optional schema-aware argument builder for repair loops. */
-  argumentBuilder?: ToolArgumentBuilder;
   /** Single pre/post tool security boundary. */
   safetyBoundary: ToolSafetyBoundary;
 }
@@ -56,11 +50,7 @@ export class ExecutionOrchestrator implements ExecutionOrchestratorInterface {
     input: {
       runId: string;
       context: AgentContext;
-      intent: ReturnType<IntentRouter["route"]> extends Promise<infer T>
-        ? T
-        : never;
-      plan?: import("../loop-types.js").AgentPlan;
-      decision: ToolDecision & { type: "use_tool" };
+      calls: PlannedToolCall[];
       permissionMode?: "ask" | "auto" | "full";
       approvedTools?: ApprovedToolScope[];
       /** Optional progress callback for content-block status updates (§P1-4). */
@@ -68,8 +58,7 @@ export class ExecutionOrchestrator implements ExecutionOrchestratorInterface {
     },
     signal: AbortSignal,
   ): Promise<AgentObservation> {
-    const { runId, context, decision, onProgress } = input;
-    const toolCalls = decision.toolCalls;
+    const { runId, context, calls: toolCalls, onProgress } = input;
     const results: ToolCallSummary[] = [];
     const allArtifacts: ArtifactRef[] = [];
 
@@ -173,59 +162,14 @@ export class ExecutionOrchestrator implements ExecutionOrchestratorInterface {
       );
     }
 
-    // ── Validate arguments against schema before execution ───────────
-    // Supports repair loop: on validation failure, feed errors back to
-    // argument builder for regeneration, up to MAX_REPAIR_ATTEMPTS.
-    // Tracks repair history for long-term audit.
+    // Guard validation is repeated defensively at the execution boundary,
+    // but execution never invokes a second semantic repair model. Invalid
+    // calls return a failed observation to the next ReAct turn.
     let currentArgs = call.arguments;
-    let currentSchema = call.inputSchema;
-    const originalArgs = { ...call.arguments };
-    const repairHistory: Record<string, unknown>[] = [];
-
+    const currentSchema = call.inputSchema;
     if (currentSchema) {
-      for (let repairAttempt = 0; repairAttempt <= MAX_REPAIR_ATTEMPTS; repairAttempt++) {
-        const validationErrors = validateArguments(currentArgs, currentSchema);
-        if (validationErrors.length === 0) break; // valid, proceed to execution
-
-        // If we have an argument builder, attempt repair
-        if (this.deps.argumentBuilder && repairAttempt < MAX_REPAIR_ATTEMPTS) {
-          // §B15: the validation_failed event is emitted once at the final
-          // failure point below; don't duplicate it here before each repair
-          // attempt (the repairHistory array already records each attempt).
-          try {
-            const repairEntry: Record<string, unknown> = {
-              attempt: repairAttempt,
-              beforeArgs: { ...currentArgs },
-              validationErrors: [...validationErrors],
-            };
-            const repaired = await this.deps.argumentBuilder.repair(
-              {
-                skillId: call.skillId,
-                name: call.name,
-                currentArgs,
-                schema: currentSchema,
-                validationErrors,
-              },
-              signal,
-            );
-            repairEntry.afterArgs = { ...repaired.arguments };
-            repairEntry.repairSource = "heuristic";
-            repairHistory.push(repairEntry);
-            // §B15: don't mutate the input `call` object — track locally.
-            currentArgs = repaired.arguments;
-            continue;
-          } catch {
-            // Repair failed — fall through to mark as failed
-            repairHistory.push({
-              attempt: repairAttempt,
-              beforeArgs: { ...currentArgs },
-              validationErrors: [...validationErrors],
-            });
-          }
-        }
-
-        // No repair possible or repair exhausted — mark as failed
-        // ... (rest of the failure handling)
+      const validationErrors = validateArguments(currentArgs, currentSchema);
+      if (validationErrors.length > 0) {
         this.deps.eventBus.emit(
           "agent.tool_argument.validation_failed",
           {
@@ -266,9 +210,8 @@ export class ExecutionOrchestrator implements ExecutionOrchestratorInterface {
             argumentSources: call.argumentSources ?? [],
             inputSchema: call.inputSchema ? true : false,
             validationErrors,
-            repairHistory:
-              repairHistory.length > 0 ? repairHistory : undefined,
-            repairExhausted: repairHistory.length > 0,
+            repairHistory: undefined,
+            repairExhausted: false,
           },
         });
         return {
@@ -355,14 +298,6 @@ export class ExecutionOrchestrator implements ExecutionOrchestratorInterface {
         ...(call.metadata ?? {}),
         argumentSources: call.argumentSources ?? [],
         inputSchema: call.inputSchema ? true : false,
-        repairHistory:
-          repairHistory.length > 0
-            ? repairHistory
-            : undefined,
-        wasRepaired:
-          repairHistory.length > 0
-            ? { originalArgs, repairedArgs: currentArgs }
-            : undefined,
       },
     });
 

@@ -40,7 +40,7 @@ export interface McpTool {
  * MCP → SkillSummary adapter.
  *
  * Converts an MCP tool definition into the SkillSummary format
- * that ToolRetriever and ToolDecisionEngine understand. This is
+ * that the ReAct tool catalog understands. This is
  * the mandatory entry point for all MCP tools — nothing bypasses
  * the retrieval pipeline.
  */

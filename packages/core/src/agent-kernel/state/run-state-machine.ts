@@ -7,24 +7,14 @@ import type { AgentLoopStatus } from "../loop-types.js";
  * 终态（completed / cancelled / failed）没有合法后续转换。
  */
 export const LEGAL_TRANSITIONS: Record<AgentLoopStatus, readonly AgentLoopStatus[]> = {
-  created: ["context_building", "cancelled", "failed"],
-  context_building: ["intent_routing", "cancelled", "failed"],
-  intent_routing: ["planning", "tool_deciding", "responding", "cancelled", "failed"],
-  planning: ["tool_deciding", "waiting_approval", "cancelled", "failed"],
-  tool_deciding: ["waiting_approval", "executing", "responding", "cancelled", "failed"],
-  waiting_approval: ["executing", "cancelled", "failed", "interrupted"],
-  executing: ["observing", "reflecting", "responding", "waiting_approval", "cancelled", "failed"],
-  observing: ["reflecting", "responding", "cancelled", "failed"],
-  reflecting: ["tool_deciding", "responding", "cancelled", "failed"],
-  responding: ["completed", "cancelled", "failed"],
+  created: ["running", "cancelled", "failed"],
+  running: ["waiting_approval", "waiting_user", "completed", "cancelled", "failed", "interrupted"],
+  waiting_approval: ["running", "cancelled", "failed", "interrupted"],
+  waiting_user: ["running", "cancelled", "failed", "interrupted"],
   completed: [],
   cancelled: [],
   failed: [],
-  // §B23: allow resuming an interrupted run by re-entering the early phases
-  // (full restart via `created`, or context rebuild via `context_building`).
-  // §Ar13: also allow resuming directly to `executing` when the interruption
-  // was caused by a pending approval that has since been resolved.
-  interrupted: ["cancelled", "failed", "created", "context_building", "executing"],
+  interrupted: ["running", "cancelled", "failed"],
 };
 
 /**

@@ -672,10 +672,10 @@ export class AgentServiceImplementation {
   }
 
   /**
-   * 恢复一个被中断/暂停的 Run。
-   * 内部复用 createRunAttempt("resume")，校验状态为 interruptable 后创建新 Run。
+   * 恢复一个被中断/暂停的 Run。waiting_user 和带 ReAct checkpoint
+   * 的 interrupted Run 都在原 run/message/transcript 上继续。
    */
-  async resumeRun(runId: string): Promise<{
+  async resumeRun(runId: string, userMessage?: string): Promise<{
     resumed: true;
     originalRunId: string;
     runId: string;
@@ -683,6 +683,59 @@ export class AgentServiceImplementation {
     messageId: string;
     status: AgentLoopResult["status"];
   }> {
+    const run = await this.loopConfig.runStateManager.getRun(runId);
+    if (run?.status === "waiting_user") {
+      if (!userMessage?.trim()) {
+        throw Object.assign(
+          new Error(`Run ${runId} is waiting for user input`),
+          {
+            code: "AGENT_USER_INPUT_REQUIRED",
+            category: "run_state",
+            retryable: true,
+          },
+        );
+      }
+      const signal = this.loopConfig.abortRegistry.create(runId);
+      try {
+        const result = await this.loopConfig.loopEngine.resumeWithUserInput(
+          {
+            runId,
+            conversationId: run.conversationId,
+            message: userMessage.trim(),
+          },
+          signal,
+        );
+        return {
+          resumed: true,
+          originalRunId: runId,
+          runId,
+          conversationId: result.conversationId,
+          messageId: result.assistantMessageId ?? runId,
+          status: result.status,
+        };
+      } finally {
+        this.loopConfig.abortRegistry.remove(runId);
+      }
+    }
+    if (run?.status === "interrupted" && run.taskState?.gatheredFacts.reactCheckpoint) {
+      const signal = this.loopConfig.abortRegistry.create(runId);
+      try {
+        const result = await this.loopConfig.loopEngine.resumeInterrupted(
+          { runId },
+          signal,
+        );
+        return {
+          resumed: true,
+          originalRunId: runId,
+          runId,
+          conversationId: result.conversationId,
+          messageId: result.assistantMessageId ?? runId,
+          status: result.status,
+        };
+      } finally {
+        this.loopConfig.abortRegistry.remove(runId);
+      }
+    }
     return this.createRunAttempt(runId, "resume");
   }
 
@@ -774,7 +827,7 @@ export class AgentServiceImplementation {
    * 拒绝一个待审批的请求。
    *
    * 拒绝策略 (rejectionStrategy):
-   *   - "cancel": 取消 run（默认，原行为是保持 waiting_approval）
+   *   - "cancel": 取消 run
    *   - "interrupt": 中断 run，允许用户后续重试
    *   - "continue_without_tool": 跳过被拒绝的工具，继续 agent loop
    *
@@ -784,7 +837,7 @@ export class AgentServiceImplementation {
     approvalId: string,
     decidedBy?: string,
     reason?: string,
-    rejectionStrategy: "cancel" | "interrupt" | "continue_without_tool" = "interrupt",
+    rejectionStrategy: "cancel" | "interrupt" | "continue_without_tool" = "continue_without_tool",
   ): Promise<{ rejected: boolean; runId: string; strategy: string }> {
     const approval = this.loopConfig.approvalDecisionService
       ? await this.loopConfig.approvalDecisionService.reject(
@@ -854,14 +907,9 @@ export class AgentServiceImplementation {
           status: "completed",
           label: `已拒绝，正在继续处理`,
         });
-        // Continue the agent loop without the rejected tool.
-        // Fire-and-forget in background: rebuilds context, reflects,
-        // and responds to the user explaining the tool was skipped.
-        await this.loopConfig.runStateManager.markStatus(
-          approval.runId,
-          "responding",
-          reason ?? "approval rejected — continuing without tool",
-        );
+        // The continuation atomically validates waiting_approval and then
+        // moves the same run to running. Do not pre-transition here or the
+        // checkpoint ownership check will correctly reject the resume.
         queueMicrotask(() => {
           const signal = this.loopConfig.abortRegistry.create(approval.runId);
           this.loopConfig.loopEngine
@@ -875,11 +923,27 @@ export class AgentServiceImplementation {
                   run?.mode === "chat" || run?.mode === "agent"
                     ? run.mode
                     : "agent",
+                reason,
               },
               signal,
             )
-            .catch(() => {
-              // Best effort — errors handled internally by loop engine
+            .catch(async (error) => {
+              await this.loopConfig.runStateManager.markFailed(
+                approval.runId,
+                error,
+              );
+              this.loopConfig.eventBus.emit(
+                "agent.error",
+                {
+                  runId: approval.runId,
+                  conversationId,
+                  code: "AGENT_REJECTION_CONTINUATION_FAILED",
+                  message: error instanceof Error ? error.message : String(error),
+                  category: "run_state",
+                  retryable: true,
+                },
+                { runId: approval.runId, conversationId },
+              );
             })
             .finally(() => {
               this.loopConfig.abortRegistry.remove(approval.runId);

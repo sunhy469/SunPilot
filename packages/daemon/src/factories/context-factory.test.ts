@@ -2,12 +2,10 @@ import { describe, expect, test } from "vitest";
 import { InMemoryDatabaseContext } from "@sunpilot/storage";
 import type { InstalledSkillRecord } from "@sunpilot/protocol";
 import {
-  parseEnv,
   InMemoryAgentEventBus,
   LlmEmbeddingService,
   RepositoryTraceManager,
   TraceManager,
-  SkillEmbeddingCache,
   type LlmProvider,
 } from "@sunpilot/core";
 
@@ -57,43 +55,34 @@ const installedSkill: InstalledSkillRecord = {
 describe("createContextLayer", () => {
   function setup() {
     const db = new InMemoryDatabaseContext();
-    const env = parseEnv(process.env);
     const rawEventBus = new InMemoryAgentEventBus();
     const embeddingService = new LlmEmbeddingService({ dimension: 1536 });
-    const skillEmbeddingCache = new SkillEmbeddingCache(embeddingService);
     const skillRegistry = { list: () => [installedSkill] } as any;
 
     return createContextLayer({
       database: db,
-      env,
       rawEventBus,
       embeddingService,
-      skillEmbeddingCache,
-      intentLlm: fakeLlm,
-      reflectionLlm: fakeLlm,
+      summaryLlm: fakeLlm,
       skillRegistry,
       systemPrompt: "test persona",
     });
   }
 
-  test("returns contextBuilder, intentRouter, reflectionEngine, memoryWriter, traceManager", () => {
+  test("returns contextBuilder, memoryWriter and traceManager", () => {
     const result = setup();
 
     expect(result.contextBuilder).toBeDefined();
-    expect(result.intentRouter).toBeDefined();
-    expect(result.reflectionEngine).toBeDefined();
     expect(result.rawMemoryWriter).toBeDefined();
     expect(result.memoryWriter).toBeDefined();
     expect(result.traceManager).toBeDefined();
   });
 
-  test("reflectionLlm is invoked when ContextBuilder summarizes a memory", async () => {
+  test("summary LLM is wired lazily into ContextBuilder", async () => {
     let invoked = false;
     const db = new InMemoryDatabaseContext();
-    const env = parseEnv(process.env);
     const rawEventBus = new InMemoryAgentEventBus();
     const embeddingService = new LlmEmbeddingService({ dimension: 1536 });
-    const skillEmbeddingCache = new SkillEmbeddingCache(embeddingService);
     const trackingLlm: LlmProvider = {
       id: "fake",
       model: "fake-model",
@@ -105,39 +94,28 @@ describe("createContextLayer", () => {
 
     const { contextBuilder } = createContextLayer({
       database: db,
-      env,
       rawEventBus,
       embeddingService,
-      skillEmbeddingCache,
-      intentLlm: fakeLlm,
-      reflectionLlm: trackingLlm,
+      summaryLlm: trackingLlm,
       skillRegistry: { list: () => [] } as any,
     });
 
-    // Pull the summarizeMemory callback out by exercising it through the
-    // public build path — ContextBuilder exposes summarizeMemory via the
-    // returned deps shape (kept private), so we instead check that the
-    // factory wired the same LlmProvider instance into intentRouter via
-    // the embeddingThreshold path.
+    // Memory compression is triggered only when the context budget requires
+    // it; constructing the context layer must not make a semantic model call.
     expect(contextBuilder).toBeDefined();
     expect(invoked).toBe(false); // No call yet — wiring is lazy
   });
 
   test("default systemPrompt is used when none is supplied", () => {
     const db = new InMemoryDatabaseContext();
-    const env = parseEnv(process.env);
     const rawEventBus = new InMemoryAgentEventBus();
     const embeddingService = new LlmEmbeddingService({ dimension: 1536 });
-    const skillEmbeddingCache = new SkillEmbeddingCache(embeddingService);
 
     const result = createContextLayer({
       database: db,
-      env,
       rawEventBus,
       embeddingService,
-      skillEmbeddingCache,
-      intentLlm: fakeLlm,
-      reflectionLlm: fakeLlm,
+      summaryLlm: fakeLlm,
       skillRegistry: { list: () => [] } as any,
       // systemPrompt omitted on purpose
     });
@@ -147,19 +125,14 @@ describe("createContextLayer", () => {
 
   test("traceManager falls back to in-memory TraceManager when DB has no agentTraces repo", () => {
     const db = new InMemoryDatabaseContext();
-    const env = parseEnv(process.env);
     const rawEventBus = new InMemoryAgentEventBus();
     const embeddingService = new LlmEmbeddingService({ dimension: 1536 });
-    const skillEmbeddingCache = new SkillEmbeddingCache(embeddingService);
 
     const { traceManager } = createContextLayer({
       database: db,
-      env,
       rawEventBus,
       embeddingService,
-      skillEmbeddingCache,
-      intentLlm: fakeLlm,
-      reflectionLlm: fakeLlm,
+      summaryLlm: fakeLlm,
       skillRegistry: { list: () => [] } as any,
     });
 
@@ -178,19 +151,14 @@ describe("createContextLayer", () => {
         listByRunId: async () => [],
       },
     });
-    const env = parseEnv(process.env);
     const rawEventBus = new InMemoryAgentEventBus();
     const embeddingService = new LlmEmbeddingService({ dimension: 1536 });
-    const skillEmbeddingCache = new SkillEmbeddingCache(embeddingService);
 
     const { traceManager } = createContextLayer({
       database: dbWithTraces as any,
-      env,
       rawEventBus,
       embeddingService,
-      skillEmbeddingCache,
-      intentLlm: fakeLlm,
-      reflectionLlm: fakeLlm,
+      summaryLlm: fakeLlm,
       skillRegistry: { list: () => [] } as any,
     });
 
@@ -206,8 +174,4 @@ describe("createContextLayer", () => {
     expect(memoryWriter).not.toBe(rawMemoryWriter);
   });
 
-  test("intentRouter is configured with the injected intentLlm", () => {
-    const { intentRouter } = setup();
-    expect(intentRouter).toBeDefined();
-  });
 });
