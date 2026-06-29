@@ -1,26 +1,30 @@
 import type { AgentLoopInput, PreliminaryInferenceResult } from "../loop-types.js";
 import type { AgentLoopEngineDeps } from "../agent-loop-engine.js";
+import type { IAssistantMessageStream } from "../loop-types.js";
 
 /** Best-effort lightweight routing inference, isolated from the formal response stream. */
 export class PreliminaryInferenceService {
   constructor(private readonly deps: AgentLoopEngineDeps) {}
 
   /**
-   * §Parallel optimization: Run a lightweight LLM pre-inference using
-   * only the user message + system prompt (no context). This produces
-   * tool-matching hints that can accelerate downstream routing.
+   * §ReAct: Run a lightweight LLM pre-inference using only the user
+   * message + system prompt (no full context). The model outputs:
+   *   1. A brief natural-language thinking message (written to the stream)
+   *   2. A JSON routing block with intent + tool hints
    *
-   * IMPORTANT: This method does NOT write to the formal
-   * AssistantMessageStream. Pre-inference text is collected internally
-   * and only used for tool hint extraction. The formal stream is created
-   * later in runContentBlockLoop(), ensuring clean message persistence
-   * and avoiding history pollution.
+   * The thinking text replaces the old template preface ("我先调用xxx"),
+   * giving users a natural-language explanation of what the agent is about
+   * to do.
+   *
+   * When a stream is provided, the thinking text is written as a "progress"
+   * text part so the frontend renders it in the thinking section.
    *
    * Best-effort: failure does not affect the main flow.
    */
   async run(
     input: AgentLoopInput,
     signal: AbortSignal,
+    stream?: IAssistantMessageStream,
   ): Promise<PreliminaryInferenceResult | undefined> {
     const t0 = Date.now();
     try {
@@ -29,8 +33,6 @@ export class PreliminaryInferenceService {
         { role: "user" as const, content: input.message },
       ];
 
-      // Collect pre-inference text without writing to the formal stream.
-      // The text is only used for tool hint extraction.
       let fullText = "";
       const modelRouter = this.deps.modelRouter!;
       for await (const chunk of modelRouter.streamChat("intent_classification", { messages }, signal)) {
@@ -38,13 +40,21 @@ export class PreliminaryInferenceService {
         fullText += chunk.delta;
       }
 
-      // §P3 opt: Extract full intent + tool hints from the pre-inference JSON.
-      // When intent confidence ≥ 0.7, the main IntentRouter can skip its
-      // own Layer 2 LLM call, saving ~200-800ms.
-      const parsed = this.parsePreInferenceResponse(fullText);
+      // §ReAct: Split the response into thinking text + JSON routing block.
+      // The model outputs: [optional thinking text] {JSON}
+      const { thinkingText, jsonText } = this.splitThinkingAndJson(fullText);
+      const parsed = this.parsePreInferenceResponse(jsonText);
       const toolHints = parsed.toolHints;
       const intentType = parsed.intentType;
       const intentConfidence = parsed.intentConfidence;
+
+      // §ReAct: Write thinking text to the stream as a "progress" text part.
+      // This replaces the old template preface with natural LLM output.
+      if (stream && thinkingText && thinkingText.trim().length > 0) {
+        const prefacePart = stream.startTextPart("progress");
+        stream.appendText(prefacePart.id, thinkingText.trim());
+        stream.completeTextPart(prefacePart.id);
+      }
 
       // Record trace metadata for observability
       if (this.deps.traceManager) {
@@ -53,17 +63,15 @@ export class PreliminaryInferenceService {
         endSpan("preliminary_inference_completed", {
           modelCalls: 1,
           latencyMs: preInferenceMs,
-          // §P3: Track pre-inference intent quality for observability
           preInferenceIntentType: intentType,
           preInferenceConfidence: intentConfidence,
           preInferenceLatencyMs: preInferenceMs,
         });
       }
 
-      return { text: fullText, toolHints, intentType, intentConfidence };
+      return { text: fullText, thinkingText, toolHints, intentType, intentConfidence };
     } catch (error) {
       // Pre-inference is best-effort — never block the main flow.
-      // Record failure in trace for observability.
       if (this.deps.traceManager) {
         const { endSpan } = this.deps.traceManager.startSpan(input.runId, "pre_inference_await");
         endSpan("preliminary_inference_failed", {
@@ -75,28 +83,40 @@ export class PreliminaryInferenceService {
     }
   }
 
-  /** Build a minimal system prompt for the pre-inference LLM call.
-   *  §P2: Changed from natural language acknowledgment to structured JSON
-   *  hint — avoids generating useless text and produces parseable tool hints.
-   *  §3.3: Expanded categories to cover diagnostics, automation, and
-   *  artifact_generation so more queries can skip Layer 2 LLM routing. */
-  private buildPreliminarySystemPrompt(): string {
-    return `You are SunPilot's internal router. Analyze the user message and respond with ONLY a JSON object containing routing hints. Do NOT produce natural language.
+  /** §ReAct: Split the model response into thinking text (before the JSON
+   *  block) and the JSON routing block. Strips prompt formatting labels
+   *  ("PART 1", "Thinking:", "PART 2", "Routing JSON:") that the model
+   *  may echo from the system prompt. */
+  private splitThinkingAndJson(fullText: string): { thinkingText?: string; jsonText: string } {
+    const jsonStart = fullText.indexOf("{");
+    if (jsonStart <= 0) {
+      return { jsonText: fullText };
+    }
+    let thinkingText = fullText.slice(0, jsonStart).trim();
+    // Strip prompt labels that the model may have echoed
+    thinkingText = thinkingText
+      .replace(/^PART\s*1\s*[-:.]?\s*/i, "")
+      .replace(/^Thinking\s*[:：]\s*/i, "")
+      .replace(/PART\s*2\s*[-:.]?\s*Routing\s*JSON\s*[:：]?\s*/gi, "")
+      .replace(/Routing\s*JSON\s*[:：]\s*/gi, "")
+      .trim();
+    const jsonText = fullText.slice(jsonStart).trim();
+    return { thinkingText: thinkingText || undefined, jsonText };
+  }
 
-Output format:
-{"intentCategory": "product_search"|"image_analysis"|"casual_chat"|"data_analysis"|"web_search"|"file_operation"|"diagnostics"|"automation"|"artifact_generation"|"unknown", "toolHints": [{"category": "product sourcing|image analysis|camera|data|web|diagnostics|automation|artifact", "confidence": 0.0-1.0}], "isSimpleChat": true|false}
+  /** Build a minimal system prompt for the pre-inference LLM call.
+   *  §ReAct: The model outputs a brief natural-language thinking message
+   *  first, then a JSON routing block. The thinking text is user-visible
+   *  and replaces the old template preface. */
+  private buildPreliminarySystemPrompt(): string {
+    return `You are SunPilot's internal router. Analyze the user message and respond with:
+1. ONE brief Chinese sentence explaining what you're about to do (e.g. "我先去1688搜索这件衬衫的同款货源")
+2. A JSON routing object: {"intentCategory": "product_search"|"image_analysis"|"casual_chat"|"data_analysis"|"web_search"|"file_operation"|"diagnostics"|"automation"|"artifact_generation"|"unknown", "toolHints": [{"category": "product sourcing|image analysis|camera|data|web|diagnostics|automation|artifact", "confidence": 0.0-1.0}], "isSimpleChat": true|false}
 
 Rules:
-- "intentCategory": best-guess category of the user's request
-- "toolHints": up to 3 relevant tool categories with confidence scores
-- "isSimpleChat": true if this is clearly just conversation (greetings, thanks, small talk)
-
-Category guidance:
-- "diagnostics": troubleshooting, error analysis, system inspection
-- "automation": multi-step workflow execution, batch operations
-- "artifact_generation": creating documents, reports, code files, images
-
-Keep your response to the JSON object ONLY — no preamble, no explanation.`;
+- Output the Chinese sentence first, then the JSON on its own line
+- Do NOT wrap JSON in markdown code fences
+- Do NOT add labels like "PART 1" or "Thinking:" — just output the sentence directly`;
   }
 
   /** §P3 opt: Parse the pre-inference JSON response, extracting both intent

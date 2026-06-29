@@ -110,6 +110,11 @@ export class NativeToolLoopExecutor {
       toolSkillIds?: string[];
       /** Optional IAssistantMessageStream for content-block parts emission (§Phase 3). */
       stream?: IAssistantMessageStream;
+      /** §ReAct: When true, skip the first streamLlmTurn() entirely.
+       *  Pre-inference already wrote thinking text AND the tools are
+       *  pre-determined — go directly to tool execution, then call
+       *  the LLM only for synthesizing results into a final answer. */
+      skipFirstLlmTurn?: boolean;
     },
     signal: AbortSignal,
   ): Promise<{
@@ -196,6 +201,7 @@ export class NativeToolLoopExecutor {
       let iteration = 0;
       let currentMessages = messages;
       let summarizeStatusId: string | undefined;
+      let retryHintInjected = false;
       // §P0-3: Aggregate timing across tool execution rounds
       let totalToolExecutionMs = 0;
       let firstRoundFirstTokenMs = 0;
@@ -204,6 +210,150 @@ export class NativeToolLoopExecutor {
       // Simple tasks get the default 5; complex/long-running intents and
       // multi-step plans get more headroom so they don't get truncated.
       const maxIterations = computeMaxIterations(intent, plan);
+
+      // §ReAct: When pre-inference already determined the tools AND wrote
+      // thinking text to the stream, skip the first streamLlmTurn() entirely.
+      // Go directly to tool execution, then call the LLM only for synthesizing
+      // results into a final answer. This saves one LLM call per run.
+      if (input.skipFirstLlmTurn && toolSkillIds && toolSkillIds.length > 0) {
+        iteration = 1; // Mark first iteration as done
+        firstRoundFirstTokenMs = 0; // No LLM call, no token timing
+
+        // Build synthetic tool calls from pre-determined skill IDs.
+        // Find the function name for each skill ID (reverse nameMap lookup).
+        const syntheticToolCalls: ToolCall[] = [];
+        for (const skillId of toolSkillIds) {
+          let functionName: string | undefined;
+          for (const [fnName, sId] of nameMap) {
+            if (sId === skillId) {
+              functionName = fnName;
+              break;
+            }
+          }
+          if (!functionName) continue;
+          syntheticToolCalls.push({
+            id: `call_${crypto.randomUUID()}`,
+            type: "function" as const,
+            function: { name: functionName, arguments: "{}" },
+          });
+        }
+
+        if (syntheticToolCalls.length > 0) {
+          // Tool call signature dedup
+          let duplicateBlocked = false;
+          for (const tc of syntheticToolCalls) {
+            const skillId = nameMap.get(tc.function.name) ?? tc.function.name;
+            const signature = `${skillId}:${stableStringifyArgs(tc.function.arguments)}`;
+            if (seenToolCallSignatures.has(signature)) {
+              if (stream) {
+                stream.addError({
+                  code: "DUPLICATE_TOOL_CALL_BLOCKED",
+                  message: "已阻止重复工具调用。",
+                  recoverable: true,
+                });
+              }
+              duplicateBlocked = true;
+            }
+            seenToolCallSignatures.add(signature);
+          }
+
+          if (!duplicateBlocked) {
+            // Execute tools directly (algorithm path, no LLM call for tool decision)
+            const toolExecStart = Date.now();
+            const toolResults = await this.toolCallExecutor.execute(
+              runId,
+              conversationId,
+              syntheticToolCalls,
+              nameMap,
+              context,
+              intent,
+              allSkills,
+              signal,
+              stream,
+              input.permissionMode,
+            );
+            totalToolExecutionMs += Date.now() - toolExecStart;
+            allArtifacts.push(...toolResults.artifacts);
+
+            if (toolResults.approvalRequired?.length) {
+              return {
+                messageId,
+                content: fullContent,
+                artifacts: allArtifacts,
+                toolCalls: allToolCallSummaries,
+                approvalRequired: toolResults.approvalRequired,
+                timing: {
+                  toolRetrievalMs,
+                  totalToolExecutionMs,
+                  firstRoundFirstTokenMs,
+                  finalRoundFirstTokenMs,
+                },
+              };
+            }
+
+            if (toolResults.stop) {
+              if (stream) {
+                const errorText = stream.startTextPart("final");
+                stream.appendText(errorText.id, toolResults.stop.message);
+                stream.completeTextPart(errorText.id);
+              }
+              fullContent += toolResults.stop.message;
+              // Exit early — no synthesis round needed for fatal errors
+              return {
+                messageId,
+                content: fullContent,
+                artifacts: allArtifacts,
+                toolCalls: allToolCallSummaries,
+                timing: {
+                  toolRetrievalMs,
+                  totalToolExecutionMs,
+                  firstRoundFirstTokenMs,
+                  finalRoundFirstTokenMs,
+                },
+              };
+            }
+
+            allToolCallSummaries.push(...toolResults.summaries);
+
+            // Check for direct final projections
+            const completedTools = toolResults.summaries.filter(
+              (s) => s.status === "completed",
+            );
+            const finalProjections = completedTools
+              .map((s) => projectToolResultForModel(s, context.limits.maxTokens))
+              .filter((p) => p.isFinalAnswer);
+
+            if (finalProjections.length > 0 && stream) {
+              const finalText = finalProjections.map((p) => p.modelObservation).join("\n\n");
+              const finalPart = stream.startTextPart("final");
+              stream.appendText(finalPart.id, finalText);
+              fullContent += finalText;
+              stream.completeTextPart(finalPart.id);
+              finalRoundFirstTokenMs = 0;
+              // Direct final — no synthesis LLM needed. Return early.
+              return {
+                messageId,
+                content: fullContent,
+                artifacts: allArtifacts,
+                toolCalls: allToolCallSummaries,
+                timing: {
+                  toolRetrievalMs,
+                  totalToolExecutionMs,
+                  firstRoundFirstTokenMs,
+                  finalRoundFirstTokenMs,
+                },
+              };
+            }
+
+            // Inject tool results into messages for the synthesis round
+            currentMessages = injectStreamingToolResults(
+              currentMessages,
+              syntheticToolCalls,
+              { summaries: toolResults.summaries, artifacts: toolResults.artifacts },
+            );
+          }
+        }
+      }
 
       while (iteration < maxIterations) {
         if (signal.aborted) break;
@@ -231,29 +381,6 @@ export class NativeToolLoopExecutor {
         }
 
         fullContent += result.textContent;
-
-        // §Phase 2a: Deterministic preface — when the model goes
-        // tool-first with no narrative text, emit a short factual
-        // preface so the user immediately sees what's happening.
-        if (
-          result.toolCalls.length > 0 &&
-          result.textContent.trim().length === 0 &&
-          stream
-        ) {
-          const toolNames = result.toolCalls.map((tc) => {
-            const skillId = nameMap.get(tc.function.name) ?? tc.function.name;
-            const skill = allSkills.find((s) => s.id === skillId);
-            return skill?.name ?? skillId;
-          });
-          const prefaceText =
-            toolNames.length === 1
-              ? `我先调用「${toolNames[0]}」检查相关信息。`
-              : `我先调用${toolNames.map((n) => `「${n}」`).join("、")}检查相关信息。`;
-          const prefacePart = stream.startTextPart("progress");
-          stream.appendText(prefacePart.id, prefaceText);
-          fullContent += prefaceText;
-          stream.completeTextPart(prefacePart.id);
-        }
 
         // Complete the "summarizing" status when LLM starts producing text
         if (summarizeStatusId && result.textContent && stream) {
@@ -426,48 +553,37 @@ export class NativeToolLoopExecutor {
           summarizeStatusId = statusPart.id;
         }
 
-        // If all tools failed or were denied, give the LLM one more
-        // chance to explain the situation, then stop
+        // ── ReAct: If all tools failed, inject a brief hint (once) so
+        // the LLM knows it CAN retry. The LLM decides: call tools again →
+        // retry, or produce only text → final answer. Tools stay available.
         const allFailed = toolResults.summaries.every(
           (s) => s.status !== "completed",
         );
-        if (allFailed && iteration >= 2) {
-          // §P0-1: Final explanation after tool failures is "final" answer.
-          const finalResult = await this.streamLlmTurn(
-            runId,
-            conversationId,
-            messageId,
-            currentMessages,
-            undefined, // no tools — let LLM explain the failure
-            signal,
-            input.modelId,
-            stream,
-            undefined, // lazy text part
-            "final",
-          );
-          // §P0-3: Capture final-round first-token timing
-          finalRoundFirstTokenMs = finalResult.firstTokenMs;
-          fullContent += finalResult.textContent;
-          if (stream && finalResult.textPartId) {
-            stream.completeTextPart(finalResult.textPartId);
-          }
-          break;
+        if (allFailed && iteration < maxIterations && !retryHintInjected) {
+          retryHintInjected = true;
+          currentMessages = [
+            ...currentMessages,
+            {
+              role: "system" as const,
+              content:
+                "工具调用未成功完成。如果需要，你可以重试调用工具；如果无法重试，请向用户解释原因。",
+            },
+          ];
         }
       }
 
-      // ── Deterministic fallback: if tools ran but LLM produced no text content ──
+      // ── Fallback: if tools ran but no text was produced at all (e.g. all
+      //    LLM calls failed), emit a minimal status so the user isn't left
+      //    with a blank message. This is only a safety net, not a template. ──
       if (allArtifacts.length > 0 && stream && !stream.hasTextContent()) {
-        const toolNames = [
-          ...new Set(allArtifacts.map((a) => a.name).filter(Boolean)),
-        ];
-        const fallbackText =
-          toolNames.length > 0
-            ? `已完成${toolNames.join("、")}的搜索，正在整理结果。你可以让我筛选、排序或展示更多详情。`
-            : "工具执行已完成，正在整理结果。";
-        const fallbackPart = stream.startTextPart("final");
-        stream.appendText(fallbackPart.id, fallbackText);
-        fullContent += fallbackText;
-        stream.completeTextPart(fallbackPart.id);
+        const statusPart = stream.startStatus({
+          label: "工具执行完成，等待结果整理...",
+          metadata: { phase: "completed" },
+        });
+        stream.updateStatus(statusPart.id, {
+          status: "completed",
+          label: "工具执行完成",
+        });
       }
 
       // 5. Check for abort after loop — signal may have fired between

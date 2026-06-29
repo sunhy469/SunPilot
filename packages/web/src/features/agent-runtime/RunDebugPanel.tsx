@@ -2,7 +2,7 @@
  * Run Debug Panel — Ant Design powered trace/plan/tool viewer (§P3-11).
  */
 
-import { useState, useEffect, useCallback, type ReactNode } from "react";
+import { useState, useEffect, useCallback, useMemo, type ReactNode } from "react";
 import {
   Spin, Result, Empty, Card, Tag, Tabs, Timeline,
   Alert, Flex, Typography, Button, Space, List, Row, Col,
@@ -12,8 +12,9 @@ import {
   ClockCircleOutlined, ThunderboltOutlined, ToolOutlined,
   RobotOutlined, NodeIndexOutlined, ExclamationCircleOutlined,
   SafetyOutlined,
-  FileSearchOutlined, ExperimentOutlined,
+  FileSearchOutlined, ExperimentOutlined, MessageOutlined,
 } from "@ant-design/icons";
+import { createRequest } from "../../shared/api/client";
 import "./RunDebugPanel.scss";
 
 const { Title, Text, Paragraph } = Typography;
@@ -144,6 +145,7 @@ interface RunSummary {
   id: string;
   status: string;
   mode: string;
+  conversationId?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -205,56 +207,95 @@ function spanKindColor(kind: string): string {
 interface RunDebugPanelProps {
   runId: string | null;
   conversationId?: string;
-  baseUrl?: string;
 }
 
-export function RunDebugPanel({ runId, conversationId, baseUrl = "" }: RunDebugPanelProps) {
+interface ConversationRef {
+  id: string;
+  title: string;
+}
+
+/** Group of runs belonging to one conversation. */
+interface RunGroup {
+  conversation: ConversationRef | null;
+  runs: RunSummary[];
+}
+
+export function RunDebugPanel({ runId, conversationId }: RunDebugPanelProps) {
   const [data, setData] = useState<TraceResponse | null>(null);
   const [loading, setLoading] = useState(Boolean(runId));
   const [error, setError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState("overview");
   const [selectedRunId, setSelectedRunId] = useState<string | null>(runId);
-  const [runList, setRunList] = useState<RunSummary[]>([]);
+  const [runGroups, setRunGroups] = useState<RunGroup[]>([]);
   const [listLoading, setListLoading] = useState(false);
+  const request = useMemo(() => createRequest(), []);
 
   useEffect(() => { if (runId) setSelectedRunId(runId); }, [runId]);
 
+  // Load ALL runs + conversations when no specific runId is selected
   useEffect(() => {
-    if (runId || !conversationId) return;
+    if (runId || selectedRunId) return;
     setListLoading(true);
-    fetch(`${baseUrl}/v1/runs?conversationId=${conversationId}&limit=10`)
-      .then((res) => res.json())
-      .then((json: { items?: RunSummary[] }) => {
-        setRunList((json.items ?? []).filter((r) => r.status !== "running"));
-      })
-      .catch(() => setRunList([]))
-      .finally(() => setListLoading(false));
-  }, [runId, conversationId, baseUrl]);
+    Promise.all([
+      request<{ items: RunSummary[] }>("/v1/runs?limit=200"),
+      request<{ items: ConversationRef[] }>("/v1/conversations?limit=200"),
+    ])
+      .then(([runsRes, convsRes]) => {
+        const runs = (runsRes.items ?? []).filter((r) => r.status !== "running");
+        const convs = convsRes.items ?? [];
+        // Build a conversation title lookup
+        const convMap = new Map<string, ConversationRef>();
+        for (const c of convs) convMap.set(c.id, c);
 
-  const fetchTrace = useCallback(async (signal?: AbortSignal) => {
+        // Group runs by conversationId
+        const groupMap = new Map<string, RunSummary[]>();
+        const noConv: RunSummary[] = [];
+        for (const r of runs) {
+          const cid = (r as { conversationId?: string }).conversationId;
+          if (cid && convMap.has(cid)) {
+            const existing = groupMap.get(cid);
+            if (existing) existing.push(r);
+            else groupMap.set(cid, [r]);
+          } else {
+            noConv.push(r);
+          }
+        }
+
+        // Build ordered groups: conversations with runs first, then orphan runs
+        const groups: RunGroup[] = [];
+        for (const [cid, convRuns] of groupMap) {
+          groups.push({ conversation: convMap.get(cid) ?? null, runs: convRuns });
+        }
+        groups.sort(
+          (a, b) =>
+            new Date(b.runs[0]?.createdAt ?? 0).getTime() -
+            new Date(a.runs[0]?.createdAt ?? 0).getTime(),
+        );
+        if (noConv.length > 0) {
+          groups.push({ conversation: null, runs: noConv });
+        }
+        setRunGroups(groups);
+      })
+      .catch(() => setRunGroups([]))
+      .finally(() => setListLoading(false));
+  }, [runId, selectedRunId, request]);
+
+  const fetchTrace = useCallback(async () => {
     if (!selectedRunId) { setLoading(false); return; }
     setLoading(true);
     setError(null);
     try {
-      // W8: pass an AbortSignal so switching runs cancels the in-flight fetch,
-      // preventing stale responses from overwriting the current view.
-      const res = await fetch(`${baseUrl}/v1/runs/${selectedRunId}/trace`, { signal });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      setData((await res.json()) as TraceResponse);
+      const data = await request<TraceResponse>(`/v1/runs/${selectedRunId}/trace`);
+      setData(data);
     } catch (err) {
-      // AbortError is expected when the run id changes or component unmounts
-      if (err instanceof DOMException && err.name === "AbortError") return;
       setError(err instanceof Error ? err.message : "Failed to load trace");
     } finally {
       setLoading(false);
     }
-  }, [selectedRunId, baseUrl]);
+  }, [selectedRunId, request]);
 
-  // W8: explicit deps + AbortController so rapid run switches cancel stale fetches.
   useEffect(() => {
-    const controller = new AbortController();
-    fetchTrace(controller.signal);
-    return () => controller.abort();
+    fetchTrace();
   }, [fetchTrace]);
 
   // ── Loading ──
@@ -282,7 +323,7 @@ export function RunDebugPanel({ runId, conversationId, baseUrl = "" }: RunDebugP
     );
   }
 
-  // ── Empty / picker ──
+  // ── Run picker (grouped by conversation) ──
   if (!data) {
     if (listLoading) {
       return (
@@ -293,45 +334,97 @@ export function RunDebugPanel({ runId, conversationId, baseUrl = "" }: RunDebugP
         </Flex>
       );
     }
+    const allRuns = runGroups.flatMap((g) => g.runs);
     return (
-      <Flex vertical align="center" justify="center" className="run-debug-panel">
-        <Empty
-          image={<ExperimentOutlined style={{ fontSize: 48, color: "var(--sp-subtle)" }} />}
-          description={
-            <Flex vertical gap={4}>
-              <Title level={5} style={{ margin: 0 }}>
-                {runId ? "Loading trace…" : "No active run"}
-              </Title>
-              <Text type="secondary">
-                {runList.length > 0
-                  ? "Select a past run below to inspect its trace, spans, tools, and plan."
-                  : "No past runs found for this conversation. Start a chat to generate one."}
-              </Text>
-            </Flex>
-          }
-        >
-          {runList.length > 0 && (
-            <List
-              dataSource={runList}
-              style={{ maxWidth: 520, width: "100%" }}
-              renderItem={(r) => (
-                <List.Item
-                  extra={
-                    <Button type="primary" size="small" onClick={() => setSelectedRunId(r.id)}>
-                      View
-                    </Button>
+      <Flex vertical className="run-debug-panel">
+        <div className="run-debug-panel__scroll">
+          <Flex align="center" gap={12} className="run-debug-header">
+            <Title level={4} style={{ margin: 0 }}>
+              <ExperimentOutlined style={{ marginRight: 8 }} />
+              Run Debug
+            </Title>
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              {allRuns.length} runs across {runGroups.filter((g) => g.conversation).length} conversations
+            </Text>
+            <Button
+              size="small"
+              type="text"
+              icon={<ReloadOutlined />}
+              style={{ marginLeft: "auto" }}
+              onClick={() => { setRunGroups([]); setListLoading(true); }}
+            />
+          </Flex>
+
+          {runGroups.length === 0 ? (
+            <Empty
+              image={<ExperimentOutlined style={{ fontSize: 48, color: "var(--sp-subtle)" }} />}
+              description={
+                <Flex vertical gap={4}>
+                  <Title level={5} style={{ margin: 0 }}>No runs found</Title>
+                  <Text type="secondary">
+                    Start a conversation and send a message to generate runs.
+                  </Text>
+                </Flex>
+              }
+            />
+          ) : (
+            <Flex vertical gap={20}>
+              {runGroups.map((group) => (
+                <Card
+                  key={group.conversation?.id ?? "__orphan__"}
+                  size="small"
+                  title={
+                    <Flex align="center" gap={6}>
+                      <MessageOutlined />
+                      <Text strong>
+                        {group.conversation?.title ?? "Unknown conversation"}
+                      </Text>
+                      <Tag>{group.runs.length}</Tag>
+                    </Flex>
                   }
                 >
-                  <List.Item.Meta
-                    avatar={<Tag color={statusTagColor(r.status)}>{r.status}</Tag>}
-                    title={<Text code>{r.id.slice(0, 14)}…</Text>}
-                    description={fmtDate(r.createdAt)}
+                  <List
+                    dataSource={group.runs}
+                    renderItem={(r) => (
+                      <List.Item
+                        extra={
+                          <Button
+                            type="primary"
+                            size="small"
+                            onClick={() => setSelectedRunId(r.id)}
+                          >
+                            View
+                          </Button>
+                        }
+                      >
+                        <List.Item.Meta
+                          avatar={
+                            <Tag color={statusTagColor(r.status)}>{r.status}</Tag>
+                          }
+                          title={
+                            <Text code style={{ fontSize: 12 }}>
+                              {r.id}
+                            </Text>
+                          }
+                          description={
+                            <Flex gap={12}>
+                              <Text type="secondary" style={{ fontSize: 11 }}>
+                                {fmtDate(r.createdAt)}
+                              </Text>
+                              {r.mode && (
+                                <Tag style={{ fontSize: 10 }}>{r.mode}</Tag>
+                              )}
+                            </Flex>
+                          }
+                        />
+                      </List.Item>
+                    )}
                   />
-                </List.Item>
-              )}
-            />
+                </Card>
+              ))}
+            </Flex>
           )}
-        </Empty>
+        </div>
       </Flex>
     );
   }
@@ -384,7 +477,7 @@ export function RunDebugPanel({ runId, conversationId, baseUrl = "" }: RunDebugP
             Run Debug
           </Title>
           <Tag color={statusTagColor(data.status)}>{data.status}</Tag>
-          {!runId && runList.length > 0 && (
+          {!runId && (
             <Button
               size="small"
               icon={<ArrowLeftOutlined />}

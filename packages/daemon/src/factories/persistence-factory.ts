@@ -46,10 +46,16 @@ export function createPersistenceLayer(
   // external stream hooks consume. This ensures all externally visible
   // events carry a real DB sequence (no sequence: -1 duplicates).
   //
-  // agent.message.part.delta is NOT persisted — it is a high-frequency transient
-  // streaming event whose content is already captured by the final saved
-  // message. Skipping it prevents the async fire-and-forget persist from
-  // delivering response tokens out of order to liveEventBus.
+  // Lifecycle events (message.started, part.started) and streaming deltas
+  // (part.delta) are forwarded synchronously to liveEventBus to guarantee
+  // ordering — the frontend must receive message.started before any part
+  // events for that message. These are NOT persisted (transient).
+  const SYNC_FORWARD_TYPES = new Set([
+    "agent.message.started",
+    "agent.message.part.started",
+    "agent.message.part.delta",
+  ]);
+
   rawEventBus.subscribe(async (event) => {
     if (event.sequence !== undefined) {
       // Already persisted (e.g. atomically created with DB sequence) —
@@ -57,8 +63,8 @@ export function createPersistenceLayer(
       liveEventBus.publish(event);
       return;
     }
-    if (event.type === "agent.message.part.delta") {
-      // Transient streaming event — skip persist, delivered via sync onDelta
+    if (SYNC_FORWARD_TYPES.has(event.type)) {
+      liveEventBus.publish(event);
       return;
     }
     try {
