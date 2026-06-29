@@ -117,6 +117,8 @@ export class NativeToolLoopExecutor {
     content: string;
     artifacts: ArtifactRef[];
     toolCalls: ToolCallSummary[];
+    /** Validated calls that paused before execution for persisted approval. */
+    approvalRequired?: PlannedToolCall[];
     /** §P0-7: Phase timing metrics for trace observability (milliseconds). */
     timing: {
       toolRetrievalMs: number;
@@ -321,6 +323,22 @@ export class NativeToolLoopExecutor {
 
         allArtifacts.push(...toolResults.artifacts);
 
+        if (toolResults.approvalRequired?.length) {
+          return {
+            messageId,
+            content: fullContent,
+            artifacts: allArtifacts,
+            toolCalls: allToolCallSummaries,
+            approvalRequired: toolResults.approvalRequired,
+            timing: {
+              toolRetrievalMs,
+              totalToolExecutionMs,
+              firstRoundFirstTokenMs,
+              finalRoundFirstTokenMs,
+            },
+          };
+        }
+
         // §5.6: Stop the tool loop immediately on deterministic errors.
         // Missing required arguments, schema validation failures, and
         // permission denials should NOT retry — they're structural, not
@@ -336,20 +354,6 @@ export class NativeToolLoopExecutor {
           break;
         }
 
-        // §Step 1b: Scan tool result summaries for prompt injection
-        // before they enter the model context (matching legacy path safety).
-        if (this.deps.injectionDetector) {
-          for (const tc of toolResults.summaries) {
-            if (tc.summary) {
-              const detection = this.deps.injectionDetector.detect(tc.summary);
-              if (detection.shouldBlock) {
-                tc.summary = `[BLOCKED] Content blocked due to potential prompt injection (${detection.matches.length} matches).`;
-                (tc as unknown as Record<string, unknown>).trust = "untrusted";
-                (tc as unknown as Record<string, unknown>).blocked = true;
-              }
-            }
-          }
-        }
         allToolCallSummaries.push(...toolResults.summaries);
 
         // §P1-4: Direct final — when a completed tool is projected as final

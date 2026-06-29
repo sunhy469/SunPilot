@@ -27,6 +27,7 @@ function createService(
     });
   });
   const conversations = new InMemoryAgentConversationStore();
+  const abortRegistry = new AbortRegistry();
   const run =
     overrides.run ??
     (async (input) => {
@@ -76,7 +77,7 @@ function createService(
         throw new Error("not used");
       },
     } as any,
-    abortRegistry: new AbortRegistry(),
+    abortRegistry,
     eventBus,
     liveEventBus,
     runStateManager: {
@@ -104,7 +105,7 @@ function createService(
     ...overrides,
   });
 
-  return { service, conversations, eventBus, liveEventBus };
+  return { service, conversations, eventBus, liveEventBus, abortRegistry };
 }
 
 describe("AgentService", () => {
@@ -263,6 +264,67 @@ describe("AgentService", () => {
       code: "AGENT_IDEMPOTENCY_CONFLICT",
       category: "idempotency",
     });
+  });
+
+  test("fast-ack validates attachments before reserving idempotency", async () => {
+    const db = new InMemoryDatabaseContext();
+    const { service } = createService({ idempotency: db.idempotency });
+
+    await expect(
+      service.startChatCommand(
+        {
+          message: "用图片搜索 1688 同款",
+          clientRequestId: "req_invalid_image",
+          attachments: [
+            { id: "att_1", name: "product.png", type: "image/png" },
+          ],
+        },
+        { source: "web", userId: "user_1" },
+      ),
+    ).rejects.toMatchObject({ code: "IMAGE_ATTACHMENT_REF_MISSING" });
+
+    await expect(
+      db.idempotency.findByKey({
+        userId: "user_1",
+        method: "chat.send",
+        clientRequestId: "req_invalid_image",
+      }),
+    ).resolves.toBeNull();
+  });
+
+  test("fast-ack preparation failures clean resources and allow retry", async () => {
+    const db = new InMemoryDatabaseContext();
+    const store = new InMemoryAgentConversationStore();
+    let messageAttempts = 0;
+    const conversations = {
+      createConversation: store.createConversation.bind(store),
+      findConversationById: store.findConversationById.bind(store),
+      listMessages: store.listMessages.bind(store),
+      createMessage: async (...args: Parameters<typeof store.createMessage>) => {
+        messageAttempts += 1;
+        if (messageAttempts === 1) throw new Error("message insert failed");
+        return store.createMessage(...args);
+      },
+    };
+    const { service, abortRegistry } = createService({
+      idempotency: db.idempotency,
+      conversations,
+    });
+    const input = {
+      message: "retry preparation",
+      clientRequestId: "req_prepare_retry",
+    };
+    const context = { source: "web" as const, userId: "user_1" };
+
+    await expect(service.startChatCommand(input, context)).rejects.toThrow(
+      "message insert failed",
+    );
+    expect(abortRegistry.size).toBe(0);
+
+    await expect(service.startChatCommand(input, context)).resolves.toMatchObject({
+      accepted: true,
+    });
+    expect(messageAttempts).toBe(2);
   });
 
   test("cancelRun marks an Agent run cancelled and emits canonical event", async () => {

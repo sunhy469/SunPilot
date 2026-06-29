@@ -355,6 +355,21 @@ describe("AssistantMessageStream", () => {
     );
   });
 
+  it("does not emit completion when message persistence fails", async () => {
+    const persistenceError = new Error("database unavailable");
+    saveMessage.mockRejectedValueOnce(persistenceError);
+    const text = stream.startTextPart();
+    stream.appendText(text.id, "Not durable yet");
+    stream.completeTextPart(text.id);
+
+    await expect(stream.complete()).rejects.toBe(persistenceError);
+    expect(eventBus.emit).not.toHaveBeenCalledWith(
+      "agent.message.completed",
+      expect.anything(),
+      expect.anything(),
+    );
+  });
+
   it("complete is idempotent", async () => {
     const text = stream.startTextPart();
     stream.appendText(text.id, "Once");

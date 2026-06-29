@@ -520,7 +520,8 @@ export class AssistantMessageStream implements IAssistantMessageStream {
     const toolCallIds = this.collectIds("tool_use", "toolCallId");
     const artifactIds = this.collectIds("tool_result", "artifactIds");
 
-    // Save message with parts + rich cards in metadata
+    // Persistence is part of successful completion. If it fails, do not emit
+    // agent.message.completed; the caller must transition the run to failed.
     try {
       await this.params.saveMessage({
         id: this.params.messageId,
@@ -536,11 +537,11 @@ export class AssistantMessageStream implements IAssistantMessageStream {
         },
       });
     } catch (err) {
-      // Best effort — don't fail the run if save fails
       console.error(
         "[AssistantMessageStream] Failed to save message:",
         (err as Error).message,
       );
+      throw err;
     }
 
     // Emit completion with rich cards for frontend inline rendering

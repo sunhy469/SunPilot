@@ -43,6 +43,7 @@ import {
   RECONNECT_MAX_DELAY,
   type AgentArtifactPreview,
   type AgentArtifactSelection,
+  type ChatSendAckResult,
   type ChatSocketPayload,
   type JsonRpcResponse,
 } from "./chat/chat-state";

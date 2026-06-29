@@ -826,6 +826,11 @@ export class InMemoryDatabaseContextImplementation implements DatabaseContext {
     ): Promise<IdempotencyRecord | null> => {
       return this.updateIdempotency(id, "failed", { error });
     },
+    release: async (id: string): Promise<boolean> => {
+      const record = this.idempotencyRecords.get(id);
+      if (!record || record.status !== "processing") return false;
+      return this.idempotencyRecords.delete(id);
+    },
     findByKey: async (input: {
       userId?: string;
       method: string;

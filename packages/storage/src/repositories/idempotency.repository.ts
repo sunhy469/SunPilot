@@ -30,6 +30,8 @@ export interface IdempotencyRepository {
   }>;
   complete(id: string, response: unknown): Promise<IdempotencyRecord | null>;
   fail(id: string, error: unknown): Promise<IdempotencyRecord | null>;
+  /** Release a preparation-stage reservation before background work starts. */
+  release(id: string): Promise<boolean>;
   findByKey(input: {
     userId?: string;
     method: string;

@@ -15,6 +15,7 @@ import {
   RuntimeError,
   SummaryStaleDetector,
   type AgentEventBus,
+  type LlmProvider,
 } from "@sunpilot/core";
 import { SkillRegistry, SkillRunner } from "@sunpilot/skill-runner";
 import {
@@ -54,6 +55,8 @@ export interface DaemonOptions {
   >;
   database?: DatabaseContext;
   eventBus?: AgentEventBus;
+  /** Explicit provider injection for hermetic tests and embedded deployments. */
+  llmProvider?: LlmProvider;
 }
 
 const require = createRequire(import.meta.url);
@@ -218,12 +221,13 @@ export async function createDaemon(options: DaemonOptions = {}) {
   const getChatAgent = async (): Promise<AgentService> => {
     if (chatAgent) return chatAgent as AgentService;
     chatAgentInit ??= (async () => {
-      const llmProvider = createDefaultLlmProvider();
+      const llmProvider = options.llmProvider ?? createDefaultLlmProvider();
       const { service, modelRouter, updateMemory, skillEmbeddingCache, embeddingService } = createAgentLoopService({
         database,
         skillRegistry,
         skillRunner,
         llmProvider,
+        enableEnvironmentProviders: !options.llmProvider,
         eventBus,
         liveEventBus,
         systemPrompt: "You are SunPilot, a concise business agent assistant.",

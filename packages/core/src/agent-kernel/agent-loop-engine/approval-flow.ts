@@ -36,18 +36,22 @@ export class ApprovalFlowCoordinator {
     decision: ToolDecision & { type: "use_tool" },
     messageId: string,
     signal: AbortSignal,
+    existingStream?: AssistantMessageStream,
+    toolPartsAlreadyPresent = false,
   ): Promise<AgentLoopResult> {
     const { runId, conversationId } = input;
 
-    const stream = new AssistantMessageStream({
-      runId,
-      conversationId,
-      messageId,
-      eventBus: this.deps.eventBus,
-      saveMessage: this.deps.saveMessage!,
-      skipStartedEvents: true,
-    });
-    stream.start();
+    const stream =
+      existingStream ??
+      new AssistantMessageStream({
+        runId,
+        conversationId,
+        messageId,
+        eventBus: this.deps.eventBus,
+        saveMessage: this.deps.saveMessage!,
+        skipStartedEvents: true,
+      });
+    if (!existingStream) stream.start();
 
     // Emit a text part explaining what needs approval
     const toolNames = decision.toolCalls.map((tc) => tc.name).join("、");
@@ -59,18 +63,20 @@ export class ApprovalFlowCoordinator {
     stream.completeTextPart(textPart.id);
 
     // Emit status parts for each tool needing approval
-    for (const tc of decision.toolCalls) {
-    stream.startStatus({
-      label: `${RUN_PHASE_LABELS.waiting_approval}: ${tc.name}`,
-      toolCallId: tc.id,
-      metadata: { skillId: tc.skillId, phase: "queued" },
-    });
-      stream.addToolUse({
-        toolCallId: tc.id,
-        skillId: tc.skillId,
-        name: tc.name,
-        inputPreview: summarizeArguments(tc.arguments),
-      });
+    if (!toolPartsAlreadyPresent) {
+      for (const tc of decision.toolCalls) {
+        stream.startStatus({
+          label: `${RUN_PHASE_LABELS.waiting_approval}: ${tc.name}`,
+          toolCallId: tc.id,
+          metadata: { skillId: tc.skillId, phase: "queued" },
+        });
+        stream.addToolUse({
+          toolCallId: tc.id,
+          skillId: tc.skillId,
+          name: tc.name,
+          inputPreview: summarizeArguments(tc.arguments),
+        });
+      }
     }
 
     // §P1-2: Snapshot parts + pending tool calls for resume continuity
@@ -101,23 +107,43 @@ export class ApprovalFlowCoordinator {
       iteration: 0,
     }).catch(() => { /* Best effort */ });
 
-    // Request approval for each tool call
-    for (const tc of decision.toolCalls) {
-      await this.requestApprovalWithMessageId({
-        runId,
-        conversationId,
-        title: `Approve ${tc.name}`,
-        description: `Run tool ${tc.name} with arguments: ${JSON.stringify(summarizeArguments(tc.arguments))}`,
-        riskLevel: maxRiskLevel(tc.riskLevel, "medium"),
-        requestedAction: {
-          skillId: tc.skillId,
-          arguments: tc.arguments,
-          permissions: tc.permissions,
-          toolCallId: tc.id,
+    // One persisted approval covers the complete validated batch. Approving
+    // any single item must never execute other, separately-pending approvals.
+    const firstTool = decision.toolCalls[0]!;
+    const batchRisk = decision.toolCalls.reduce<RiskLevel>(
+      (risk, toolCall) => maxRiskLevel(risk, toolCall.riskLevel),
+      "medium",
+    );
+    await this.requestApprovalWithMessageId({
+      runId,
+      conversationId,
+      title: `Approve ${toolNames}`,
+      description: `Run ${decision.toolCalls.length} tool call(s): ${JSON.stringify(
+        decision.toolCalls.map((toolCall) => ({
+          name: toolCall.name,
+          arguments: summarizeArguments(toolCall.arguments),
+        })),
+      )}`,
+      riskLevel: batchRisk,
+      requestedAction: {
+        skillId: firstTool.skillId,
+        arguments: {
+          toolCalls: decision.toolCalls.map((toolCall) => ({
+            id: toolCall.id,
+            skillId: toolCall.skillId,
+            name: toolCall.name,
+            arguments: toolCall.arguments,
+          })),
         },
-        messageId,
-      });
-    }
+        permissions: [
+          ...new Set(
+            decision.toolCalls.flatMap((toolCall) => toolCall.permissions),
+          ),
+        ],
+        toolCallId: firstTool.id,
+      },
+      messageId,
+    });
 
     // Stream is NOT completed — it will be hydrated on resume
 

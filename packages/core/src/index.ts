@@ -83,6 +83,14 @@ export {
   type PermissionDecision,
 } from "./agent-kernel/safety/safety-types.js";
 export { ExecutionOrchestrator } from "./agent-kernel/execution/execution-orchestrator.js";
+export { ToolSafetyBoundary } from "./agent-kernel/execution/tool-safety-boundary.js";
+export type {
+  ApprovedToolScope,
+  ToolSafetyDenial,
+  ToolSafetyPreflightInput,
+  ToolSafetyPreflightResult,
+  ToolSafetyPostflightResult,
+} from "./agent-kernel/execution/tool-safety-boundary.js";
 export { SkillToolExecutor } from "./agent-kernel/execution/skill-tool-executor.js";
 export type { SkillToolExecutorDeps } from "./agent-kernel/execution/skill-tool-executor.js";
 export * from "./agent-kernel/execution/execution-types.js";

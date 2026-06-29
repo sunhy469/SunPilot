@@ -87,6 +87,8 @@ export class StreamingToolCallExecutor {
   ): Promise<{
     artifacts: ArtifactRef[];
     summaries: ToolCallSummary[];
+    /** Validated batch that must pause and enter the persisted approval flow. */
+    approvalRequired?: PlannedToolCall[];
     /** When set, the tool loop must stop immediately (deterministic error). */
     stop?: {
       reason: ToolLoopStopReason;
@@ -109,6 +111,7 @@ export class StreamingToolCallExecutor {
       onProgress?: (progress: { phase: string; message: string; percent?: number }) => void;
     }
     const executionTasks: ExecutionTask[] = [];
+    let batchRequiresApproval = false;
 
     for (const tc of toolCalls) {
       // Parse arguments
@@ -346,38 +349,18 @@ export class StreamingToolCallExecutor {
         }
 
         if (permDecision.requiresApproval) {
-          const failSummary: ToolCallSummary = {
-            id: tc.id,
-            skillId: skill.id,
-            name: skill.name,
-            status: "failed",
-            summary: `Approval required for ${skill.name}`,
-          };
-          summaries.push(failSummary);
           if (stream && statusPartId) {
             stream.updateStatus(statusPartId, {
-              status: "failed",
+              status: "running",
               label: `需要审批: ${skill.name}`,
             });
-            stream.updateToolUse(tc.id, { status: "failed" });
+            stream.updateToolUse(tc.id, { status: "pending" });
           }
-          return {
-            artifacts,
-            summaries,
-            stop: {
-              reason: "permission_denied",
-              message: `工具 ${skill.name} 需要审批后才能执行。`,
-            },
-          };
+          batchRequiresApproval = true;
+          executionTasks.push({ tc, skill, plannedCall, statusPartId });
+          continue;
         }
       }
-
-      // Emit tool.started and collect for parallel execution (§4.1)
-      this.deps.eventBus.emit(
-        "agent.tool.started",
-        { runId, toolCallId: tc.id, skillId: skill.id, name: skill.name },
-        { runId, conversationId },
-      );
 
       // §P1-4: Bridge tool progress to stream status part metadata
       const onProgress =
@@ -403,6 +386,25 @@ export class StreamingToolCallExecutor {
           : undefined;
 
       executionTasks.push({ tc, skill, plannedCall, statusPartId, onProgress });
+    }
+
+    // Approval is a batch boundary: if any call needs approval, execute none
+    // of them until one persisted approval covering the full batch is granted.
+    if (batchRequiresApproval) {
+      for (const task of executionTasks) {
+        if (stream && task.statusPartId) {
+          stream.updateStatus(task.statusPartId, {
+            status: "running",
+            label: `等待审批: ${task.skill.name}`,
+          });
+          stream.updateToolUse(task.tc.id, { status: "pending" });
+        }
+      }
+      return {
+        artifacts,
+        summaries,
+        approvalRequired: executionTasks.map((task) => task.plannedCall),
+      };
     }
 
     // §4.1 Phase 2: Execute all prepared tools in parallel.
@@ -431,6 +433,7 @@ export class StreamingToolCallExecutor {
                 reason: `LLM called ${task.skill.name}`,
                 toolCalls: [task.plannedCall],
               },
+              permissionMode: permissionMode ?? "auto",
               onProgress: task.onProgress as
                 | ((p: import("../../loop-types.js").ToolExecutionProgress) => void)
                 | undefined,

@@ -1,6 +1,9 @@
 import { describe, expect, test } from "vitest";
 import type { AgentContext, AgentPlan, RoutedIntent, ToolCallSummary } from "../loop-types.js";
 import { ToolDecisionEngine, projectToolResultForModel } from "./tool-decision-engine.js";
+import { InMemoryAgentEventBus } from "../agent-event-bus.js";
+import { ModelRouter } from "../model-router.js";
+import { PermissionPolicy } from "../safety/permission-policy.js";
 
 const context: AgentContext = {
   runId: "run_tools",
@@ -32,6 +35,86 @@ const intent: RoutedIntent = {
 };
 
 describe("ToolDecisionEngine", () => {
+  test("returns a persisted-approval handoff instead of executing dynamic-risk tools", async () => {
+    let executed = false;
+    const provider = {
+      id: "fake",
+      model: "fake",
+      async *streamChat(request: { tools?: Array<{ function: { name: string } }> }) {
+        const toolName = request.tools?.[0]?.function.name;
+        expect(toolName).toBeTruthy();
+        yield {
+          delta: "",
+          toolCalls: [
+            {
+              index: 0,
+              id: "tc_network",
+              type: "function" as const,
+              function: { name: toolName!, arguments: '{"url":"https://example.com"}' },
+            },
+          ],
+          raw: {},
+        };
+      },
+    };
+    const engine = new ToolDecisionEngine({
+      listSkills: async () => [
+        {
+          id: "test.network:network.request",
+          name: "Network Request",
+          description: "Fetch a URL",
+          category: "network",
+          enabled: true,
+          permissions: ["network.request"],
+          defaultTimeoutMs: 5_000,
+          maxTimeoutMs: 10_000,
+          supportsAbort: true,
+          idempotent: true,
+          riskHints: { defaultRisk: "medium" },
+        },
+      ],
+      eventBus: new InMemoryAgentEventBus(),
+      modelRouter: new ModelRouter({
+        routes: [
+          {
+            purposes: ["response_composition"],
+            priority: 0,
+            config: { provider, model: provider.model },
+          },
+        ],
+      }),
+      permissionPolicy: new PermissionPolicy(),
+      executionOrchestrator: {
+        async execute() {
+          executed = true;
+          return { runId: context.runId, toolCalls: [], artifacts: [], summary: "" };
+        },
+      },
+      saveMessage: async () => {},
+    });
+
+    const result = await engine.executeStreaming(
+      {
+        runId: context.runId,
+        conversationId: context.conversationId,
+        context,
+        intent,
+        permissionMode: "ask",
+        toolSkillIds: ["test.network:network.request"],
+      },
+      new AbortController().signal,
+    );
+
+    expect(executed).toBe(false);
+    expect(result.approvalRequired).toEqual([
+      expect.objectContaining({
+        id: "tc_network",
+        skillId: "test.network:network.request",
+        arguments: { url: "https://example.com" },
+      }),
+    ]);
+  });
+
   test("enriches planned tool steps with manifest permissions", async () => {
     const plan: AgentPlan = {
       id: "plan_1",

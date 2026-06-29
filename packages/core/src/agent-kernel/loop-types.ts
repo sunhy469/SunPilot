@@ -699,6 +699,8 @@ export interface ToolDecisionEngine {
     content: string;
     artifacts: ArtifactRef[];
     toolCalls: ToolCallSummary[];
+    /** Validated calls that paused before execution for persisted approval. */
+    approvalRequired?: PlannedToolCall[];
     /** §P0-7: Phase timing metrics for trace observability (milliseconds). */
     timing: {
       toolRetrievalMs: number;
@@ -727,11 +729,19 @@ export interface ExecutionOrchestrator {
       intent: RoutedIntent;
       plan?: AgentPlan;
       decision: ToolDecision & { type: "use_tool" };
+      permissionMode?: PermissionMode;
+      approvedTools?: Array<{
+        toolCallId: string;
+        skillId: string;
+        arguments: Record<string, unknown>;
+        grantedBy?: string;
+      }>;
       /** Optional progress callback for content-block status updates (§P1-4). */
       onProgress?: (progress: ToolExecutionProgress) => void;
     },
     signal: AbortSignal,
   ): Promise<AgentObservation>;
+  clearSafetyState?(runId: string): void;
 }
 
 export interface PermissionPolicy {

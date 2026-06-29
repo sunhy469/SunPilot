@@ -32,12 +32,6 @@ import type { Replanner } from "./planning/replanner.js";
 import type { ModelRouter } from "./model-router.js";
 import type { TraceManager } from "./trace-manager.js";
 import type { RepositoryTraceManager } from "./trace-persistence.js";
-import type { PromptInjectionDetector } from "./safety/prompt-injection-detector.js";
-import type { ToolSandbox } from "./safety/tool-sandbox.js";
-import type {
-  TaskScopedPermissionManager,
-  TaskScopedPermission,
-} from "./safety/task-scoped-permission-manager.js";
 import type {
   PlanSnapshotRepository,
   ToolCallRepository,
@@ -89,12 +83,6 @@ export interface AgentLoopEngineDeps {
   enablePreliminaryInference?: boolean;
   /** Optional — creates trace/spans for observability (§7, §P0-2). */
   traceManager?: TraceManager | RepositoryTraceManager;
-  /** Optional — detects prompt injection in untrusted content (§5). */
-  injectionDetector?: PromptInjectionDetector;
-  /** Optional — sandboxes tool execution for security (§5). */
-  toolSandbox?: ToolSandbox;
-  /** Optional — enforces task-scoped permission boundaries (§5). */
-  scopedPermissionManager?: TaskScopedPermissionManager;
   /** Optional — persists plan snapshots (§P0-2). */
   planSnapshotRepo?: PlanSnapshotRepository;
   /** Optional — persists tool calls for auditability (§P0-3). */
@@ -137,8 +125,6 @@ export interface ApprovalResumeInput {
  * WebSocket/REST 的接线由 daemon 层处理。
  */
 export class AgentLoopEngine {
-  /** Accumulated task-scoped permission grants keyed by runId. */
-  private readonly grantsByRun = new Map<string, TaskScopedPermission[]>();
   /** Tracks plan revision counts per run for snapshot versioning (§P0-2). */
   private _planRevisionCounts?: Map<string, number>;
 
@@ -198,7 +184,7 @@ export class AgentLoopEngine {
 
   /** Release permission grants for a run to prevent unbounded memory growth. */
   private cleanupGrants(runId: string): void {
-    this.grantsByRun.delete(runId);
+    this.deps.executionOrchestrator.clearSafetyState?.(runId);
   }
 
   /** Increment and return the next plan version for a run (§P0-2). */
@@ -453,6 +439,7 @@ export class AgentLoopEngine {
       if (hasApprovalRequired) {
         return this.approvalFlow.runApprovalForToolCalls(
           input, context, intent, plan, decision, messageId, signal,
+          existingStream,
         );
       }
     }
@@ -499,6 +486,28 @@ export class AgentLoopEngine {
           },
           signal,
         );
+
+        if (result.approvalRequired?.length) {
+          toolSpan?.endSpan(
+            `Approval required for ${result.approvalRequired.length} tool calls`,
+            { toolCalls: result.approvalRequired.length },
+          );
+          return this.approvalFlow.runApprovalForToolCalls(
+            input,
+            context,
+            intent,
+            plan,
+            {
+              type: "use_tool",
+              reason: "Native tool call batch requires approval",
+              toolCalls: result.approvalRequired,
+            },
+            messageId,
+            signal,
+            stream,
+            true,
+          );
+        }
 
         // §P0-7: Emit phase timing metrics on tool execution span
         toolSpan?.endSpan(
@@ -657,14 +666,22 @@ export class AgentLoopEngine {
     },
     signal: AbortSignal,
   ): Promise<AgentLoopResult> {
-    return this.approvalContinuation.continueAfterRejection(input, signal);
+    try {
+      return await this.approvalContinuation.continueAfterRejection(input, signal);
+    } finally {
+      this.cleanupGrants(input.runId);
+    }
   }
 
   async resumeApprovedTool(
     approval: ApprovalResumeInput,
     signal: AbortSignal,
   ): Promise<AgentLoopResult> {
-    return this.approvalContinuation.resumeApprovedTool(approval, signal);
+    try {
+      return await this.approvalContinuation.resumeApprovedTool(approval, signal);
+    } finally {
+      this.cleanupGrants(approval.runId);
+    }
   }
 
 

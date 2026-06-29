@@ -33,7 +33,6 @@ export interface ToolDecisionEngineDeps {
   modelRouter: ModelRouter;
   permissionPolicy: PermissionPolicy;
   executionOrchestrator: ExecutionOrchestrator;
-  injectionDetector?: import("../safety/prompt-injection-detector.js").PromptInjectionDetector;
   saveMessage: (msg: {
     id: string;
     conversationId: string;
