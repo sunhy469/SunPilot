@@ -33,7 +33,7 @@ export function ApprovalStrip({
           key={approval.id}
           type="warning"
           showIcon
-          message={
+          title={
             <Space>
               <Tag color={riskColor[approval.risk] ?? "default"}>{approval.risk}</Tag>
               <Text>{approval.title}</Text>

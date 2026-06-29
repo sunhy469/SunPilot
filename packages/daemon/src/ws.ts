@@ -140,7 +140,8 @@ export function setupDaemonWebSocket(deps: {
 
         // Token auth (C11): browsers cannot set headers on WS, so accept the
         // token via either `Authorization: Bearer <token>` or `?token=<token>`.
-        // A valid token authorizes the upgrade; otherwise fall back to Origin.
+        // A valid token authorizes the upgrade. Origin is not accepted as a
+        // substitute because non-browser clients can spoof it.
         // When authDisabled is true (SUNPILOT_DISABLE_TOKEN_AUTH=1), skip all
         // checks — used for local development and integration tests.
         if (deps.authDisabled) {
@@ -161,7 +162,7 @@ export function setupDaemonWebSocket(deps: {
           }
           const tokenOk =
             presented !== undefined && safeEqualToken(presented, deps.token);
-          if (!tokenOk && !deps.isAllowedOrigin(request.headers.origin, deps.port)) {
+          if (!tokenOk) {
             socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
             socket.destroy();
             return;

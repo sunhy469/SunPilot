@@ -36,7 +36,7 @@ class CardErrorBoundary extends Component<
     if (this.state.hasError) {
       return (
         <Card size="small">
-          <Alert type="error" showIcon message="卡片渲染失败" />
+          <Alert type="error" showIcon title="卡片渲染失败" />
         </Card>
       );
     }

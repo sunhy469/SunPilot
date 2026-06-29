@@ -1,4 +1,5 @@
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, lstatSync, readdirSync, readFileSync, realpathSync } from "node:fs";
 import { isAbsolute, join, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 import {
@@ -44,6 +45,17 @@ function resolveSkillPath(
       `Skill ${label} must stay within the skill directory: ${relativePath}`,
     );
   }
+  if (existsSync(resolved)) {
+    const realRoot = realpathSync(root);
+    const realResolved = realpathSync(resolved);
+    if (realResolved === realRoot || !realResolved.startsWith(`${realRoot}${sep}`)) {
+      throw new Error(`Skill ${label} resolves outside the skill directory: ${relativePath}`);
+    }
+    if (lstatSync(resolved).isSymbolicLink()) {
+      throw new Error(`Skill ${label} must not be a symbolic link: ${relativePath}`);
+    }
+    return realResolved;
+  }
   return resolved;
 }
 
@@ -63,7 +75,7 @@ function validateManifestPaths(
   skillRoot: string,
   manifest: SkillManifest,
 ): void {
-  resolveSkillPath(skillRoot, manifest.entry, "entry");
+  requireSkillFile(skillRoot, manifest.entry, "entry");
   requireSkillFile(skillRoot, manifest.readme, "readme");
   for (const capability of manifest.capabilities) {
     if (typeof capability.inputSchema === "string")
@@ -79,6 +91,44 @@ function validateManifestPaths(
         capability.name + " output schema",
       );
   }
+}
+
+function hashSkillPackage(skillRoot: string): string {
+  const hash = createHash("sha256");
+  let fileCount = 0;
+  let totalBytes = 0;
+
+  const visit = (directory: string) => {
+    for (const entry of readdirSync(directory, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+      const path = join(directory, entry.name);
+      const relative = path.slice(resolve(skillRoot).length + 1);
+      // Package-manager dependency trees commonly contain symlinks (pnpm).
+      // Lock first-party Skill source, manifest, schemas and lockfiles; runtime
+      // built-in restrictions still apply to dependency code.
+      if (entry.name === "node_modules" && entry.isDirectory()) continue;
+      if (entry.isSymbolicLink()) {
+        throw new Error(`Skill package must not contain symbolic links: ${relative}`);
+      }
+      if (entry.isDirectory()) {
+        visit(path);
+        continue;
+      }
+      if (!entry.isFile()) continue;
+      fileCount += 1;
+      const content = readFileSync(path);
+      totalBytes += content.byteLength;
+      if (fileCount > 10_000 || totalBytes > 128 * 1024 * 1024) {
+        throw new Error("Skill package exceeds integrity scan limits.");
+      }
+      hash.update(relative);
+      hash.update("\0");
+      hash.update(content);
+      hash.update("\0");
+    }
+  };
+
+  visit(resolve(skillRoot));
+  return `sha256:${hash.digest("hex")}`;
 }
 
 /**
@@ -97,6 +147,7 @@ function validateManifestPaths(
  */
 export class SkillRegistry {
   private skills = new Map<string, InstalledSkillRecord>();
+  private integrityById = new Map<string, string>();
   /** §A22: promise-based mutex to serialize reload() calls and prevent
    * concurrent readers from seeing an empty/partially-populated map. */
   private reloadPromise: Promise<InstalledSkillRecord[]> | null = null;
@@ -123,6 +174,7 @@ export class SkillRegistry {
     // §A22: build the new map first, then atomically swap it in — readers
     // always see either the complete old map or the complete new one.
     const nextSkills = new Map<string, InstalledSkillRecord>();
+    const nextIntegrity = new Map<string, string>();
     const roots = [...this.bundledDirectories, ...this.directories];
     for (const root of roots) {
       if (!existsSync(root)) continue;
@@ -140,6 +192,7 @@ export class SkillRegistry {
           ) as SkillManifest;
           const skillRoot = resolve(candidate);
           validateManifestPaths(skillRoot, manifest);
+          const integrity = hashSkillPackage(skillRoot);
           const readmePath = requireSkillFile(
             skillRoot,
             manifest.readme,
@@ -163,12 +216,13 @@ export class SkillRegistry {
             updatedAt: now,
           };
           nextSkills.set(record.id, record);
+          nextIntegrity.set(record.id, integrity);
           await this.db.skills.upsert(record);
           await this.db.audit.create({
             actor: AuditActor.Daemon,
             action: "skill.load",
             target: record.id,
-            payload: { path: record.path, version: record.version },
+            payload: { path: record.path, version: record.version, integrity },
           });
         } catch (error) {
           await this.db.audit.create({
@@ -186,6 +240,7 @@ export class SkillRegistry {
     // §A22: atomically swap the completed map — concurrent readers always
     // see a consistent snapshot (previous full map or new full map).
     this.skills = nextSkills;
+    this.integrityById = nextIntegrity;
     return [...nextSkills.values()];
   }
 
@@ -217,7 +272,18 @@ export class SkillRegistry {
 
   entryUrl(skill: InstalledSkillRecord): string {
     return pathToFileURL(
-      resolveSkillPath(skill.path, skill.manifest.entry, "entry"),
+      requireSkillFile(skill.path, skill.manifest.entry, "entry"),
     ).href;
+  }
+
+  verifyIntegrity(skill: InstalledSkillRecord): void {
+    const expected = this.integrityById.get(skill.id);
+    if (!expected) {
+      throw new Error(`Skill integrity baseline is unavailable; reload the registry: ${skill.id}`);
+    }
+    const actual = hashSkillPackage(skill.path);
+    if (actual !== expected) {
+      throw new Error(`Skill package changed after registry load; reload before execution: ${skill.id}`);
+    }
   }
 }

@@ -47,7 +47,14 @@ export const envSchema = z.object({
   SUNPILOT_SEED_LLM_MODEL: z.string().default("doubao-seed-2-0-lite-260428"),
   SUNPILOT_SEED_LLM_API_KEY: z.string().optional(),
 
-  SUNPILOT_EMBEDDING_DIMENSIONS: z.coerce.number().default(1536),
+  // Only 1536 is supported: the pgvector schema (migration 014) uses
+  // vector(1536), and switching dimensions requires a coordinated migration
+  // + model change. Non-1536 values are rejected to prevent silent
+  // service/provider/schema mismatch.
+  SUNPILOT_EMBEDDING_DIMENSIONS: z
+    .coerce.number()
+    .default(1536)
+    .refine((n) => n === 1536, "SUNPILOT_EMBEDDING_DIMENSIONS must be 1536 (the only supported dimension; DB column is vector(1536))"),
   SUNPILOT_EMBEDDING_MODEL: z.string().optional(),
 
   SUNPILOT_SANDBOX_MODE: z

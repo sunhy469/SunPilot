@@ -4,6 +4,8 @@ import { createRequest } from "./client";
 describe("createRequest", () => {
   afterEach(() => {
     vi.restoreAllMocks();
+    window.sessionStorage.clear();
+    window.history.replaceState(null, "", "/");
   });
 
   test("does not send JSON content-type for bodyless requests", async () => {
@@ -33,5 +35,19 @@ describe("createRequest", () => {
     expect(new Headers(init?.headers).get("Content-Type")).toBe(
       "application/json",
     );
+  });
+
+  test("adds the launcher-provided local bearer token", async () => {
+    const token = "b".repeat(64);
+    window.location.hash = `sunpilot-token=${token}`;
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(new Response(JSON.stringify({ ok: true })));
+
+    await createRequest()<{ ok: boolean }>("/v1/config");
+
+    const headers = new Headers(fetchMock.mock.calls[0]?.[1]?.headers);
+    expect(headers.get("Authorization")).toBe(`Bearer ${token}`);
+    expect(window.location.hash).toBe("");
   });
 });

@@ -228,7 +228,7 @@ export function ChatComposer({
     }
 
     const text = currentValue.trim();
-    onSend(text || "请查看附件", toAttachmentRefs(), permission as "ask" | "auto" | "full", model as "dp" | "seed");
+    onSend(text, toAttachmentRefs(), permission as "ask" | "auto" | "full", model as "dp" | "seed");
     clearFiles();
     setCurrentValue("");
     onSendStateChange?.("sending");
@@ -261,7 +261,7 @@ export function ChatComposer({
       return;
     }
 
-    onSend(text || "请查看附件", toAttachmentRefs(), permission as "ask" | "auto" | "full", model as "dp" | "seed");
+    onSend(text, toAttachmentRefs(), permission as "ask" | "auto" | "full", model as "dp" | "seed");
     clearFiles();
     setCurrentValue("");
   }, [currentValue, disabled, files, uploading, onSend, setCurrentValue, toAttachmentRefs, clearFiles, onSendStateChange, permission, model]);
@@ -358,7 +358,6 @@ export function ChatComposer({
         value={currentValue}
         rows={3}
         disabled={disabled}
-        autoSize={{ minRows: 2, maxRows: 6 }}
         onChange={(e) => setCurrentValue(e.target.value)}
         onKeyDown={handleKeyDown}
       />

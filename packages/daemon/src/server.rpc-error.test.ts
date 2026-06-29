@@ -50,7 +50,7 @@ describe("rpcError", () => {
   test("uses standard JSON-RPC codes for parser and validation errors", () => {
     expect(rpcError(new SyntaxError("bad json"))).toEqual({
       code: -32700,
-      message: "bad json",
+      message: "Parse error",
     });
 
     expect(

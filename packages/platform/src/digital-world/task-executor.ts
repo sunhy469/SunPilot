@@ -117,8 +117,8 @@ export class TaskExecutor {
 
         // Clear being's currentTaskId/currentActionId on failure
         await this.deps.database.digitalBeings.update(beingId, {
-          currentTaskId: undefined,
-          currentActionId: undefined,
+          currentTaskId: null,
+          currentActionId: null,
         });
         await this.deps.database.worldTasks.update(taskId, {
           status: "failed",
@@ -130,8 +130,8 @@ export class TaskExecutor {
 
     // Clear being's currentTaskId/currentActionId after all actions complete
     await this.deps.database.digitalBeings.update(beingId, {
-      currentTaskId: undefined,
-      currentActionId: undefined,
+      currentTaskId: null,
+      currentActionId: null,
     });
 
     await this.deps.database.worldTasks.update(taskId, {
@@ -141,22 +141,18 @@ export class TaskExecutor {
   }
 
   /**
-   * Atomically claim a queued task and mark it running.
-   * Returns the task on success, or null if the task is missing or no longer
-   * claimable (e.g. already taken by another executor or in a terminal state).
+   * Atomically claim a queued task via a single conditional UPDATE.
+   * Returns the claimed task record on success, or null if the task is
+   * missing or no longer queued (already claimed by another executor or in a
+   * terminal state). Uses `claimIfQueued()` which performs
+   * `UPDATE ... WHERE status = 'queued' RETURNING ...` — a single atomic
+   * statement that eliminates the SELECT-then-UPDATE race.
    */
   private async claimTask(taskId: string) {
-    const db = this.deps.database;
-    const claim = async (dbc: DatabaseContext) => {
-      const current = await dbc.worldTasks.findById(taskId);
-      if (!current || current.status !== "queued") return null;
-      await dbc.worldTasks.update(taskId, {
-        status: "running",
-        startedAt: new Date().toISOString(),
-      });
-      return current;
-    };
-    return db.transaction ? db.transaction(claim) : claim(db);
+    return this.deps.database.worldTasks.claimIfQueued(
+      taskId,
+      new Date().toISOString(),
+    );
   }
 
   private buildActionParams(type: string, param?: string): Record<string, unknown> {
@@ -195,7 +191,7 @@ export class TaskExecutor {
         await this.deps.database.digitalBeings.update(beingId, {
           status: "idle",
           statusText: "已醒来",
-          sleepReason: undefined,
+          sleepReason: null,
         });
         break;
       }
@@ -221,7 +217,7 @@ export class TaskExecutor {
         // Move being to target (simplified - no animation on backend)
         await this.deps.database.digitalBeings.update(beingId, {
           currentNodeId: targetNodeId,
-          targetNodeId: undefined,
+          targetNodeId: null,
           statusText: `已到达${this.getNodeName(targetNodeId)}`,
         });
         break;
@@ -346,8 +342,8 @@ export class TaskExecutor {
       await this.deps.database.digitalBeings.update(action.beingId, {
         status: "idle",
         statusText: `工作失败（Agent ${status === "failed" ? "出错" : "取消"}）`,
-        currentTaskId: undefined,
-        currentActionId: undefined,
+        currentTaskId: null,
+        currentActionId: null,
       });
 
       // Mark the task as failed
@@ -389,14 +385,24 @@ export class TaskExecutor {
       payload: { type: "work_on", runId, artifactCount: artifacts?.length ?? 0 },
     });
 
-    // Resume executing remaining actions in the task
+    // Resume executing remaining actions in the task.
+    // This loop shares the same state machine as executeTask(): if any
+    // subsequent action returns waiting_agent (e.g. a second work_on that
+    // starts a new Agent Run), the loop MUST stop immediately and wait for
+    // the next onAgentRunCompleted() call. Previously the return value was
+    // ignored, causing the task to advance past a running Agent Run.
     const taskActions = await this.deps.database.worldActions.listByTaskId(action.taskId);
     const currentIdx = taskActions.findIndex((a) => a.id === action.id);
     for (let i = currentIdx + 1; i < taskActions.length; i++) {
       const nextAction = taskActions[i]!;
       try {
         await this.deps.database.digitalBeings.update(action.beingId, { currentActionId: nextAction.id });
-        await this.executeAction(ctx, nextAction.id, action.beingId);
+        const result = await this.executeAction(ctx, nextAction.id, action.beingId);
+        if (result.status === "waiting_agent") {
+          // A subsequent action started its own Agent Run. Stop the loop —
+          // the task will be resumed again when this new run completes.
+          return;
+        }
       } catch (err) {
         const errorMessage = err instanceof Error ? err.message : String(err);
         await this.deps.database.worldActions.update(nextAction.id, {
@@ -405,8 +411,8 @@ export class TaskExecutor {
           completedAt: new Date().toISOString(),
         }).catch(() => {});
         await this.deps.database.digitalBeings.update(action.beingId, {
-          currentTaskId: undefined,
-          currentActionId: undefined,
+          currentTaskId: null,
+          currentActionId: null,
         });
         await this.deps.database.worldTasks.update(action.taskId, {
           status: "failed",
@@ -418,8 +424,8 @@ export class TaskExecutor {
 
     // All actions completed
     await this.deps.database.digitalBeings.update(action.beingId, {
-      currentTaskId: undefined,
-      currentActionId: undefined,
+      currentTaskId: null,
+      currentActionId: null,
     });
     await this.deps.database.worldTasks.update(action.taskId, {
       status: "completed",
@@ -429,15 +435,9 @@ export class TaskExecutor {
 
   /** Find a running action by its agentRunId. */
   private async findActionByRunId(runId: string) {
-    // Query all beings' actions — this is a simple scan.
-    // For production scale, add a dedicated query method.
-    const beings = await this.deps.database.digitalBeings.list();
-    for (const being of beings) {
-      const actions = await this.deps.database.worldActions.listByBeingId(being.id);
-      const found = actions.find((a) => a.agentRunId === runId && a.status === "running");
-      if (found) return found;
-    }
-    return null;
+    // Single indexed lookup on idx_world_actions_agent_run — replaces the
+    // previous O(beings × actions) scan that issued one query per being.
+    return this.deps.database.worldActions.findByAgentRunId(runId);
   }
 
   private getActionStatusText(type: string, param?: string): string {

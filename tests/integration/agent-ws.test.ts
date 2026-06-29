@@ -1,4 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { WebSocket } from "ws";
 import { createDaemon } from "@sunpilot/daemon";
 import { InMemoryDatabaseContext } from "@sunpilot/storage";
@@ -6,11 +9,15 @@ import { InMemoryDatabaseContext } from "@sunpilot/storage";
 describe("daemon Agent WebSocket integration", () => {
   let daemon: Awaited<ReturnType<typeof createDaemon>> | undefined;
   let previousTokenAuth: string | undefined;
+  let previousHome: string | undefined;
+  let home: string;
 
   beforeEach(() => {
-    // This suite exercises JSON-RPC plumbing, not the local token auth gate.
     previousTokenAuth = process.env.SUNPILOT_DISABLE_TOKEN_AUTH;
-    process.env.SUNPILOT_DISABLE_TOKEN_AUTH = "1";
+    delete process.env.SUNPILOT_DISABLE_TOKEN_AUTH;
+    previousHome = process.env.SUNPILOT_HOME;
+    home = mkdtempSync(join(tmpdir(), "sunpilot-ws-integration-"));
+    process.env.SUNPILOT_HOME = home;
   });
 
   afterEach(async () => {
@@ -21,6 +28,9 @@ describe("daemon Agent WebSocket integration", () => {
     } else {
       process.env.SUNPILOT_DISABLE_TOKEN_AUTH = previousTokenAuth;
     }
+    if (previousHome === undefined) delete process.env.SUNPILOT_HOME;
+    else process.env.SUNPILOT_HOME = previousHome;
+    rmSync(home, { recursive: true, force: true });
   });
 
   test("streams Agent events and returns chat.send acknowledgement", async () => {
@@ -117,6 +127,13 @@ describe("daemon Agent WebSocket integration", () => {
     });
     await daemon.start();
 
+    const pidEntry = JSON.parse(readFileSync(daemon.paths.pidFile, "utf8"));
+    expect(pidEntry).toMatchObject({
+      pid: process.pid,
+      startedAt: expect.any(String),
+      processStartTicks: expect.stringMatching(/^\d+$/),
+    });
+
     const address = daemon.app.server.address();
     if (!address || typeof address === "string") {
       throw new Error("Daemon did not expose a TCP address.");
@@ -128,7 +145,18 @@ describe("daemon Agent WebSocket integration", () => {
       daemon: "alive",
     });
 
-    const ws = new WebSocket(`ws://127.0.0.1:${address.port}/v1/ws`);
+    const unauthorized = new WebSocket(`ws://127.0.0.1:${address.port}/v1/ws`, {
+      headers: { Origin: `http://localhost:${address.port}` },
+    });
+    const unauthorizedStatus = await new Promise<number>((resolve) => {
+      unauthorized.once("unexpected-response", (_request, response) => resolve(response.statusCode ?? 0));
+    });
+    expect(unauthorizedStatus).toBe(401);
+
+    const token = readFileSync(daemon.paths.token, "utf8").trim();
+    const ws = new WebSocket(
+      `ws://127.0.0.1:${address.port}/v1/ws?token=${encodeURIComponent(token)}`,
+    );
     const messages: any[] = [];
     ws.on("message", (data) => messages.push(JSON.parse(String(data))));
     await once(ws, "open");

@@ -99,4 +99,19 @@ export class PostgresWorldTaskRepository implements WorldTaskRepository {
     if (result.rows.length === 0) return null;
     return mapTask(result.rows[0]);
   }
+
+  async claimIfQueued(id: string, startedAt: string): Promise<WorldTaskRecord | null> {
+    // Atomic conditional UPDATE: only claims the task if it's still queued.
+    // The WHERE status = 'queued' guard makes this safe against concurrent
+    // executors — only one UPDATE will affect the row, the other(s) get 0 rows.
+    const result = await this.pool.query(
+      `UPDATE world_tasks
+       SET status = 'running', started_at = $2
+       WHERE id = $1 AND status = 'queued'
+       RETURNING ${TASK_COLUMNS}`,
+      [id, startedAt],
+    );
+    if (result.rows.length === 0) return null;
+    return mapTask(result.rows[0]);
+  }
 }

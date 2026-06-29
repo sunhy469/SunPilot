@@ -9,7 +9,7 @@
     "dist"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && cp src/isolated-worker.mjs dist/isolated-worker.mjs",
     "test": "vitest run --passWithNoTests",
     "lint": "eslint ."
   },

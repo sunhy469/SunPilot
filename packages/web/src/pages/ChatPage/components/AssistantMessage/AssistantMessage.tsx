@@ -325,6 +325,82 @@ function ErrorPartBlock({ part }: { part: AssistantErrorPart }) {
   );
 }
 
+// ── Unified thinking banner (no parts yet, or edge-case fallback) ────
+//
+// When the agent is still preparing (no structured parts have arrived),
+// this banner provides the same visual language as ThinkingProcessSection:
+// collapsible container, blue lightning icon, "正在思考" label, and
+// animated dots. It replaces the old bare assistant-status bars so every
+// in-progress state looks consistent.
+
+function UnifiedThinkingBanner({
+  isActive,
+  statusText,
+}: {
+  isActive: boolean;
+  statusText?: string;
+}) {
+  const [collapsed, setCollapsed] = useState(false);
+
+  // Auto-collapse when the phase ends (content has arrived).
+  useEffect(() => {
+    if (!isActive) {
+      setCollapsed(true);
+    }
+  }, [isActive]);
+
+  if (collapsed) {
+    return (
+      <Flex
+        align="center"
+        gap={6}
+        className="thinking-section thinking-section--collapsed"
+        onClick={() => setCollapsed(false)}
+      >
+        <RightOutlined className="thinking-section__arrow" />
+        {isActive ? (
+          <ThunderboltOutlined className="thinking-section__active-icon" />
+        ) : (
+          <CheckCircleOutlined className="thinking-section__icon" />
+        )}
+        <Text type="secondary" className="thinking-section__summary">
+          思考过程
+        </Text>
+      </Flex>
+    );
+  }
+
+  return (
+    <Flex vertical gap={6} className="thinking-section">
+      <Flex
+        align="center"
+        gap={6}
+        className="thinking-section__header"
+        onClick={() => setCollapsed(true)}
+      >
+        <DownOutlined className="thinking-section__arrow" />
+        <ThunderboltOutlined className="thinking-section__active-icon" />
+        <Text type="secondary" className="thinking-section__title">
+          正在思考
+        </Text>
+        {isActive && <TypingDots />}
+      </Flex>
+      {statusText && (
+        <div className="thinking-section__content">
+          <Flex align="center" gap={6}>
+            <ThunderboltOutlined
+              style={{ fontSize: 12, color: "var(--sp-blue)", opacity: 0.8 }}
+            />
+            <Text type="secondary" style={{ fontSize: 13 }}>
+              {statusText}
+            </Text>
+          </Flex>
+        </div>
+      )}
+    </Flex>
+  );
+}
+
 // ── Thinking process section (collapsible) ──────────────────────────
 
 function ThinkingProcessSection({
@@ -638,21 +714,18 @@ export function AssistantMessage({
               </div>
             )}
 
-            {/* ── AI status indicator (before content) ──────────── */}
-            {aiStatus && !hasContent && !isStopped && (
-              <Flex align="center" gap={8} className="assistant-status">
-                {aiStatus.icon}
-                <Text type="secondary" className="assistant-status__text">
-                  {aiStatus.text}
-                </Text>
-                {aiStatus.dots && <TypingDots />}
-              </Flex>
+            {/* ── Unified thinking banner (before content) ────── */}
+            {/* Replaces scattered aiStatus bars / TypingDots with a single
+                collapsible section matching ThinkingProcessSection visually. */}
+            {!hasContent && !isStopped && (isPending || isStreaming || aiStatus) && (
+              <UnifiedThinkingBanner
+                isActive={isPending || isStreaming || !!aiStatus}
+                statusText={aiStatus?.text}
+              />
             )}
 
             {/* ── Text content ─────────────────────────────────── */}
             <div className="assistant-text">
-              {!hasContent && isStreaming && !aiStatus ? <TypingDots /> : null}
-              {!hasContent && isPending && !aiStatus ? <TypingDots /> : null}
               {hasContent && (
                 <ProductContentRenderer
                   content={msg.content}
@@ -660,69 +733,29 @@ export function AssistantMessage({
                 />
               )}
             </div>
-
-            {/* Hide activities when content-block parts are available. */}
-            {(!msg.parts || msg.parts.length === 0) && (
-              <AgentActivityList activities={msg.activities} />
-            )}
-
-            {/* ── AI status indicator (inline, below content) ──── */}
-            {aiStatus && hasContent && (
-              <Flex
-                align="center"
-                gap={8}
-                className="assistant-status assistant-status--inline"
-              >
-                {aiStatus.icon}
-                <Text type="secondary" className="assistant-status__text">
-                  {aiStatus.text}
-                </Text>
-              </Flex>
-            )}
           </>
         )}
 
-        {/* ── Pending/streaming empty state with parts but no text yet ── */}
-        {/* §Dynamic title: Suppress when thinking parts are already displayed
-            by ThinkingProcessSection (avoids duplicate "正在思考" bars). */}
+        {/* ── Pending/streaming with parts but no text / thinking content yet ── */}
+        {/* UnifiedThinkingBanner keeps the same collapsible visual as
+            ThinkingProcessSection so every in-progress state feels consistent. */}
         {hasParts &&
           !hasContent &&
           !hasThinkingParts &&
-          (isPending ||
-            (isStreaming &&
-              !msg.parts?.some(
-                (p) => p.type === "text" && (p as AssistantTextPart).content,
-              ))) && (
-            <Flex align="center" gap={8} className="assistant-status">
-              {isPending ? (
-                <LoadingOutlined className="assistant-status__icon assistant-loading-icon" />
-              ) : (
-                <ThunderboltOutlined />
-              )}
-              <Text type="secondary" className="assistant-status__text">
-                {isPending ? "正在准备上下文..." : "正在思考"}
-              </Text>
-              <TypingDots />
-            </Flex>
-          )}
-
-        {/* ── Tool result completed but no text yet ── */}
-        {/* §Dynamic title: Also suppressed when thinking parts are displayed. */}
-        {hasParts &&
-          !hasContent &&
-          isStreaming &&
-          !hasThinkingParts &&
-          msg.parts?.some((p) => p.type === "tool_result") &&
+          (isPending || isStreaming) &&
           !msg.parts?.some(
             (p) => p.type === "text" && (p as AssistantTextPart).content,
           ) && (
-            <Flex align="center" gap={8} className="assistant-status">
-              <LoadingOutlined className="assistant-status__icon assistant-loading-icon" />
-              <Text type="secondary" className="assistant-status__text">
-                正在整理结果...
-              </Text>
-              <TypingDots />
-            </Flex>
+            <UnifiedThinkingBanner
+              isActive={true}
+              statusText={
+                msg.parts?.some((p) => p.type === "tool_result")
+                  ? "正在整理结果..."
+                  : isPending
+                    ? "正在准备上下文..."
+                    : "正在思考"
+              }
+            />
           )}
 
         {/* ── Rich cards (video, image, etc.) ─────────────────── */}

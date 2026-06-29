@@ -30,19 +30,6 @@ import { registerMemoryRoutes } from "./routes/memory.js";
 import { registerDigitalWorldRoutes } from "./routes/digital-world.js";
 import { formatZodIssues, paginationCursor } from "./routes/shared.js";
 
-function chatHttpStatus(error: unknown): number {
-  if (error instanceof RuntimeError) return error.statusCode;
-  if (
-    error instanceof Error &&
-    (error.message.includes("request must be an object") ||
-      error.message.includes("message is required") ||
-      error.message.includes("conversationId must be"))
-  ) {
-    return 400;
-  }
-  return 500;
-}
-
 function conversationTitleFromBody(body: unknown): string | undefined {
   if (!body || typeof body !== "object" || Array.isArray(body))
     return undefined;
@@ -110,8 +97,6 @@ export function registerSunPilotApiRoutes(
   app.get("/readyz", async () => ({
     ok: true,
     database: true,
-    config: config.read(),
-    storage: {},
     skills: skills.list().length,
   }));
 
@@ -121,12 +106,20 @@ export function registerSunPilotApiRoutes(
   // ── Models ─────────────────────────────────────────────────────────
   app.get("/v1/models", async () => {
     const models = deps.getModels?.() ?? [];
+    const configuredDefault = deps.getDefaultModelId?.();
+    const defaultModelId =
+      (configuredDefault && models.some((model) => model.id === configuredDefault && model.available)
+        ? configuredDefault
+        : models.find((model) => model.available)?.id) ??
+      models[0]?.id ??
+      "dp";
     return {
-      defaultModelId: "seed",
+      defaultModelId,
       items: models,
     };
   });
   app.patch("/v1/config", async (request) => {
+    const before = config.read();
     const updated = config.update(request.body ?? {});
     await database.audit.create({
       actor: AuditActor.LocalUser,
@@ -135,7 +128,10 @@ export function registerSunPilotApiRoutes(
       payload: updated as unknown as Record<string, unknown>,
       createdAt: new Date().toISOString(),
     });
-    return updated;
+    return {
+      ...(updated && typeof updated === "object" ? updated as Record<string, unknown> : { config: updated }),
+      restartRequired: JSON.stringify(before) !== JSON.stringify(updated),
+    };
   });
 
   // ── Chat ───────────────────────────────────────────────────────────
@@ -162,6 +158,7 @@ export function registerSunPilotApiRoutes(
             conversationId: body.conversationId,
             message: body.message,
             mode: "agent",
+            attachments: body.attachments,
           },
           { source: "api" },
           {
@@ -186,14 +183,32 @@ export function registerSunPilotApiRoutes(
       }
     } catch (error) {
       if (error instanceof RuntimeError) {
+        if (error.statusCode >= 500) {
+          request.log.error({ err: error }, "Runtime error in /v1/chat");
+          return reply.code(error.statusCode).send({
+            error: error.code,
+            message: "An internal server error occurred.",
+          });
+        }
         return reply
           .code(error.statusCode)
           .send({ error: error.code, message: error.message });
       }
-      const message = error instanceof Error ? error.message : String(error);
-      return reply.code(chatHttpStatus(error)).send({
-        error: chatHttpStatus(error) === 400 ? "bad_request" : "internal_error",
-        message,
+      if (error instanceof ZodError) {
+        return reply.code(400).send({
+          error: "bad_request",
+          message: "Request validation failed.",
+          issues: error.issues,
+        });
+      }
+      // Internal errors: log server-side, return generic message to client.
+      request.log.error(
+        { err: error },
+        "Unhandled error in /v1/chat",
+      );
+      return reply.code(500).send({
+        error: "internal_error",
+        message: "An internal server error occurred.",
       });
     }
   });
@@ -780,7 +795,9 @@ export function registerSunPilotApiRoutes(
       if (error instanceof RuntimeError) {
         return reply.code(error.statusCode).send({
           error: error.code,
-          message: error.message,
+          message: error.statusCode >= 500
+            ? "An internal server error occurred."
+            : error.message,
         });
       }
       throw error;

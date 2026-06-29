@@ -51,6 +51,8 @@ export interface SunPilotApiDeps {
     model: string;
     available: boolean;
   }>;
+  /** Runtime-selected default; must refer to an available catalog item. */
+  getDefaultModelId?(): string;
   /** Update a memory with automatic re-embedding when content changes. */
   updateMemory?(id: string, input: { content?: string; title?: string; summary?: string; confidence?: number; importance?: number }): Promise<{ id: string } | null>;
 }

@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
@@ -9,7 +9,11 @@ import {
   type RunRecord,
   type SunPilotEvent,
 } from "@sunpilot/protocol";
-import { InMemoryDatabaseContext, getSunPilotPaths } from "@sunpilot/storage";
+import {
+  InMemoryDatabaseContext,
+  getSunPilotPaths,
+  writeSunPilotConfig,
+} from "@sunpilot/storage";
 import { createDaemon } from "./server.js";
 
 describe("daemon Agent runtime REST routes", () => {
@@ -17,6 +21,7 @@ describe("daemon Agent runtime REST routes", () => {
   let tempDirs: string[] = [];
   let previousTokenAuth: string | undefined;
   let previousHome: string | undefined;
+  let previousPort: string | undefined;
 
   beforeEach(() => {
     // These suites exercise REST routing, not the local token auth gate.
@@ -24,6 +29,7 @@ describe("daemon Agent runtime REST routes", () => {
     previousTokenAuth = process.env.SUNPILOT_DISABLE_TOKEN_AUTH;
     process.env.SUNPILOT_DISABLE_TOKEN_AUTH = "1";
     previousHome = process.env.SUNPILOT_HOME;
+    previousPort = process.env.SUNPILOT_PORT;
   });
 
   afterEach(async () => {
@@ -42,6 +48,110 @@ describe("daemon Agent runtime REST routes", () => {
     } else {
       process.env.SUNPILOT_HOME = previousHome;
     }
+    if (previousPort === undefined) delete process.env.SUNPILOT_PORT;
+    else process.env.SUNPILOT_PORT = previousPort;
+  });
+
+  test("assembles port, token policy, and Skill directories from config", async () => {
+    const home = mkdtempSync(join(tmpdir(), "sunpilot-config-runtime-"));
+    tempDirs.push(home);
+    const paths = getSunPilotPaths(home);
+    const extraSkills = join(home, "extra-skills");
+    mkdirSync(extraSkills, { recursive: true });
+    writeSunPilotConfig({
+      version: 1,
+      server: { host: "127.0.0.1", port: 4117 },
+      security: { requireLocalToken: true, allowLan: false },
+      skills: { directories: ["extra-skills"], autoReload: false },
+      storage: { home },
+    }, paths);
+    process.env.SUNPILOT_HOME = home;
+    delete process.env.SUNPILOT_PORT;
+    delete process.env.SUNPILOT_DISABLE_TOKEN_AUTH;
+
+    daemon = await createDaemon({
+      database: new InMemoryDatabaseContext(),
+      llmProvider: {
+        id: "test",
+        model: "test",
+        async *streamChat() { yield { delta: "ok", raw: {} }; },
+      },
+    });
+
+    expect(daemon.runtime).toEqual({
+      host: "127.0.0.1",
+      port: 4117,
+      tokenAuthEnabled: true,
+      skillDirectories: [extraSkills],
+      skillAutoReload: false,
+    });
+  });
+
+  test("chooses DP as API default when Seed is unavailable", async () => {
+    const previousSeed = process.env.SUNPILOT_SEED_LLM_API_KEY;
+    delete process.env.SUNPILOT_SEED_LLM_API_KEY;
+    try {
+      const home = mkdtempSync(join(tmpdir(), "sunpilot-model-default-"));
+      tempDirs.push(home);
+      process.env.SUNPILOT_HOME = home;
+      daemon = await createDaemon({
+        database: new InMemoryDatabaseContext(),
+        port: 3737,
+        llmProvider: {
+          id: "test",
+          model: "test",
+          async *streamChat() { yield { delta: "ok", raw: {} }; },
+        },
+      });
+      const response = await daemon.app.inject({ method: "GET", url: "/v1/models" });
+      expect(response.statusCode).toBe(200);
+      expect(response.json()).toMatchObject({
+        defaultModelId: "dp",
+        items: [
+          expect.objectContaining({ id: "dp", available: true }),
+          expect.objectContaining({ id: "seed", available: false }),
+        ],
+      });
+    } finally {
+      if (previousSeed === undefined) delete process.env.SUNPILOT_SEED_LLM_API_KEY;
+      else process.env.SUNPILOT_SEED_LLM_API_KEY = previousSeed;
+    }
+  });
+
+  test("requires the local token for APIs even when Origin and Host are spoofed", async () => {
+    const home = mkdtempSync(join(tmpdir(), "sunpilot-auth-boundary-"));
+    tempDirs.push(home);
+    process.env.SUNPILOT_HOME = home;
+    delete process.env.SUNPILOT_DISABLE_TOKEN_AUTH;
+    daemon = await createDaemon({
+      database: new InMemoryDatabaseContext(),
+      port: 3737,
+    });
+    const token = readFileSync(daemon.paths.token, "utf8").trim();
+
+    const staticPage = await daemon.app.inject({ method: "GET", url: "/" });
+    expect(staticPage.statusCode).toBe(200);
+
+    const spoofedBrowser = await daemon.app.inject({
+      method: "GET",
+      url: "/v1/config",
+      headers: {
+        host: "localhost:3737",
+        origin: "http://localhost:3737",
+      },
+    });
+    expect(spoofedBrowser.statusCode).toBe(401);
+
+    const authorized = await daemon.app.inject({
+      method: "GET",
+      url: "/v1/config",
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(authorized.statusCode).toBe(200);
+
+    const readiness = await daemon.app.inject({ method: "GET", url: "/readyz" });
+    expect(readiness.statusCode).toBe(200);
+    expect(readiness.json()).not.toHaveProperty("config");
   });
 
   test("lists filtered runs, pending approvals, replayable events, and call logs", async () => {

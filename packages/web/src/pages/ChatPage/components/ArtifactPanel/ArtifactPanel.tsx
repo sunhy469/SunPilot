@@ -1,4 +1,4 @@
-import { Card, Button, List, Typography, Descriptions, Space } from "antd";
+import { Card, Button, Flex, Typography, Descriptions } from "antd";
 import { CloseOutlined, FileTextOutlined } from "@ant-design/icons";
 import type {
   AgentArtifactPreview,
@@ -25,36 +25,23 @@ export function ArtifactPanel({
 
   return (
     <div className="artifact-panel">
-      <List
-        size="small"
-        className="artifact-panel__list"
-        dataSource={artifacts}
-        renderItem={(artifact) => (
-          <List.Item
-            actions={[
-              <Button
-                key="open"
-                type="link"
-                size="small"
-                onClick={() => onOpen(artifact.id)}
-              >
-                查看
-              </Button>
-            ]}
-          >
-            <List.Item.Meta
-              avatar={<FileTextOutlined />}
-              title={artifact.name}
-              description={
-                <Text type="secondary">
-                  {artifact.type ?? "artifact"}
-                  {artifact.version ? ` v${artifact.version}` : ""}
-                </Text>
-              }
-            />
-          </List.Item>
-        )}
-      />
+      <Flex vertical className="artifact-panel__list">
+        {artifacts.map((artifact) => (
+          <Flex key={artifact.id} align="center" gap={10} className="artifact-panel__item">
+            <FileTextOutlined />
+            <Flex vertical style={{ minWidth: 0, flex: 1 }}>
+              <Text ellipsis>{artifact.name}</Text>
+              <Text type="secondary">
+                {artifact.type ?? "artifact"}
+                {artifact.version ? ` v${artifact.version}` : ""}
+              </Text>
+            </Flex>
+            <Button type="link" size="small" onClick={() => onOpen(artifact.id)}>
+              查看
+            </Button>
+          </Flex>
+        ))}
+      </Flex>
       {selected && (
         <Card
           className="artifact-panel__detail"

@@ -47,4 +47,10 @@ export interface WorldActionRepository {
   listByTaskId(taskId: string): Promise<WorldActionRecord[]>;
   listByBeingId(beingId: string): Promise<WorldActionRecord[]>;
   update(id: string, patch: UpdateWorldActionPatch): Promise<WorldActionRecord | null>;
+  /**
+   * Find the in-flight action that owns the given Agent Run.
+   * Backed by `idx_world_actions_agent_run` — replaces the previous
+   * O(beings × actions) application-layer scan in TaskExecutor.
+   */
+  findByAgentRunId(runId: string): Promise<WorldActionRecord | null>;
 }

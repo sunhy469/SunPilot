@@ -7,6 +7,11 @@
   margin-bottom: 8px;
 }
 
+.artifact-panel__item {
+  padding: 6px 0;
+  border-bottom: 1px solid var(--sp-border, #e5e7eb);
+}
+
 .artifact-panel__detail {
   margin-top: 8px;
 }

@@ -40,20 +40,31 @@ export interface CreateDigitalBeingInput {
   tokenBudget?: number;
 }
 
+/**
+ * Patch for updating a Digital Being.
+ *
+ * Field semantics:
+ * - `undefined` (field absent): the column is left untouched.
+ * - `null`: the column is explicitly cleared (written as SQL NULL).
+ * - a value: the column is updated to that value.
+ *
+ * Callers that want to clear a nullable column (e.g. `currentTaskId` after a
+ * task finishes, or `sleepReason` on wake) MUST pass `null`, not `undefined`.
+ */
 export interface UpdateDigitalBeingPatch {
   name?: string;
-  description?: string;
+  description?: string | null;
   status?: string;
   currentNodeId?: string;
-  targetNodeId?: string;
-  currentTaskId?: string;
-  currentActionId?: string;
-  currentRunId?: string;
-  statusText?: string;
-  sleepReason?: string;
+  targetNodeId?: string | null;
+  currentTaskId?: string | null;
+  currentActionId?: string | null;
+  currentRunId?: string | null;
+  statusText?: string | null;
+  sleepReason?: string | null;
   usedRuns?: number;
   usedSkillCalls?: number;
-  cooldownUntil?: string;
+  cooldownUntil?: string | null;
 }
 
 export interface DigitalBeingRepository {

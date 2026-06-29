@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { lazy, Suspense, useMemo, useState } from "react";
 import { createRequest } from "../../shared/api/client";
 import { AppShell } from "../../layouts/AppShell/AppShell";
 import { Sidebar } from "../../layouts/AppShell/Sidebar";
@@ -14,11 +14,26 @@ import { OfflineBanner } from "./components/OfflineBanner/OfflineBanner";
 import { ErrorMessageCard } from "./components/ErrorMessageCard/ErrorMessageCard";
 import { PluginsEmptyView } from "./components/PluginsEmptyView/PluginsEmptyView";
 import { RunDebugPanel } from "../../features/agent-runtime/RunDebugPanel";
-import { DigitalWorld } from "../../features/digital-world";
-import { SettingsPage } from "../SettingsPage";
 import { conversationTitle } from "../../features/conversations/model";
 import { collectAiOutputs } from "./utils/collectAiOutputs";
 import "./ChatPage.scss";
+
+// Route-level lazy chunks: DigitalWorld pulls in PixiJS (~300KB), SettingsPage
+// pulls in code editor + form libs. Both are conditionally-rendered panels, so
+// splitting them shrinks the initial bundle by ~600KB and lets the chat UI
+// render while the heavy chunks stream in.
+const DigitalWorld = lazy(() =>
+  import("../../features/digital-world").then((m) => ({ default: m.DigitalWorld })),
+);
+const SettingsPage = lazy(() =>
+  import("../SettingsPage").then((m) => ({ default: m.SettingsPage })),
+);
+
+const PanelFallback = () => (
+  <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: "100%" }}>
+    <span style={{ color: "#888" }}>加载中…</span>
+  </div>
+);
 
 export function ChatPage() {
   const [activePanel, setActivePanel] = useState<"chat" | "automation" | "plugins" | "debug" | "settings">("chat");
@@ -104,11 +119,15 @@ export function ChatPage() {
         )}
 
         {activePanel === "automation" ? (
-          <DigitalWorld />
+          <Suspense fallback={<PanelFallback />}>
+            <DigitalWorld />
+          </Suspense>
         ) : activePanel === "plugins" ? (
           <PluginsEmptyView />
         ) : activePanel === "settings" ? (
-          <SettingsPage />
+          <Suspense fallback={<PanelFallback />}>
+            <SettingsPage />
+          </Suspense>
         ) : activePanel === "debug" ? (
           <div className="chat-page" style={{ overflow: "hidden" }}>
             <RunDebugPanel

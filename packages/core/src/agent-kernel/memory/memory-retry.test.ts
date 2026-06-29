@@ -166,12 +166,15 @@ describe("MemoryRetryWrapper", () => {
 
     expect(eventBus.emit).toHaveBeenCalled();
     const [eventName] = eventBus.events[0]!;
-    expect(eventName).toBe("agent.memory.write_failed");
+    // Uses the standard protocol event "agent.error" (not the removed
+    // non-protocol "agent.memory.write_failed").
+    expect(eventName).toBe("agent.error");
     // Event payload should contain error info
     const payload = eventBus.events[0]![1] as any;
     expect(payload.code).toBe("AGENT_MEMORY_WRITE_FAILED");
     expect(payload.category).toBe("memory");
     expect(payload.retryable).toBe(false);
+    expect(payload.runId).toBe("run_1");
   });
 
   test("exponential backoff timing is correct", async () => {

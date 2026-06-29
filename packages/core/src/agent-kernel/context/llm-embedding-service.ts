@@ -1,4 +1,3 @@
-import type { LlmProvider } from "../../llm/llm.provider.js";
 import type { EmbeddingService } from "./embedding-service.js";
 
 /**
@@ -72,7 +71,6 @@ export class LlmEmbeddingService implements EmbeddingService {
 
   constructor(
     private readonly deps: {
-      llm: LlmProvider;
       /** Optional real embedding provider. When absent, falls back to keyword hashing. */
       embeddingProvider?: EmbeddingProvider;
       /** Embedding dimension. Defaults to 1536 (OpenAI text-embedding-3-small). */

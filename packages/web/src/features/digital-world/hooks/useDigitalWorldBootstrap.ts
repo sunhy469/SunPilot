@@ -1,5 +1,6 @@
 import { useEffect, useState, useMemo, useRef, useCallback } from "react";
 import { createRequest } from "../../../shared/api/client";
+import { withLocalTokenQuery } from "../../../shared/auth/local-token";
 import { type WorldStateResponse } from "../api";
 import { mockNodes, mockEdges, mockBeing } from "../mock/mockWorld";
 import type { WorldNodeData, WorldEdgeData, DigitalBeingData } from "../types";
@@ -16,6 +17,10 @@ export interface BootstrapData {
   loaded: boolean;
   /** Whether the data comes from mock fallback (no real backend data). */
   isMock: boolean;
+  /** Error message when the backend is unreachable or returns empty data in production. */
+  error?: string;
+  /** World nodes/edges exist but no beings created yet — show creation guide. */
+  needsBeing: boolean;
 }
 
 function mapApiToNodes(apiNodes: WorldStateResponse["nodes"]): WorldNodeData[] {
@@ -68,12 +73,17 @@ async function fetchAndApplyWorldState(
     const beings = mapApiToBeings(result.beings);
     const being = beings[0];
     if (nodes.length > 0 && being) {
-      setData({ nodes, edges, being, beings, loaded: true, isMock: false });
+      setData({ nodes, edges, being, beings, loaded: true, isMock: false, needsBeing: false });
+      return;
+    }
+    if (nodes.length > 0 && !being) {
+      // World exists but no beings yet — show creation guide.
+      setData(worldEmptyState({ nodes, edges, needsBeing: true }));
       return;
     }
     // Empty world state — keep existing data (no spurious overwrite).
     if (!options?.allowMockFallback) {
-      setData((prev) => ({ ...prev, loaded: true, isMock: false }));
+      setData((prev) => ({ ...prev, loaded: true, isMock: false, needsBeing: false }));
     }
   } catch {
     // Ignore fetch errors; callers (polling / WS) will retry.
@@ -90,18 +100,76 @@ function mockFallbackData(): BootstrapData {
     beings: [{ ...mockBeing }],
     loaded: true,
     isMock: true,
+    needsBeing: false,
   };
 }
 
-export function useDigitalWorldBootstrap(): BootstrapData {
-  const [data, setData] = useState<BootstrapData>({
-    nodes: mockNodes,
-    edges: mockEdges,
-    being: { ...mockBeing },
-    beings: [{ ...mockBeing }],
-    loaded: false,
-    isMock: true,
-  });
+/** Production empty state used when the backend is unreachable or returns
+ *  no data. Ensures mock data never leaks into production UI. */
+const EMPTY_BEING: DigitalBeingData = {
+  id: "",
+  name: "",
+  currentNodeId: "",
+  status: "idle",
+  statusText: "",
+};
+
+/**
+ * Build an empty/error state for the digital world.
+ *
+ * When the world has nodes but no beings yet, use `needsBeing: true` (shows a
+ * friendly creation guide) instead of the generic error — the backend is
+ * actually healthy, just awaiting the first being.
+ */
+function worldEmptyState(opts: {
+  error?: string;
+  needsBeing?: boolean;
+  nodes?: WorldNodeData[];
+  edges?: WorldEdgeData[];
+}): BootstrapData {
+  return {
+    nodes: opts.nodes ?? [],
+    edges: opts.edges ?? [],
+    being: { ...EMPTY_BEING },
+    beings: [],
+    loaded: true,
+    isMock: false,
+    error: opts.error,
+    needsBeing: opts.needsBeing ?? false,
+  };
+}
+
+/**
+ * Bootstrap the digital world by fetching world state from the API.
+ *
+ * @param refreshKey — increment to force a re-fetch (e.g. after creating the
+ *   first being, which transitions from the creation-guide state to normal).
+ */
+export function useDigitalWorldBootstrap(refreshKey = 0): BootstrapData {
+  // In production, the initial state uses empty arrays — mock data must
+  // never appear as the initial production state. DEV mode retains mock
+  // data for offline development convenience.
+  const [data, setData] = useState<BootstrapData>(() =>
+    IS_DEV
+      ? {
+          nodes: mockNodes,
+          edges: mockEdges,
+          being: { ...mockBeing },
+          beings: [{ ...mockBeing }],
+          loaded: false,
+          isMock: true,
+          needsBeing: false,
+        }
+      : {
+          nodes: [],
+          edges: [],
+          being: { ...EMPTY_BEING },
+          beings: [],
+          loaded: false,
+          isMock: false,
+          needsBeing: false,
+        },
+  );
 
   const request = useMemo(() => createRequest(), []);
 
@@ -123,14 +191,18 @@ export function useDigitalWorldBootstrap(): BootstrapData {
         const being = beings[0];
 
         if (nodes.length > 0 && being) {
-          setData({ nodes, edges, being, beings, loaded: true, isMock: false });
+          setData({ nodes, edges, being, beings, loaded: true, isMock: false, needsBeing: false });
+        } else if (nodes.length > 0 && !being) {
+          // World exists (nodes/edges seeded) but no digital being created yet.
+          // Show the creation guide instead of an error.
+          setData(worldEmptyState({ nodes, edges, needsBeing: true }));
         } else {
           // Fallback to mock data only in DEV mode.
           // In production, show empty state to avoid masking backend issues.
           if (IS_DEV) {
             setData(mockFallbackData());
           } else {
-            setData((prev) => ({ ...prev, loaded: true, isMock: false }));
+            setData(worldEmptyState({ error: "Digital World data is unavailable." }));
           }
         }
       })
@@ -140,14 +212,14 @@ export function useDigitalWorldBootstrap(): BootstrapData {
         if (IS_DEV) {
           setData(mockFallbackData());
         } else {
-          setData((prev) => ({ ...prev, loaded: true, isMock: false }));
+          setData(worldEmptyState({ error: "Digital World is currently unreachable." }));
         }
       });
 
     return () => {
       cancelled = true;
     };
-  }, [request]);
+  }, [request, refreshKey]);
 
   // §9.5.1: HTTP polling fallback. Runs at a reduced frequency when the
   // WebSocket is connected (the WS pushes incremental updates in real time).
@@ -195,7 +267,7 @@ function worldSocketConnect(): void {
   if (worldSocket) return;
   if (typeof window === "undefined") return; // SSR guard.
   const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-  const url = `${protocol}//${window.location.host}/v1/ws`;
+  const url = withLocalTokenQuery(`${protocol}//${window.location.host}/v1/ws`);
   try {
     worldSocket = new WebSocket(url);
   } catch {

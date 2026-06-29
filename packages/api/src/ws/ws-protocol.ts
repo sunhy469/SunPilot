@@ -22,7 +22,7 @@ export function rpcError(error: unknown): {
   if (error instanceof SyntaxError) {
     return {
       code: JSON_RPC_ERROR_CODES.PARSE_ERROR,
-      message: error.message,
+      message: "Parse error",
     };
   }
   if (error instanceof ZodError) {
@@ -35,8 +35,20 @@ export function rpcError(error: unknown): {
 
   const agentError = normalizeJsonRpcAgentError(error);
   if (agentError) {
+    const code = agentErrorToJsonRpcCode(agentError.code);
+    if (code === JSON_RPC_ERROR_CODES.INTERNAL_ERROR || agentError.category === "internal") {
+      return {
+        code: JSON_RPC_ERROR_CODES.INTERNAL_ERROR,
+        message: "An internal server error occurred.",
+        data: {
+          agentCode: agentError.code,
+          category: "internal",
+          retryable: agentError.retryable,
+        },
+      };
+    }
     return {
-      code: agentErrorToJsonRpcCode(agentError.code),
+      code,
       message: agentError.message,
       data: {
         agentCode: agentError.code,
@@ -48,6 +60,12 @@ export function rpcError(error: unknown): {
   }
 
   if (error instanceof RuntimeError) {
+    if (error.statusCode >= 500) {
+      return {
+        code: JSON_RPC_ERROR_CODES.INTERNAL_ERROR,
+        message: "An internal server error occurred.",
+      };
+    }
     return {
       code: JSON_RPC_ERROR_CODES.AGENT_DOMAIN_ERROR,
       message: error.message,
@@ -60,7 +78,10 @@ export function rpcError(error: unknown): {
   }
   return {
     code: JSON_RPC_ERROR_CODES.INTERNAL_ERROR,
-    message: error instanceof Error ? error.message : String(error),
+    // Return a generic message to avoid leaking internal exception details
+    // (database SQL, LLM response bodies, file paths, etc.). The full error
+    // is logged server-side by the caller.
+    message: "An internal server error occurred.",
   };
 }
 

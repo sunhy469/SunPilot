@@ -1,12 +1,92 @@
 #!/usr/bin/env node
 import { existsSync, readFileSync, realpathSync, rmSync } from "node:fs";
-import { execSync, spawn } from "node:child_process";
+import { spawn } from "node:child_process";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
 import open from "open";
-import { getSunPilotPaths, type SunPilotPaths } from "@sunpilot/storage";
+import {
+  getSunPilotPaths,
+  readSunPilotConfig,
+  type SunPilotConfig,
+  type SunPilotPaths,
+} from "@sunpilot/storage";
 import { DEFAULT_WEB_URL } from "@sunpilot/protocol";
+
+// P1-12: Verify that the PID in the PID file still belongs to a SunPilot
+// daemon before sending SIGTERM. A reused PID must never cause the launcher
+// to kill an unrelated process.
+//
+// The daemon writes both a command identity and Linux process start ticks.
+// A PID is signalled only when both still match; legacy/unverifiable files are
+// treated as stale. This prevents PID reuse from terminating another process.
+
+/** Tokens that identify a SunPilot daemon process in /proc/<pid>/cmdline. */
+const DAEMON_CMDLINE_MARKERS = ["@sunpilot/daemon", "packages/daemon/dist/main.js"];
+
+interface PidFileEntry {
+  pid: number;
+  startedAt?: string;
+  processStartTicks?: string;
+}
+
+/**
+ * Parse the PID file. Supports both the new JSON format
+ * ({pid, startedAt, processStartTicks}) and the legacy plain-number format.
+ */
+function parsePidFile(raw: string): PidFileEntry | null {
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+
+  // Try JSON first (new format).
+  if (trimmed.startsWith("{")) {
+    try {
+      const parsed = JSON.parse(trimmed) as Partial<PidFileEntry>;
+      if (typeof parsed.pid === "number" && Number.isFinite(parsed.pid) && parsed.pid > 0) {
+        return {
+          pid: parsed.pid,
+          startedAt: typeof parsed.startedAt === "string" ? parsed.startedAt : undefined,
+          processStartTicks:
+            typeof parsed.processStartTicks === "string"
+              ? parsed.processStartTicks
+              : undefined,
+        };
+      }
+      return null;
+    } catch {
+      return null;
+    }
+  }
+
+  // Legacy: plain number.
+  const pid = Number(trimmed);
+  if (Number.isFinite(pid) && pid > 0) return { pid };
+  return null;
+}
+
+/**
+ * Read /proc/<pid>/cmdline (Linux) and verify the process command line
+ * contains a SunPilot daemon marker. Returns false when the file cannot
+ * be read or the process is not a SunPilot daemon.
+ */
+function isDaemonProcess(entry: PidFileEntry): boolean {
+  // Without a stable process birth identity it is not safe to signal a PID.
+  if (process.platform !== "linux" || !entry.processStartTicks) return false;
+  try {
+    const cmdline = readFileSync(`/proc/${entry.pid}/cmdline`, "utf8");
+    if (!DAEMON_CMDLINE_MARKERS.some((marker) => cmdline.includes(marker))) {
+      return false;
+    }
+    const stat = readFileSync(`/proc/${entry.pid}/stat`, "utf8");
+    const commandEnd = stat.lastIndexOf(")");
+    if (commandEnd < 0) return false;
+    const actualStartTicks = stat.slice(commandEnd + 1).trim().split(/\s+/)[19];
+    return actualStartTicks === entry.processStartTicks;
+  } catch {
+    // File missing or unreadable — process likely doesn't exist.
+    return false;
+  }
+}
 
 type SpawnLike = typeof spawn;
 const require = createRequire(import.meta.url);
@@ -53,6 +133,9 @@ export interface LauncherDeps {
   readFileImpl?: (path: string, encoding: BufferEncoding) => string;
   rmImpl?: (path: string, options: { force: boolean }) => void;
   killImpl?: (pid: number, signal: NodeJS.Signals) => boolean;
+  /** Override the daemon-identity check used before signaling a PID. */
+  isDaemonProcessImpl?: (entry: PidFileEntry) => boolean;
+  readConfigImpl?: (paths: SunPilotPaths) => SunPilotConfig;
   log?: (message: string) => void;
 }
 
@@ -60,14 +143,26 @@ export async function runLauncher(deps: LauncherDeps = {}): Promise<number> {
   const parsed = parseArgs(deps.argv ?? process.argv.slice(2));
   const command = parsed.command;
   const env = deps.env ?? process.env;
-  const port = parsed.port ?? Number(env.SUNPILOT_PORT ?? "3737");
+  const paths = deps.paths ?? getSunPilotPaths();
+  let configPort = 3737;
+  try {
+    configPort = (deps.readConfigImpl ?? readSunPilotConfig)(paths).server.port;
+  } catch {
+    // The daemon will report malformed config in detail; launcher keeps a
+    // usable fallback for status/doctor commands.
+  }
+  const envPort = env.SUNPILOT_PORT === undefined ? undefined : Number(env.SUNPILOT_PORT);
+  const port = parsed.port ?? (
+    Number.isInteger(envPort) && Number(envPort) > 0 && Number(envPort) <= 65_535
+      ? Number(envPort)
+      : configPort
+  );
   const baseUrl = `http://127.0.0.1:${port}`;
   const webUrl = (
     env.SUNPILOT_WEB_URL ??
     env.SUNPILOT_CONSOLE_URL ??
     DEFAULT_WEB_URL
   ).replace(/\/+$/, "");
-  const paths = deps.paths ?? getSunPilotPaths();
   const fetchImpl = deps.fetchImpl ?? fetch;
   const log = deps.log ?? console.log;
 
@@ -138,35 +233,25 @@ export async function runLauncher(deps: LauncherDeps = {}): Promise<number> {
   function killDaemon(): boolean {
     let killed = false;
     const kill = deps.killImpl ?? process.kill;
+    const isDaemon = deps.isDaemonProcessImpl ?? isDaemonProcess;
 
-    // 1) Try PID file first
+    // 1) Try PID file first.
+    // P1-12: Verify the PID belongs to a SunPilot daemon before signaling.
+    // A reused PID that now belongs to an unrelated process must never be
+    // killed — only the stale PID file is removed in that case.
     const pidFile = paths.pidFile;
     if ((deps.existsImpl ?? existsSync)(pidFile)) {
-      const pid = Number((deps.readFileImpl ?? readFileSync)(pidFile, "utf8"));
-      try { kill(pid, "SIGTERM"); killed = true; } catch { /* stale */ }
+      const raw = (deps.readFileImpl ?? readFileSync)(pidFile, "utf8");
+      const entry = parsePidFile(raw);
+      if (entry && isDaemon(entry)) {
+        try { kill(entry.pid, "SIGTERM"); killed = true; } catch { /* stale */ }
+      } else {
+        // PID file is stale (PID missing or belongs to a non-daemon process).
+        // Do NOT signal — just remove the file.
+      }
       (deps.rmImpl ?? rmSync)(pidFile, { force: true });
     }
 
-    // 2) Fallback: scan for daemon processes by command-line pattern
-    if (!killed) {
-      try {
-        const out = execSync(
-          "ps -eo pid,args --no-headers 2>/dev/null || ps -eo pid,comm -o args 2>/dev/null",
-          { encoding: "utf8", timeout: 5000 },
-        );
-        for (const line of out.split(/\r?\n/)) {
-          if (
-            line.includes("@sunpilot/daemon") ||
-            line.includes("packages/daemon/dist/main.js")
-          ) {
-            const pid = Number(line.trim().split(/\s+/)[0]);
-            if (pid > 0 && pid !== process.pid) {
-              try { kill(pid, "SIGTERM"); killed = true; } catch { /* skip */ }
-            }
-          }
-        }
-      } catch { /* ps unavailable */ }
-    }
     return killed;
   }
 
@@ -231,7 +316,21 @@ export async function runLauncher(deps: LauncherDeps = {}): Promise<number> {
     case "logs":
       return printLogs() ? 0 : 1;
     case "open": {
-      const target = `${webUrl}/`;
+      let target = `${webUrl}/`;
+      try {
+        const parsedTarget = new URL(target);
+        const isLocalTarget =
+          parsedTarget.hostname === "127.0.0.1" ||
+          parsedTarget.hostname === "localhost" ||
+          parsedTarget.hostname === "[::1]";
+        const token = isLocalTarget ? readLocalToken() : undefined;
+        if (token) {
+          parsedTarget.hash = new URLSearchParams({ "sunpilot-token": token }).toString();
+          target = parsedTarget.toString();
+        }
+      } catch {
+        // Preserve the configured target; open() will surface malformed URLs.
+      }
       try {
         await (deps.openImpl ?? open)(target);
       } catch {

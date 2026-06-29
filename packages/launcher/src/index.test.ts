@@ -16,6 +16,27 @@ const paths = {
 };
 
 describe("launcher", () => {
+  const config = (port: number) => ({
+    version: 1 as const,
+    server: { host: "127.0.0.1" as const, port },
+    security: { requireLocalToken: true, allowLan: false as const },
+    skills: { directories: [paths.skills], autoReload: true },
+    storage: { home: paths.home },
+  });
+
+  test("uses config port when CLI and environment do not override it", async () => {
+    const fetchImpl = vi.fn(async () => ({ ok: true, json: async () => ({ ok: true }) })) as any;
+    const code = await runLauncher({
+      argv: ["status"],
+      env: {},
+      paths,
+      readConfigImpl: () => config(4123),
+      fetchImpl,
+      log: () => undefined,
+    });
+    expect(code).toBe(0);
+    expect(fetchImpl).toHaveBeenCalledWith("http://127.0.0.1:4123/healthz");
+  });
   test("status returns success when daemon is reachable", async () => {
     const messages: string[] = [];
     const fetchImpl = vi.fn(async () => ({
@@ -235,10 +256,30 @@ describe("launcher", () => {
       paths,
       log: () => {},
       openImpl,
+      existsImpl: () => false,
     });
 
     expect(code).toBe(0);
     expect(openImpl).toHaveBeenCalledWith("http://127.0.0.1:3737/");
+  });
+
+  test("open bootstraps the token through a fragment for local web URLs", async () => {
+    const openImpl = vi.fn(async () => undefined);
+    const token = "c".repeat(64);
+    const code = await runLauncher({
+      argv: ["open"],
+      env: { SUNPILOT_WEB_URL: "http://127.0.0.1:3737" },
+      paths,
+      log: () => undefined,
+      openImpl,
+      existsImpl: (path) => path === paths.token,
+      readFileImpl: () => token,
+    });
+
+    expect(code).toBe(0);
+    expect(openImpl).toHaveBeenCalledWith(
+      `http://127.0.0.1:3737/#sunpilot-token=${token}`,
+    );
   });
 
   test("open still prints the URL when no local browser is available", async () => {
@@ -269,9 +310,14 @@ describe("launcher", () => {
       paths,
       log: (message) => messages.push(message),
       existsImpl: () => true,
-      readFileImpl: () => "123",
+      readFileImpl: () => JSON.stringify({
+        pid: 123,
+        startedAt: "2026-06-29T00:00:00.000Z",
+        processStartTicks: "1000",
+      }),
       killImpl,
       rmImpl,
+      isDaemonProcessImpl: () => true,
     });
     expect(code).toBe(0);
     expect(killImpl).toHaveBeenCalledWith(123, "SIGTERM");
@@ -290,9 +336,14 @@ describe("launcher", () => {
       paths,
       log: (message) => messages.push(message),
       existsImpl: () => true,
-      readFileImpl: () => "123",
+      readFileImpl: () => JSON.stringify({
+        pid: 123,
+        startedAt: "2026-06-29T00:00:00.000Z",
+        processStartTicks: "1000",
+      }),
       killImpl,
       rmImpl,
+      isDaemonProcessImpl: () => true,
     });
 
     expect(code).toBe(0);
@@ -301,5 +352,75 @@ describe("launcher", () => {
     expect(messages).toEqual([
       "SunPilot daemon was not running.",
     ]);
+  });
+
+  test("stop parses the new JSON pid file format", async () => {
+    const killImpl = vi.fn(() => true);
+    const rmImpl = vi.fn();
+    const messages: string[] = [];
+    const pidEntry = JSON.stringify({
+      pid: 9999,
+      startedAt: "2026-06-29T00:00:00.000Z",
+      processStartTicks: "987654",
+    });
+    const code = await runLauncher({
+      argv: ["stop"],
+      paths,
+      log: (message) => messages.push(message),
+      existsImpl: () => true,
+      readFileImpl: () => pidEntry,
+      killImpl,
+      rmImpl,
+      isDaemonProcessImpl: () => true,
+    });
+    expect(code).toBe(0);
+    expect(killImpl).toHaveBeenCalledWith(9999, "SIGTERM");
+    expect(rmImpl).toHaveBeenCalledWith(paths.pidFile, { force: true });
+    expect(messages).toEqual(["SunPilot daemon stopped."]);
+  });
+
+  test("stop treats legacy PID-only files as unverifiable and never signals", async () => {
+    const killImpl = vi.fn(() => true);
+    const rmImpl = vi.fn();
+    const code = await runLauncher({
+      argv: ["stop"],
+      paths,
+      log: () => undefined,
+      existsImpl: () => true,
+      readFileImpl: () => "9999",
+      killImpl,
+      rmImpl,
+      isDaemonProcessImpl: (entry) => Boolean(entry.processStartTicks),
+    });
+
+    expect(code).toBe(0);
+    expect(killImpl).not.toHaveBeenCalled();
+    expect(rmImpl).toHaveBeenCalledWith(paths.pidFile, { force: true });
+  });
+
+  test("stop does NOT signal when the PID belongs to a non-daemon process", async () => {
+    const killImpl = vi.fn(() => true);
+    const rmImpl = vi.fn();
+    const messages: string[] = [];
+    const code = await runLauncher({
+      argv: ["stop"],
+      paths,
+      log: (message) => messages.push(message),
+      existsImpl: () => true,
+      readFileImpl: () => JSON.stringify({
+        pid: 9999,
+        startedAt: "2026-06-29T00:00:00.000Z",
+        processStartTicks: "987654",
+      }),
+      killImpl,
+      rmImpl,
+      isDaemonProcessImpl: () => false,
+    });
+    expect(code).toBe(0);
+    // Kill must NOT be called for the stale PID — the process at PID 9999
+    // is not a SunPilot daemon and must not be terminated.
+    expect(killImpl).not.toHaveBeenCalledWith(9999, "SIGTERM");
+    // The stale PID file must still be removed.
+    expect(rmImpl).toHaveBeenCalledWith(paths.pidFile, { force: true });
   });
 });

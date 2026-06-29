@@ -120,10 +120,12 @@ export class OssClient {
 
   /**
    * Return the public-facing URL for an object key.
+   * Each path segment is URI-encoded so characters like `#`, `%`, and spaces
+   * do not break the URL.
    */
   publicUrl(key: string): string {
     const base = this.config.publicBaseUrl.replace(/\/+$/, "");
-    return `${base}/${key}`;
+    return `${base}/${uriEncodePath(key)}`;
   }
 
   /**
@@ -299,7 +301,7 @@ export class OssClient {
       Signature: signature,
     });
 
-    return `https://${host}/${key}?${params.toString()}`;
+    return `https://${host}/${uriEncodePath(key)}?${params.toString()}`;
   }
 
   /**
