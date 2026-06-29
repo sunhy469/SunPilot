@@ -83,6 +83,14 @@ export class PostgresIdempotencyRepository implements IdempotencyRepository {
     return result.rows[0] ? mapIdempotency(result.rows[0]) : null;
   }
 
+  async release(id: string): Promise<boolean> {
+    const result = await this.pool.query(
+      "DELETE FROM idempotency_keys WHERE id = $1 AND status = 'processing'",
+      [id],
+    );
+    return (result.rowCount ?? 0) > 0;
+  }
+
   /** Delete expired in-flight reservations so they stop blocking retries. */
   async cleanupExpired(): Promise<number> {
     const result = await this.pool.query(

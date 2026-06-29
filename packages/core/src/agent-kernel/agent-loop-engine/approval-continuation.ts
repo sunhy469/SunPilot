@@ -310,6 +310,8 @@ export class ApprovalContinuationCoordinator {
           permissions: approval.requestedAction.permissions,
         }];
 
+        const approvedBatch = extractApprovedToolScopes(approval);
+
         const allArtifacts: import("../loop-types.js").ArtifactRef[] = [];
         const allSummaries: ToolCallSummary[] = [];
 
@@ -328,13 +330,14 @@ export class ApprovalContinuationCoordinator {
             metadata: { skillId: pc.skillId },
           });
 
-          this.deps.eventBus.emit(
-            "agent.tool.started",
-            { runId: run.runId, toolCallId: pc.id, skillId: pc.skillId, name: pc.name },
-            { runId: run.runId, conversationId },
-          );
-
           try {
+            const approvedScope = approvedBatch.find((scope) => scope.toolCallId === pc.id) ?? {
+              // Preserve the current call id so the safety boundary receives
+              // an explicit scope and can reject any skill/argument mismatch.
+              toolCallId: pc.id,
+              skillId: approval.requestedAction.skillId,
+              arguments: approval.requestedAction.arguments,
+            };
             const observation = await this.deps.executionOrchestrator.execute(
               {
                 runId: run.runId,
@@ -360,6 +363,11 @@ export class ApprovalContinuationCoordinator {
                     argumentSources: pc.argumentSources,
                   }],
                 },
+                permissionMode: "ask",
+                approvedTools: [{
+                  ...approvedScope,
+                  grantedBy: approval.decidedBy ?? "user",
+                }],
               },
               signal,
             );
@@ -522,4 +530,40 @@ export class ApprovalContinuationCoordinator {
       };
     }
   }
+}
+
+function extractApprovedToolScopes(approval: ApprovalResumeInput): Array<{
+  toolCallId: string;
+  skillId: string;
+  arguments: Record<string, unknown>;
+}> {
+  const toolCalls = approval.requestedAction.arguments.toolCalls;
+  if (Array.isArray(toolCalls)) {
+    return toolCalls.flatMap((value) => {
+      if (!value || typeof value !== "object") return [];
+      const candidate = value as Record<string, unknown>;
+      if (
+        typeof candidate.id !== "string" ||
+        typeof candidate.skillId !== "string" ||
+        !candidate.arguments ||
+        typeof candidate.arguments !== "object" ||
+        Array.isArray(candidate.arguments)
+      ) {
+        return [];
+      }
+      return [{
+        toolCallId: candidate.id,
+        skillId: candidate.skillId,
+        arguments: candidate.arguments as Record<string, unknown>,
+      }];
+    });
+  }
+
+  return approval.requestedAction.toolCallId
+    ? [{
+        toolCallId: approval.requestedAction.toolCallId,
+        skillId: approval.requestedAction.skillId,
+        arguments: approval.requestedAction.arguments,
+      }]
+    : [];
 }

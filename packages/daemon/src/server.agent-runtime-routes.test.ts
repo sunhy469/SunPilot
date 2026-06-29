@@ -134,6 +134,13 @@ describe("daemon Agent runtime REST routes", () => {
     daemon = await createDaemon({
       database: db,
       port: 3737,
+      llmProvider: {
+        id: "test",
+        model: "test",
+        async *streamChat() {
+          yield { delta: "test", raw: {} };
+        },
+      },
     });
 
     const runs = await daemon.app.inject({
@@ -901,6 +908,13 @@ describe("daemon Agent runtime REST routes", () => {
     daemon = await createDaemon({
       database: db,
       port: 3737,
+      llmProvider: {
+        id: "test",
+        model: "test",
+        async *streamChat() {
+          yield { delta: "test", raw: {} };
+        },
+      },
     });
 
     const response = await daemon.app.inject({

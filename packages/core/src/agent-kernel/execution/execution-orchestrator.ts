@@ -6,6 +6,7 @@ import type {
   ArtifactRef,
   ExecutionOrchestrator as ExecutionOrchestratorInterface,
   IntentRouter,
+  PlannedToolCall,
   ToolCallSummary,
   ToolDecision,
 } from "../loop-types.js";
@@ -18,6 +19,10 @@ import {
   type ToolExecutor,
 } from "./execution-types.js";
 import type { ToolArgumentBuilder } from "../tools/tool-argument-builder.js";
+import type {
+  ApprovedToolScope,
+  ToolSafetyBoundary,
+} from "./tool-safety-boundary.js";
 
 export interface ExecutionOrchestratorDeps {
   /** Executor that actually runs tools (bridges to skill-runner). */
@@ -28,6 +33,8 @@ export interface ExecutionOrchestratorDeps {
   toolCalls?: ToolCallRepository;
   /** Optional schema-aware argument builder for repair loops. */
   argumentBuilder?: ToolArgumentBuilder;
+  /** Single pre/post tool security boundary. */
+  safetyBoundary: ToolSafetyBoundary;
 }
 
 /**
@@ -54,6 +61,8 @@ export class ExecutionOrchestrator implements ExecutionOrchestratorInterface {
         : never;
       plan?: import("../loop-types.js").AgentPlan;
       decision: ToolDecision & { type: "use_tool" };
+      permissionMode?: "ask" | "auto" | "full";
+      approvedTools?: ApprovedToolScope[];
       /** Optional progress callback for content-block status updates (§P1-4). */
       onProgress?: (progress: import("../loop-types.js").ToolExecutionProgress) => void;
     },
@@ -83,6 +92,8 @@ export class ExecutionOrchestrator implements ExecutionOrchestratorInterface {
             context.conversationId,
             call,
             signal,
+            input.permissionMode ?? "auto",
+            input.approvedTools?.find((approval) => approval.toolCallId === call.id),
           );
           onProgress?.({
             phase: "completed",
@@ -110,6 +121,8 @@ export class ExecutionOrchestrator implements ExecutionOrchestratorInterface {
                     context.conversationId,
                     call,
                     signal,
+                    input.permissionMode ?? "auto",
+                    input.approvedTools?.find((approval) => approval.toolCallId === call.id),
                   ),
             ),
           );
@@ -138,28 +151,10 @@ export class ExecutionOrchestrator implements ExecutionOrchestratorInterface {
   private async executeWithRetry(
     runId: string,
     conversationId: string,
-    call: {
-      id: string;
-      skillId: string;
-      name: string;
-      arguments: Record<string, unknown>;
-      riskLevel: string;
-      timeoutMs: number;
-      inputSchema?: Record<string, unknown>;
-      projectionHints?: {
-        summaryFields?: string[];
-        identityFields?: string[];
-        sourceUrlFields?: string[];
-        confidenceFields?: string[];
-      };
-      argumentSources?: Array<{
-        arg: string;
-        source: string;
-        ref?: string;
-      }>;
-      metadata?: Record<string, unknown>;
-    },
+    call: PlannedToolCall,
     signal: AbortSignal,
+    permissionMode: "ask" | "auto" | "full",
+    approval?: ApprovedToolScope,
   ): Promise<{
     summary: ToolCallSummary;
     artifacts: ArtifactRef[];
@@ -289,6 +284,59 @@ export class ExecutionOrchestrator implements ExecutionOrchestratorInterface {
       }
     }
 
+    const safety = this.deps.safetyBoundary.checkBeforeExecution({
+      runId,
+      conversationId,
+      call,
+      arguments: currentArgs,
+      permissionMode,
+      approval,
+    });
+    if (!safety.allowed) {
+      const denial = safety.denial!;
+      await this.deps.toolCalls?.create({
+        id: call.id,
+        runId,
+        skillId: call.skillId,
+        name: call.name,
+        arguments: currentArgs,
+        status: "failed",
+        riskLevel: normalizeRiskLevel(call.riskLevel),
+        startedAt: new Date().toISOString(),
+        metadata: {
+          safetyDenied: true,
+          safetyCode: denial.code,
+          argumentSources: call.argumentSources ?? [],
+        },
+      });
+      await this.deps.toolCalls?.updateStatus(call.id, "failed", {
+        error: { code: denial.code, message: denial.reason },
+      });
+      this.deps.eventBus.emit(
+        "agent.tool.failed",
+        {
+          runId,
+          toolCallId: call.id,
+          skillId: call.skillId,
+          name: call.name,
+          error: { code: denial.code, message: denial.reason },
+        },
+        { runId, conversationId },
+      );
+      return {
+        summary: {
+          id: call.id,
+          skillId: call.skillId,
+          name: call.name,
+          status: "failed",
+          summary: denial.reason,
+          metadata: { safetyDenied: true, safetyCode: denial.code },
+        },
+        artifacts: [],
+      };
+    }
+    currentArgs = safety.arguments;
+
     // Create tool call record with audit metadata
     const now = new Date().toISOString();
     await this.deps.toolCalls?.create({
@@ -343,15 +391,22 @@ export class ExecutionOrchestrator implements ExecutionOrchestratorInterface {
         }
 
         // Execute via tool executor
-        const result = await this.deps.toolExecutor.execute({
+        const rawResult = await this.deps.toolExecutor.execute({
           runId,
           toolCallId: call.id,
           skillId: call.skillId,
           name: call.name,
-          arguments: call.arguments,
+          arguments: currentArgs,
           timeoutMs: call.timeoutMs,
           signal,
         });
+        const safetyResult = this.deps.safetyBoundary.checkAfterExecution({
+          runId,
+          conversationId,
+          call: { ...call, arguments: currentArgs },
+          result: rawResult,
+        });
+        const result = safetyResult.result;
 
         const summary: ToolCallSummary = {
           id: call.id,
@@ -366,6 +421,7 @@ export class ExecutionOrchestrator implements ExecutionOrchestratorInterface {
           metadata: {
             ...(call.metadata ?? {}),
             projectionHints: call.projectionHints,
+            safety: safetyResult.metadata,
           },
         };
 
@@ -379,6 +435,7 @@ export class ExecutionOrchestrator implements ExecutionOrchestratorInterface {
               artifacts: result.artifacts,
               stdout: result.stdout,
               stderr: result.stderr,
+              safety: safetyResult.metadata,
             },
           });
           this.deps.eventBus.emit(
@@ -407,7 +464,11 @@ export class ExecutionOrchestrator implements ExecutionOrchestratorInterface {
           }
         } else {
           await this.deps.toolCalls?.updateStatus(call.id, result.status, {
-            result: { summary: result.summary },
+            result: {
+              summary: result.summary,
+              content: result.content,
+              safety: safetyResult.metadata,
+            },
             error: result.error ?? {
               code: "AGENT_TOOL_EXECUTION_FAILED",
               message: result.summary,
@@ -473,14 +534,7 @@ export class ExecutionOrchestrator implements ExecutionOrchestratorInterface {
   }
 
   private groupByConcurrency(
-    calls: Array<{
-      id: string;
-      skillId: string;
-      name: string;
-      arguments: Record<string, unknown>;
-      riskLevel: string;
-      timeoutMs: number;
-    }>,
+    calls: PlannedToolCall[],
   ): Map<string, typeof calls> {
     const groups = new Map<string, typeof calls>();
     for (const call of calls) {
@@ -489,6 +543,10 @@ export class ExecutionOrchestrator implements ExecutionOrchestratorInterface {
       groups.get(category)!.push(call);
     }
     return groups;
+  }
+
+  clearSafetyState(runId: string): void {
+    this.deps.safetyBoundary.clearRun(runId);
   }
 
   private categoryFromSkillId(skillId: string): string {

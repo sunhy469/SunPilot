@@ -321,8 +321,8 @@ export function assistantMessageReducer(
       parts?: Array<Record<string, unknown>>;
       cards?: Array<{
         type: string;
-        title?: import("../../../rich-cards/types").RichTextValue;
-        subtitle?: import("../../../rich-cards/types").RichTextValue;
+        title?: import("../../../../rich-cards/types").RichTextValue;
+        subtitle?: import("../../../../rich-cards/types").RichTextValue;
         data: Record<string, unknown>;
       }>;
     };

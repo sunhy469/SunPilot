@@ -63,6 +63,7 @@ import {
   SkillEmbeddingCache,
   PromptInjectionDetector,
   ToolSandbox,
+  ToolSafetyBoundary,
   TaskScopedPermissionManager,
   TraceManager,
   RepositoryTraceManager,
@@ -88,6 +89,10 @@ export function createAgentLoopService(deps: {
   skillRegistry: SkillRegistry;
   skillRunner?: import("@sunpilot/skill-runner").SkillRunner;
   llmProvider: LlmProvider;
+  /** Enable model and embedding providers discovered from process.env.
+   *  Dependency-injected tests leave this disabled so host secrets cannot
+   *  silently supplement the supplied fake provider. */
+  enableEnvironmentProviders?: boolean;
   eventBus?: AgentEventBus;
   /** Persisted-event bus for external consumers.
    *  Created internally if not provided. */
@@ -142,10 +147,12 @@ export function createAgentLoopService(deps: {
   // Try to create a real embedding provider from environment config.
   // Falls back to keyword/hash embedding when no API key is configured.
   let embeddingProvider: OpenAICompatibleEmbeddingProvider | undefined;
-  try {
-    embeddingProvider = createDefaultEmbeddingProvider();
-  } catch {
-    // No API key configured — will use fallback
+  if (deps.enableEnvironmentProviders) {
+    try {
+      embeddingProvider = createDefaultEmbeddingProvider();
+    } catch {
+      // No API key configured — will use fallback
+    }
   }
 
   const embeddingService = new LlmEmbeddingService({
@@ -155,20 +162,18 @@ export function createAgentLoopService(deps: {
   });
 
   const saveMessage = async (input: { id: string; conversationId: string; role: string; content: string; metadata?: Record<string, unknown> }) => {
-    try {
-      let embedding: number[] | undefined;
-      if (input.content.trim()) {
-        try { embedding = await embeddingService.embed(input.content); } catch { /* Best effort */ }
-      }
-      await deps.database.messages.create({
-        id: input.id,
-        conversationId: input.conversationId,
-        role: input.role as "system" | "user" | "assistant",
-        content: input.content,
-        metadata: input.metadata,
-        embedding,
-      });
-    } catch { /* Best effort */ }
+    let embedding: number[] | undefined;
+    if (input.content.trim()) {
+      try { embedding = await embeddingService.embed(input.content); } catch { /* Embedding is best effort. */ }
+    }
+    await deps.database.messages.create({
+      id: input.id,
+      conversationId: input.conversationId,
+      role: input.role as "system" | "user" | "assistant",
+      content: input.content,
+      metadata: input.metadata,
+      embedding,
+    });
   };
 
   // §P1-2: Shared skill embedding cache — pre-warmed at startup to avoid
@@ -229,7 +234,7 @@ export function createAgentLoopService(deps: {
   const seedModel = env.SUNPILOT_SEED_LLM_MODEL;
   const seedApiKey = env.SUNPILOT_SEED_LLM_API_KEY ?? "";
 
-  const seedProvider = seedApiKey
+  const seedProvider = deps.enableEnvironmentProviders && seedApiKey
     ? new OpenAICompatibleChatProvider({
         id: "llm.volcengine-ark",
         apiKey: seedApiKey,
@@ -237,7 +242,7 @@ export function createAgentLoopService(deps: {
         model: seedModel,
       })
     : undefined;
-  console.log(`[llm] Seed provider — model=${seedModel} base=${seedBaseUrl} available=${!!seedApiKey}`);
+  console.log(`[llm] Seed provider — model=${seedModel} base=${seedBaseUrl} available=${!!seedProvider}`);
 
   const modelRouter = new ModelRouter({
     routes: [
@@ -614,6 +619,24 @@ export function createAgentLoopService(deps: {
     deps.database,
   );
 
+  // The three controls are owned by the common execution boundary. This
+  // makes native calls, approval resumes, and direct orchestrator calls share
+  // the same checks before execution and before results enter model context.
+  const injectionDetector = new PromptInjectionDetector({
+    blockCritical: true,
+    warnOnMatch: true,
+  });
+  const sandboxMode = env.SUNPILOT_SANDBOX_MODE;
+  const toolSandbox = new ToolSandbox(sandboxMode);
+  console.log(`[sandbox] Mode: ${sandboxMode}`);
+  const scopedPermissionManager = new TaskScopedPermissionManager();
+  const toolSafetyBoundary = new ToolSafetyBoundary({
+    eventBus: rawEventBus,
+    sandbox: toolSandbox,
+    permissionManager: scopedPermissionManager,
+    injectionDetector,
+  });
+
   // ── Planner ────────────────────────────────────────────────────
   const planner = new RuleBasedPlanner();
 
@@ -666,6 +689,7 @@ export function createAgentLoopService(deps: {
     eventBus: rawEventBus,
     toolCalls: deps.database.toolCalls,
     argumentBuilder: toolArgBuilder,
+    safetyBoundary: toolSafetyBoundary,
   });
 
   // ── Tool Decision Engine ────────────────────────────────────────
@@ -716,28 +740,6 @@ export function createAgentLoopService(deps: {
   // §7.3: Summary generation moved to background — see writeMemories
   // forceSummary trigger every ~20 turns in agent-loop-engine.ts.
 
-  // ── Safety Hardening (§3, §4 of architecture next steps) ───────
-  // PromptInjectionDetector — scans untrusted content for injection patterns.
-  // Uses default patterns covering 6 categories (ignore_instructions,
-  // system_prompt_leak, dangerous_tool_call, role_confusion,
-  // delimiter_attack, data_exfiltration) with Chinese language support.
-  const injectionDetector = new PromptInjectionDetector({
-    blockCritical: true,
-    warnOnMatch: true,
-  });
-
-  // ToolSandbox — validates tool execution against sandbox rules.
-  // Mode from SUNPILOT_SANDBOX_MODE env var (strict|moderate|permissive),
-  // defaults to "moderate" for local dev. Validated by the env schema.
-  const sandboxMode = env.SUNPILOT_SANDBOX_MODE;
-  const toolSandbox = new ToolSandbox(sandboxMode);
-  console.log(`[sandbox] Mode: ${sandboxMode}`);
-
-  // TaskScopedPermissionManager — enforces fine-grained permission
-  // boundaries per run/step/tool_call with argument-change re-evaluation
-  // and critical-risk forced re-approval.
-  const scopedPermissionManager = new TaskScopedPermissionManager();
-
   // ── Trace Manager (§7, §P0-2 of architecture next steps) ──────
   // Creates trace/span per run for per-phase latency, token, and error
   // tracking. Uses RepositoryTraceManager when DB persistence is available
@@ -767,9 +769,6 @@ export function createAgentLoopService(deps: {
     replanner,
     modelRouter,
     traceManager,
-    injectionDetector,
-    toolSandbox,
-    scopedPermissionManager,
     // §P3 opt: Pre-inference runs an LLM call in parallel with context
     // building to classify intent early. When it completes before intent
     // routing, the main IntentRouter skips its own Layer 2 LLM call,
@@ -1001,4 +1000,3 @@ function toolResultStructured(
     ? (structured as Record<string, unknown>)
     : undefined;
 }
-

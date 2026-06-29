@@ -64,6 +64,8 @@ export interface TaskPermissionCheck {
   existingGrants: TaskScopedPermission[];
   /** Current permission mode. */
   permissionMode: "ask" | "auto" | "full";
+  /** Risk level after argument-aware classification. */
+  riskLevel: RiskLevel;
 }
 
 export interface TaskPermissionDecision {
@@ -109,6 +111,7 @@ export class TaskScopedPermissionManager {
       arguments: args,
       existingGrants,
       permissionMode,
+      riskLevel,
     } = params;
 
     // Full mode: always grant
@@ -117,7 +120,7 @@ export class TaskScopedPermissionManager {
         granted: true,
         needsReapproval: false,
         reason: "Full permission mode — all operations allowed",
-        grant: createGrant(params, "this_run"),
+        grant: createGrant(params, "this_run", riskLevel),
       };
     }
 
@@ -130,12 +133,19 @@ export class TaskScopedPermissionManager {
 
     // No previous grant → needs approval (unless auto mode and low risk)
     if (samePermissionGrants.length === 0) {
-      if (permissionMode === "auto") {
+      if (permissionMode === "auto" || riskLevel === "low") {
         return {
           granted: true,
           needsReapproval: false,
-          reason: "Auto permission mode — granting first-time use",
-          grant: createGrant(params, "this_run"),
+          reason:
+            permissionMode === "auto"
+              ? "Auto permission mode — granting first-time use"
+              : "Low-risk permission — granting this tool call",
+          grant: createGrant(
+            params,
+            permissionMode === "auto" ? "this_run" : "this_tool_call_only",
+            riskLevel,
+          ),
         };
       }
       return {
@@ -149,6 +159,12 @@ export class TaskScopedPermissionManager {
     const validGrant = samePermissionGrants.find((grant) => {
       // 1. Same args? If args differ significantly, re-approval needed
       if (!argsMatch(grant.approvedArgs, args)) {
+        return false;
+      }
+
+      // A changed risk classification invalidates the old grant even when
+      // the serialized arguments happen to be identical.
+      if (grant.riskLevel !== riskLevel) {
         return false;
       }
 
@@ -184,6 +200,19 @@ export class TaskScopedPermissionManager {
       needsReapproval: true,
       reason: "Existing grants don't cover this specific operation — parameters or scope differ",
     };
+  }
+
+  /** Create a grant bound to the exact user-approved tool call and arguments. */
+  createApprovedGrant(
+    params: TaskPermissionCheck,
+    grantedBy: string,
+  ): TaskScopedPermission {
+    return createGrant(
+      params,
+      "this_tool_call_only",
+      params.riskLevel,
+      grantedBy,
+    );
   }
 
   /**
@@ -247,6 +276,7 @@ function createGrant(
   params: TaskPermissionCheck,
   scope: TaskPermissionScope,
   riskLevel?: RiskLevel,
+  grantedBy = "agent",
 ): TaskScopedPermission {
   const now = new Date();
   const expiresAt = new Date(now.getTime() + 30 * 60 * 1000); // 30 min default
@@ -260,7 +290,7 @@ function createGrant(
     approvedArgs: { ...params.arguments },
     grantedAt: now.toISOString(),
     expiresAt: expiresAt.toISOString(),
-    grantedBy: "agent",
+    grantedBy,
     riskLevel: riskLevel ?? "medium",
     scope,
   };

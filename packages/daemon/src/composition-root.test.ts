@@ -69,7 +69,52 @@ const highRiskSkill: InstalledSkillRecord = {
   },
 };
 
+const strictSandboxSkill: InstalledSkillRecord = {
+  ...highRiskSkill,
+  id: "test.strict-shell",
+  name: "Strict Sandbox Shell",
+  manifest: {
+    ...highRiskSkill.manifest,
+    id: "test.strict-shell",
+    name: "Strict Sandbox Shell",
+    capabilities: [{
+      ...highRiskSkill.manifest.capabilities[0]!,
+      title: "Strict Shell",
+      risk: "low",
+    }],
+  },
+};
+
 describe("createAgentLoopService", () => {
+  test.sequential("isolates injected providers from host model secrets", async () => {
+    const previousSeedKey = process.env.SUNPILOT_SEED_LLM_API_KEY;
+    process.env.SUNPILOT_SEED_LLM_API_KEY = "must-not-be-used-by-tests";
+    try {
+      const db = new InMemoryDatabaseContext();
+      const { modelRouter } = createAgentLoopService({
+        database: db,
+        skillRegistry: { list: () => [] } as any,
+        llmProvider: {
+          id: "fake-provider",
+          model: "fake-model",
+          async *streamChat() {
+            yield { delta: "fake", raw: {} };
+          },
+        },
+      });
+
+      expect(modelRouter.getModelForPurpose("response_composition")).toBe(
+        "fake-model",
+      );
+    } finally {
+      if (previousSeedKey === undefined) {
+        delete process.env.SUNPILOT_SEED_LLM_API_KEY;
+      } else {
+        process.env.SUNPILOT_SEED_LLM_API_KEY = previousSeedKey;
+      }
+    }
+  });
+
   test("creates new conversations with the Agent-assigned id", async () => {
     const db = new InMemoryDatabaseContext();
     const { service } = createAgentLoopService({
@@ -221,6 +266,90 @@ describe("createAgentLoopService", () => {
         expect.objectContaining({ type: "agent.run.completed" }),
       ]),
     );
+  });
+
+  test.sequential("wires strict sandbox denial into the production execution path", async () => {
+    const previousMode = process.env.SUNPILOT_SANDBOX_MODE;
+    process.env.SUNPILOT_SANDBOX_MODE = "strict";
+    try {
+      const db = new InMemoryDatabaseContext();
+      const executedSteps: StepRecord[] = [];
+      const { service } = createAgentLoopService({
+        database: db,
+        skillRegistry: { list: () => [strictSandboxSkill] } as any,
+        skillRunner: {
+          async execute(step: StepRecord) {
+            executedSteps.push(step);
+            return { content: "must not execute" };
+          },
+        } as any,
+        llmProvider: {
+          id: "test",
+          model: "test",
+          async *streamChat(request: any) {
+            const hasToolResults = request.messages?.some(
+              (message: any) => message.role === "tool",
+            );
+            if (request.tools?.length > 0 && !hasToolResults) {
+              yield {
+                delta: "Checking with the shell.",
+                toolCalls: [{
+                  index: 0,
+                  id: "tc_strict_shell",
+                  type: "function" as const,
+                  function: {
+                    name: request.tools[0]?.function.name,
+                    arguments: JSON.stringify({
+                      command: "curl https://example.com",
+                    }),
+                  },
+                }],
+                raw: {},
+              };
+            } else if (hasToolResults) {
+              yield { delta: "The command was blocked by safety policy.", raw: {} };
+            } else {
+              yield { delta: "shell_operation", raw: {} };
+            }
+          },
+        },
+      });
+
+      const result = await service.handleChatCommand(
+        { message: "use curl", permissionMode: "full" },
+        { source: "api" },
+      );
+      await waitFor(async () =>
+        (await db.events.listByRunId(result.runId)).some(
+          (event) => event.type === "agent.safety.sandbox_denied",
+        ),
+      );
+
+      expect(executedSteps).toEqual([]);
+      await expect(db.steps.listByRunId(result.runId)).resolves.toEqual([]);
+      await expect(db.toolCalls.listByRunId(result.runId)).resolves.toEqual([
+        expect.objectContaining({
+          id: "tc_strict_shell",
+          status: "failed",
+          metadata: expect.objectContaining({
+            safetyDenied: true,
+            safetyCode: "TOOL_SANDBOX_DENIED",
+          }),
+        }),
+      ]);
+      const events = await db.events.listByRunId(result.runId);
+      expect(events).toEqual(expect.arrayContaining([
+        expect.objectContaining({ type: "agent.safety.sandbox_denied" }),
+        expect.objectContaining({ type: "agent.tool.failed" }),
+      ]));
+      expect(events.some((event) => event.type === "agent.tool.started")).toBe(false);
+    } finally {
+      if (previousMode === undefined) {
+        delete process.env.SUNPILOT_SANDBOX_MODE;
+      } else {
+        process.env.SUNPILOT_SANDBOX_MODE = previousMode;
+      }
+    }
   });
 
   test("resumes approved tool calls and completes the run", async () => {

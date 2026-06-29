@@ -1,33 +1,26 @@
-import { readFile } from "node:fs/promises";
+import { readFile, readdir } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { PostgresPool } from "./postgres.client.js";
 
 const migrationDir = join(dirname(fileURLToPath(import.meta.url)), "..", "migrations");
-const migrationFiles = [
-  "001_init.sql",
-  "002_conversations.sql",
-  "003_messages.sql",
-  "004_runtime_aux.sql",
-  "005_runtime_steps_jobs.sql",
-  "006_catalog.sql",
-  "007_agent_runtime_core.sql",
-  "008_agent_events_sequence.sql",
-  "009_agent_idempotency.sql",
-  "010_agent_observability.sql",
-  "011_memory_core.sql",
-  "012_agent_runtime_cleanup.sql",
-  "013_conversations_kind.sql",
-  "014_pgvector_embeddings.sql",
-  "015_model_calls_metadata.sql",
-  "016_tool_call_metadata.sql",
-  "017_agent_trace_plan.sql",
-  "018_memory_stale_columns.sql",
-  "019_add_conversations_pinned.sql",
-  "020_digital_world.sql",
-  "021_memory_quality_relations.sql",
-];
 const migrationLockKey = 7_290_317_373_001;
+
+export async function listPostgresMigrationFiles(): Promise<string[]> {
+  const files = (await readdir(migrationDir))
+    .filter((file) => /^\d{3}_[a-z0-9_]+\.sql$/i.test(file))
+    .sort((left, right) => left.localeCompare(right));
+
+  for (let index = 0; index < files.length; index += 1) {
+    const expectedPrefix = String(index + 1).padStart(3, "0");
+    if (!files[index]?.startsWith(`${expectedPrefix}_`)) {
+      throw new Error(
+        `PostgreSQL migrations must be contiguous: expected ${expectedPrefix}, found ${files[index] ?? "end of list"}.`,
+      );
+    }
+  }
+  return files;
+}
 
 export async function runPostgresMigrations(pool: PostgresPool): Promise<void> {
   const client = await pool.connect();
@@ -42,6 +35,7 @@ export async function runPostgresMigrations(pool: PostgresPool): Promise<void> {
 
     await client.query("SELECT pg_advisory_lock($1)", [migrationLockKey]);
     locked = true;
+    const migrationFiles = await listPostgresMigrationFiles();
     for (const file of migrationFiles) {
       const version = file.replace(/\.sql$/, "");
       const applied = await client.query("SELECT 1 FROM schema_migrations WHERE version = $1", [version]);

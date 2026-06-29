@@ -188,6 +188,13 @@ export class AgentServiceImplementation {
       },
     };
 
+    // Validate attachments before reserving the idempotency key. Invalid
+    // requests must never leave a long-lived "processing" reservation.
+    assertUsableImageAttachments({
+      message: input.message,
+      attachments: input.attachments,
+    });
+
     // Idempotency check
     const idempotency = input.clientRequestId
       ? await this.reserveIdempotency(
@@ -207,97 +214,111 @@ export class AgentServiceImplementation {
       };
     }
 
-    // §5.4: Validate image attachment integrity before creating run
-    assertUsableImageAttachments({ message: input.message, attachments: input.attachments });
+    let signal: AbortSignal;
+    let unsubLive = () => {};
+    let unsub = () => {};
+    let runInitialized = false;
 
-    // Create abort signal for this run
-    const signal = abortRegistry.create(runId);
+    try {
+      // Create abort signal for this run
+      signal = abortRegistry.create(runId);
 
-    // Subscribe to events for streaming hooks
-    const unsubLive = liveEventBus?.subscribe((event) => {
-      if (event.runId !== runId) return;
-      streamHooks?.onEvent?.(event);
-    }) ?? (() => {});
+      // Subscribe to events for streaming hooks
+      unsubLive = liveEventBus?.subscribe((event) => {
+        if (event.runId !== runId) return;
+        streamHooks?.onEvent?.(event);
+      }) ?? (() => {});
 
-    const unsub = eventBus.subscribe((event) => {
-      if (event.runId !== runId) return;
-      if (
-        streamHooks?.onDelta &&
-        event.type === "agent.message.part.delta"
-      ) {
-        const payload = event.payload as {
-          conversationId?: string;
-          messageId: string;
-          partId: string;
-          delta: string;
-          deltaIndex?: number;
-        };
-        streamHooks.onDelta({
-          type: "agent.message.part.delta",
-          runId: event.runId,
-          conversationId: payload.conversationId ?? event.conversationId ?? "",
-          messageId: payload.messageId,
-          partId: payload.partId,
-          delta: payload.delta,
-          deltaIndex: payload.deltaIndex,
+      unsub = eventBus.subscribe((event) => {
+        if (event.runId !== runId) return;
+        if (
+          streamHooks?.onDelta &&
+          event.type === "agent.message.part.delta"
+        ) {
+          const payload = event.payload as {
+            conversationId?: string;
+            messageId: string;
+            partId: string;
+            delta: string;
+            deltaIndex?: number;
+          };
+          streamHooks.onDelta({
+            type: "agent.message.part.delta",
+            runId: event.runId,
+            conversationId: payload.conversationId ?? event.conversationId ?? "",
+            messageId: payload.messageId,
+            partId: payload.partId,
+            delta: payload.delta,
+            deltaIndex: payload.deltaIndex,
+          });
+        }
+      });
+
+      // Create conversation if needed
+      if (shouldCreateConversation && this.loopConfig.conversations) {
+        await this.loopConfig.conversations.createConversation({
+          id: conversationId,
+          title: input.message.slice(0, 100),
         });
       }
-    });
 
-    // Create conversation if needed
-    if (shouldCreateConversation && this.loopConfig.conversations) {
-      await this.loopConfig.conversations.createConversation({
-        id: conversationId,
-        title: input.message.slice(0, 100),
-      });
-    }
+      // Persist run initial state
+      const initialized = this.loopConfig.agentRunInitializer
+        ? await this.loopConfig.agentRunInitializer.createRunWithCreatedEvent(
+            loopInput,
+          )
+        : undefined;
+      if (!initialized) {
+        await runStateManager.createRun(loopInput);
+      }
+      runInitialized = true;
 
-    // Persist run initial state
-    const initialized = this.loopConfig.agentRunInitializer
-      ? await this.loopConfig.agentRunInitializer.createRunWithCreatedEvent(
-          loopInput,
-        )
-      : undefined;
-    if (!initialized) {
-      await runStateManager.createRun(loopInput);
-    }
-
-    // Persist user message with attachments
-    if (this.loopConfig.conversations) {
-      const userMessage = await this.loopConfig.conversations.createMessage({
-        id: userMessageId,
-        conversationId,
-        role: "user",
-        content: input.message,
-        attachments: input.attachments?.map((a) => ({
-          id: a.id,
-          name: a.name,
-          type: a.type,
-          sizeBytes: a.sizeBytes,
-          url: a.url,
-          dataUrl: a.dataUrl,
-          storageKey: a.storageKey,
-          provider: a.provider,
-          checksum: a.checksum,
-        })),
-      });
-      await streamHooks?.onUserMessage?.(userMessage);
-    }
-
-    // Publish run.created event
-    if (initialized) {
-      eventBus.publish(initialized.event);
-    } else {
-      eventBus.emit(
-        "agent.run.created",
-        {
-          runId,
+      // Persist user message with attachments
+      if (this.loopConfig.conversations) {
+        const userMessage = await this.loopConfig.conversations.createMessage({
+          id: userMessageId,
           conversationId,
-          mode: loopInput.mode,
-          goal: input.message,
-        },
-        { runId, conversationId },
-      );
+          role: "user",
+          content: input.message,
+          attachments: input.attachments?.map((a) => ({
+            id: a.id,
+            name: a.name,
+            type: a.type,
+            sizeBytes: a.sizeBytes,
+            url: a.url,
+            dataUrl: a.dataUrl,
+            storageKey: a.storageKey,
+            provider: a.provider,
+            checksum: a.checksum,
+          })),
+        });
+        await streamHooks?.onUserMessage?.(userMessage);
+      }
+
+      // Publish run.created event
+      if (initialized) {
+        eventBus.publish(initialized.event);
+      } else {
+        eventBus.emit(
+          "agent.run.created",
+          {
+            runId,
+            conversationId,
+            mode: loopInput.mode,
+            goal: input.message,
+          },
+          { runId, conversationId },
+        );
+      }
+    } catch (error) {
+      abortRegistry.remove(runId);
+      unsubLive();
+      unsub();
+      if (runInitialized) {
+        await runStateManager.markFailed(runId, error).catch(() => undefined);
+      }
+      await this.releaseIdempotency(idempotency?.id).catch(() => undefined);
+      throw error;
     }
 
     // ── Execute Agent Loop in background ───────────────────────────
@@ -305,11 +326,6 @@ export class AgentServiceImplementation {
       void (async () => {
         try {
           const result = await loopEngine.run(loopInput, signal);
-          abortRegistry.remove(runId);
-          await eventBus.flush();
-          unsubLive();
-          unsub();
-
           const response = {
             ...result,
             conversationId,
@@ -318,13 +334,8 @@ export class AgentServiceImplementation {
           await this.completeIdempotency(idempotency?.id, response);
           streamHooks?.onCompleted?.(result);
         } catch (error) {
-          abortRegistry.remove(runId);
-          await eventBus.flush();
-          unsubLive();
-          unsub();
-
-          await this.failIdempotency(idempotency?.id, error);
-          await runStateManager.markFailed(runId, error);
+          await this.failIdempotency(idempotency?.id, error).catch(() => undefined);
+          await runStateManager.markFailed(runId, error).catch(() => undefined);
           eventBus.emit(
             "agent.error",
             {
@@ -338,6 +349,16 @@ export class AgentServiceImplementation {
             { runId, conversationId },
           );
           streamHooks?.onError?.(error);
+        } finally {
+          abortRegistry.remove(runId);
+          await eventBus.flush().catch((error) => {
+            console.error(
+              "[AgentService] Failed to flush events during cleanup:",
+              error instanceof Error ? error.message : String(error),
+            );
+          });
+          unsubLive();
+          unsub();
         }
       })();
     });
@@ -1178,6 +1199,11 @@ export class AgentServiceImplementation {
   ): Promise<void> {
     if (!id || !this.loopConfig.idempotency) return;
     await this.loopConfig.idempotency.complete(id, response);
+  }
+
+  private async releaseIdempotency(id: string | undefined): Promise<void> {
+    if (!id || !this.loopConfig.idempotency) return;
+    await this.loopConfig.idempotency.release(id);
   }
 
   private async failIdempotency(
