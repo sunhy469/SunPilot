@@ -1,127 +1,13 @@
-import type { AgentLoopInput, AgentLoopResult, ToolDecision } from "../loop-types.js";
-import { AssistantMessageStream } from "../assistant-message-stream.js";
+import type { AgentLoopInput, AgentLoopResult } from "../loop-types.js";
 import type { AgentLoopEngineDeps } from "../agent-loop-engine.js";
 
-/** Completes clarification, failure/cancellation, and memory side effects. */
+/** Completes failure/cancellation and memory side effects. */
 export class RunOutcomeCoordinator {
   constructor(
     private readonly deps: AgentLoopEngineDeps,
     private readonly cleanupRun: (runId: string) => void,
   ) {}
 
-  // ── Branch handlers ────────────────────────────────────────────────
-
-
-  /** 分支 B：无需工具 — 直接 LLM 生成回复。 */
-  /** 分支 C：请求澄清 — 向用户发问（§P1: content-block stream）。 */
-  async handleClarification(
-    input: AgentLoopInput,
-    decision: ToolDecision & { type: "ask_clarification" },
-    signal: AbortSignal,
-  ): Promise<AgentLoopResult> {
-    const { runId, conversationId } = input;
-    const messageId = `msg_${crypto.randomUUID()}`;
-
-    await this.deps.runStateManager.markStatus(runId, "responding");
-
-    // §P1: Content-block stream path for clarification.
-    // Emits text part + optional status, then completes the message.
-    if (this.deps.saveMessage) {
-      const stream = new AssistantMessageStream({
-        runId,
-        conversationId,
-        messageId,
-        eventBus: this.deps.eventBus,
-        saveMessage: this.deps.saveMessage,
-        skipStartedEvents: true,
-      });
-      stream.start();
-
-      // Emit clarification as a text part
-      // §P0-1: Clarification is the final answer (no tool will run).
-      const textPart = stream.startTextPart("final");
-      stream.appendText(textPart.id, decision.question);
-      stream.completeTextPart(textPart.id);
-
-      // When the clarification was triggered by missing parameters,
-      // add a recoverable error part so the UI can show context.
-      if (decision.reason.includes("missing") || decision.reason.includes("缺少")) {
-        stream.addError({
-          message: decision.reason,
-          code: "CLARIFICATION_NEEDED",
-          recoverable: true,
-        });
-      }
-
-      // Also emit legacy clarification event for backward compatibility
-      this.deps.eventBus.emit(
-        "agent.clarification.requested",
-        {
-          runId,
-          conversationId,
-          messageId,
-          question: decision.question,
-          reason: decision.reason,
-        },
-        { runId, conversationId },
-      );
-
-      await stream.complete();
-
-      await this.deps.runStateManager.markStatus(runId, "completed");
-      this.deps.eventBus.emit(
-        "agent.run.completed",
-        {
-          runId,
-          assistantMessageId: messageId,
-          artifacts: [],
-          toolCalls: 0,
-        },
-        { runId, conversationId },
-      );
-
-      this.cleanupRun(runId);
-
-      return {
-        runId,
-        conversationId,
-        assistantMessageId: messageId,
-        status: "completed",
-        artifacts: [],
-        toolCalls: [],
-      };
-    }
-
-    // Fallback: old path (no saveMessage available)
-    const response = await this.deps.responseComposer.composeClarification({
-      input,
-      question: decision.question,
-      reason: decision.reason,
-    });
-
-    await this.deps.runStateManager.markStatus(runId, "completed");
-    this.deps.eventBus.emit(
-      "agent.run.completed",
-      {
-        runId,
-        assistantMessageId: response.messageId,
-        artifacts: [],
-        toolCalls: 0,
-      },
-      { runId, conversationId },
-    );
-
-    return {
-      runId,
-      conversationId,
-      assistantMessageId: response.messageId,
-      status: "completed",
-      artifacts: [],
-      toolCalls: [],
-    };
-  }
-
-  /** 分支 D：决策阶段即需审批。 */
   async handleLoopError(
     input: AgentLoopInput,
     error: unknown,
@@ -189,7 +75,6 @@ export class RunOutcomeCoordinator {
    *
    * 写入策略由 MemoryWriter 内部决定：
    * - 用户显式"记住" → 高置信度写入
-   * - 意图为 memory_update → 中置信度写入
    * - 工具任务完成 → 生成任务摘要记忆
    *
    * 每条写入的记忆都会 emit agent.memory.written 事件。

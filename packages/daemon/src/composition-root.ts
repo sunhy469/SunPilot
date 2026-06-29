@@ -7,8 +7,8 @@
  * 装配层次（每个工厂独立可测试）：
  *   Persistence: EventBus → AbortRegistry → RunStateManager → EventSink → RunInitializer
  *   Model:       EmbeddingProvider → ModelRouter → SkillEmbeddingCache → 6 purpose LLMs
- *   Context:     ContextBuilder + IntentRouter + Reflection + MemoryWriter + TraceManager
- *   Tool:        ToolDecisionEngine + ExecutionOrchestrator + PlanValidator + Replanner
+ *   Context:     ContextBuilder + MemoryWriter + TraceManager
+ *   Tool:        Catalog Retriever + Guard + ExecutionOrchestrator
  *   Safety:      PermissionPolicy → ApprovalGate → ToolSandbox → ToolSafetyBoundary
  *   Loop:        AgentLoopEngine（状态机，注入以上全部组件）
  *   Service:     AgentService（门面，注入 Loop + Abort + 幂等 + 审批裁决）
@@ -19,7 +19,12 @@
  */
 import {
   AgentLoopEngine,
-  ResponseComposer,
+  ObservationBuilder,
+  ReactLoopRunner,
+  ReactModelTurn,
+  ReactToolExecutor,
+  ToolCallGuard,
+  ToolCatalogRetriever,
   AgentService,
   parseEnv,
   type AgentEventBus,
@@ -85,12 +90,7 @@ export function createAgentLoopService(deps: {
     skillEmbeddingCache,
     saveMessage,
     modelRouter,
-    intentLlm,
-    toolArgLlm,
-    reflectionLlm,
-    responseLlm,
-    planningLlm,
-    replanningLlm,
+    summaryLlm,
   } = model;
 
   // ── Safety Layer ──────────────────────────────────────────────
@@ -105,16 +105,13 @@ export function createAgentLoopService(deps: {
   // ── Context Layer ─────────────────────────────────────────────
   const context = createContextLayer({
     database: deps.database,
-    env,
     rawEventBus,
     embeddingService,
-    skillEmbeddingCache,
-    intentLlm,
-    reflectionLlm,
+    summaryLlm,
     skillRegistry: deps.skillRegistry,
     systemPrompt: deps.systemPrompt,
   });
-  const { contextBuilder, intentRouter, reflectionEngine, rawMemoryWriter, memoryWriter, traceManager } =
+  const { contextBuilder, rawMemoryWriter, memoryWriter, traceManager } =
     context;
 
   // ── Tool Layer ─────────────────────────────────────────────────
@@ -123,61 +120,53 @@ export function createAgentLoopService(deps: {
     rawEventBus,
     skillRegistry: deps.skillRegistry,
     skillRunner: deps.skillRunner,
-    toolArgLlm,
-    planningLlm,
-    replanningLlm,
-    embeddingService,
-    skillEmbeddingCache,
-    modelRouter,
-    permissionPolicy,
     toolSafetyBoundary,
-    saveMessage,
   });
   const {
-    planner,
-    planValidator,
-    replanner,
+    listSkillSummaries,
     executionOrchestrator,
-    toolDecisionEngine,
   } = tool;
 
-  // ── Response Composer ─────────────────────────────────────────
-  const responseComposer = new ResponseComposer({
-    llm: responseLlm,
+  // ── ReAct Runtime ─────────────────────────────────────────────
+  const observationBuilder = new ObservationBuilder(8_000);
+  const reactLoopRunner = new ReactLoopRunner({
+    listSkills: listSkillSummaries,
+    retriever: new ToolCatalogRetriever({
+      embeddingService,
+      skillEmbeddingCache,
+    }),
+    modelTurn: new ReactModelTurn({ modelRouter, eventBus: rawEventBus }),
+    guard: new ToolCallGuard(permissionPolicy, observationBuilder),
+    executor: new ReactToolExecutor(executionOrchestrator, rawEventBus),
+    saveCheckpoint: async (checkpoint) => {
+      await runStateManager.saveTaskState(checkpoint.runId, {
+        goal: "ReAct run checkpoint",
+        completedSteps: [],
+        pendingSteps: checkpoint.pendingToolCalls.map((call) => call.skillId),
+        gatheredFacts: {
+          reactCheckpoint: checkpoint,
+          approvalMessageId: checkpoint.messageId,
+          partsSnapshot: checkpoint.partsSnapshot,
+          pendingToolCalls: checkpoint.pendingToolCalls,
+        },
+        openQuestions: [],
+        iteration: checkpoint.iteration,
+      });
+    },
     eventBus: rawEventBus,
-    modelCalls: deps.database.modelCalls,
-    saveMessage: saveMessage as (input: {
-      id: string;
-      conversationId: string;
-      role: "assistant";
-      content: string;
-      runId?: string;
-      metadata?: Record<string, unknown>;
-    }) => Promise<void>,
   });
 
   // ── Loop Engine ────────────────────────────────────────────────
   const loopEngine = new AgentLoopEngine({
     contextBuilder,
-    intentRouter,
-    planner,
-    toolDecisionEngine,
+    reactLoopRunner,
     executionOrchestrator,
-    permissionPolicy,
     approvalGate,
-    reflectionEngine,
-    responseComposer,
     runStateManager,
     eventBus: rawEventBus,
     approvalRequestService: safety.approvalRequestService,
     memoryWriter,
-    planValidator,
-    replanner,
-    modelRouter,
     traceManager,
-    enablePreliminaryInference: true,
-    planSnapshotRepo: deps.database.planSnapshots,
-    toolCalls: deps.database.toolCalls,
     saveMessage,
   });
 

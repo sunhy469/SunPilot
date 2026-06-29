@@ -1,15 +1,13 @@
 import type {
-  AgentContext,
   AgentLoopInput,
   AgentLoopResult,
-  AgentPlan,
   Permission,
+  PlannedToolCall,
   RiskLevel,
-  RoutedIntent,
-  ToolDecision,
 } from "../loop-types.js";
 import { AssistantMessageStream } from "../assistant-message-stream.js";
 import type { AgentLoopEngineDeps } from "../agent-loop-engine.js";
+import type { ReactCheckpoint } from "../react-loop/react-types.js";
 import { RUN_PHASE_LABELS } from "./constants.js";
 import {
   buildRiskReasons,
@@ -17,222 +15,107 @@ import {
   summarizeArguments,
 } from "./utils.js";
 
-/** Owns approval request creation and the persisted stream snapshot used on resume. */
+/** Persists and exposes a human approval boundary for a frozen ReAct action. */
 export class ApprovalFlowCoordinator {
   constructor(private readonly deps: AgentLoopEngineDeps) {}
 
-  /**
-   * §P1-3: Content-block approval for specific tool calls.
-   *
-   * Creates a stream with status + text parts showing what needs approval,
-   * saves partsSnapshot + pendingToolCall for resume, and returns
-   * waiting_approval so the run pauses until the user decides.
-   */
-  async runApprovalForToolCalls(
+  async runReactApproval(
     input: AgentLoopInput,
-    context: AgentContext,
-    intent: RoutedIntent,
-    plan: AgentPlan | undefined,
-    decision: ToolDecision & { type: "use_tool" },
-    messageId: string,
-    signal: AbortSignal,
-    existingStream?: AssistantMessageStream,
-    toolPartsAlreadyPresent = false,
+    calls: PlannedToolCall[],
+    checkpoint: ReactCheckpoint,
+    stream: AssistantMessageStream,
+    _signal: AbortSignal,
   ): Promise<AgentLoopResult> {
-    const { runId, conversationId } = input;
-
-    const stream =
-      existingStream ??
-      new AssistantMessageStream({
-        runId,
-        conversationId,
-        messageId,
-        eventBus: this.deps.eventBus,
-        saveMessage: this.deps.saveMessage!,
-        skipStartedEvents: true,
-      });
-    if (!existingStream) stream.start();
-
-    // Emit a text part explaining what needs approval
-    const toolNames = decision.toolCalls.map((tc) => tc.name).join("、");
-    const textPart = stream.startTextPart("progress");
+    if (calls.length === 0) {
+      throw new Error("Cannot suspend an empty approval batch");
+    }
+    const toolNames = calls.map((call) => call.name).join("、");
+    const explanation = stream.startTextPart("progress");
     stream.appendText(
-      textPart.id,
+      explanation.id,
       `这个操作需要你的确认：我将调用 ${toolNames}。`,
     );
-    stream.completeTextPart(textPart.id);
+    stream.completeTextPart(explanation.id);
 
-    // Emit status parts for each tool needing approval
-    if (!toolPartsAlreadyPresent) {
-      for (const tc of decision.toolCalls) {
-        stream.startStatus({
-          label: `${RUN_PHASE_LABELS.waiting_approval}: ${tc.name}`,
-          toolCallId: tc.id,
-          metadata: { skillId: tc.skillId, phase: "queued" },
-        });
-        stream.addToolUse({
-          toolCallId: tc.id,
-          skillId: tc.skillId,
-          name: tc.name,
-          inputPreview: summarizeArguments(tc.arguments),
-        });
-      }
+    for (const call of calls) {
+      stream.startStatus({
+        label: `${RUN_PHASE_LABELS.waiting_approval}: ${call.name}`,
+        toolCallId: call.id,
+        metadata: { skillId: call.skillId, phase: "queued" },
+      });
+      stream.addToolUse({
+        toolCallId: call.id,
+        skillId: call.skillId,
+        name: call.name,
+        inputPreview: summarizeArguments(call.arguments),
+      });
     }
 
-    // §P1-2: Snapshot parts + pending tool calls for resume continuity
-    const partsSnapshot = stream.getPartsSnapshot();
-
-    await this.deps.runStateManager.saveTaskState(runId, {
-      goal: decision.reason,
+    const updatedCheckpoint: ReactCheckpoint = {
+      ...checkpoint,
+      pendingToolCalls: calls,
+      partsSnapshot: stream.getPartsSnapshot(),
+      updatedAt: new Date().toISOString(),
+    };
+    await this.deps.runStateManager.saveTaskState(input.runId, {
+      goal: "Awaiting approval for ReAct tool action",
       completedSteps: [],
-      pendingSteps: decision.toolCalls.map((tc) => tc.skillId),
+      pendingSteps: calls.map((call) => call.skillId),
       gatheredFacts: {
-        approvalMessageId: messageId,
-        partsSnapshot: partsSnapshot as unknown as Record<string, unknown>,
-        pendingToolCalls: decision.toolCalls.map((tc) => ({
-          id: tc.id,
-          skillId: tc.skillId,
-          name: tc.name,
-          arguments: tc.arguments,
-          permissions: tc.permissions,
-          riskLevel: tc.riskLevel,
-          timeoutMs: tc.timeoutMs,
-          inputSchema: tc.inputSchema,
-          riskHints: tc.riskHints,
-          projectionHints: tc.projectionHints,
-          argumentSources: tc.argumentSources,
-        })),
+        reactCheckpoint: updatedCheckpoint,
+        approvalMessageId: checkpoint.messageId,
+        partsSnapshot: updatedCheckpoint.partsSnapshot,
+        pendingToolCalls: calls,
       },
       openQuestions: [],
-      iteration: 0,
-    }).catch(() => { /* Best effort */ });
+      iteration: checkpoint.iteration,
+    });
 
-    // One persisted approval covers the complete validated batch. Approving
-    // any single item must never execute other, separately-pending approvals.
-    const firstTool = decision.toolCalls[0]!;
-    const batchRisk = decision.toolCalls.reduce<RiskLevel>(
-      (risk, toolCall) => maxRiskLevel(risk, toolCall.riskLevel),
+    const first = calls[0]!;
+    const batchRisk = calls.reduce<RiskLevel>(
+      (risk, call) => maxRiskLevel(risk, call.riskLevel),
       "medium",
     );
-    await this.requestApprovalWithMessageId({
-      runId,
-      conversationId,
+    await this.requestApproval({
+      runId: input.runId,
+      conversationId: input.conversationId,
       title: `Approve ${toolNames}`,
-      description: `Run ${decision.toolCalls.length} tool call(s): ${JSON.stringify(
-        decision.toolCalls.map((toolCall) => ({
-          name: toolCall.name,
-          arguments: summarizeArguments(toolCall.arguments),
+      description: `Run ${calls.length} ReAct tool call(s): ${JSON.stringify(
+        calls.map((call) => ({
+          id: call.id,
+          skillId: call.skillId,
+          name: call.name,
+          arguments: summarizeArguments(call.arguments),
         })),
       )}`,
       riskLevel: batchRisk,
       requestedAction: {
-        skillId: firstTool.skillId,
+        skillId: first.skillId,
         arguments: {
-          toolCalls: decision.toolCalls.map((toolCall) => ({
-            id: toolCall.id,
-            skillId: toolCall.skillId,
-            name: toolCall.name,
-            arguments: toolCall.arguments,
+          toolCalls: calls.map((call) => ({
+            id: call.id,
+            skillId: call.skillId,
+            name: call.name,
+            arguments: call.arguments,
           })),
         },
-        permissions: [
-          ...new Set(
-            decision.toolCalls.flatMap((toolCall) => toolCall.permissions),
-          ),
-        ],
-        toolCallId: firstTool.id,
+        permissions: [...new Set(calls.flatMap((call) => call.permissions))],
+        toolCallId: first.id,
       },
-      messageId,
-    });
-
-    // Stream is NOT completed — it will be hydrated on resume
-
-    return {
-      runId,
-      conversationId,
-      status: "waiting_approval",
-      artifacts: [],
-      toolCalls: [],
-    };
-  }
-
-  /** Approval-required path using stream for status display (§Step 1b). */
-  async runApprovalWithStream(
-    input: AgentLoopInput,
-    decision: ToolDecision & { type: "require_approval" },
-    messageId: string,
-    signal: AbortSignal,
-  ): Promise<AgentLoopResult> {
-    const { runId, conversationId } = input;
-
-    const saveMessage = this.deps.saveMessage;
-    if (saveMessage) {
-      const stream = new AssistantMessageStream({
-        runId,
-        conversationId,
-        messageId,
-        eventBus: this.deps.eventBus,
-        saveMessage,
-        skipStartedEvents: true,
-      });
-      stream.start();
-      stream.startStatus({
-      label: `${RUN_PHASE_LABELS.waiting_approval}: ${decision.approval.title}`,
-      metadata: { phase: "queued" },
-    });
-
-      // §Step 1b: Snapshot current parts for resume continuity.
-      // The stream is NOT completed — events are live-emitted via WebSocket.
-      // On resume, a new stream will be hydrated from this snapshot.
-      const partsSnapshot = stream.getPartsSnapshot();
-
-      await this.deps.runStateManager.saveTaskState(runId, {
-        goal: decision.approval.title,
-        completedSteps: [],
-        pendingSteps: [],
-        gatheredFacts: {
-          approvalMessageId: messageId,
-          partsSnapshot: partsSnapshot as unknown as Record<string, unknown>,
-        },
-        openQuestions: [],
-        iteration: 0,
-      }).catch(() => {
-        // Best effort
-      });
-    }
-
-    // §Step 1b: Store messageId so resumeApprovedTool can hydrate and continue.
-    await this.requestApprovalWithMessageId({
-      runId,
-      conversationId,
-      title: decision.approval.title,
-      description: decision.approval.description,
-      riskLevel: decision.approval.riskLevel as RiskLevel,
-      requestedAction: {
-        // require_approval decisions carry intent-level info (title/description);
-        // the concrete tool + arguments are determined post-approval.
-        skillId: (decision.approval as { skillId?: string }).skillId ?? decision.approval.title,
-        arguments: { title: decision.approval.title, description: decision.approval.description },
-        permissions: [],
-      },
-      messageId,
+      messageId: checkpoint.messageId,
     });
 
     return {
-      runId,
-      conversationId,
+      runId: input.runId,
+      conversationId: input.conversationId,
+      assistantMessageId: checkpoint.messageId,
       status: "waiting_approval",
-      artifacts: [],
-      toolCalls: [],
+      artifacts: checkpoint.artifacts,
+      toolCalls: checkpoint.toolCallSummaries,
     };
   }
 
-  /**
-   * Request approval with messageId stored for stream continuity (§P1-2).
-   * Mirrors requestApproval() but passes messageId through to the approval
-   * record so resumeApprovedTool can continue the same assistant message.
-   */
-  private async requestApprovalWithMessageId(input: {
+  private async requestApproval(input: {
     runId: string;
     conversationId: string;
     title: string;
@@ -245,18 +128,17 @@ export class ApprovalFlowCoordinator {
       toolCallId?: string;
     };
     messageId: string;
-  }): Promise<{ id: string; status: string }> {
+  }): Promise<void> {
     if (this.deps.approvalRequestService) {
-      const result =
-        await this.deps.approvalRequestService.requestApproval({
-          ...input,
-          requestedAction: {
-            ...input.requestedAction,
-            messageId: input.messageId,
-          },
-        });
+      const result = await this.deps.approvalRequestService.requestApproval({
+        ...input,
+        requestedAction: {
+          ...input.requestedAction,
+          messageId: input.messageId,
+        },
+      });
       this.deps.eventBus.publish(result.event);
-      return result.approval;
+      return;
     }
 
     await this.deps.runStateManager.markStatus(
@@ -264,20 +146,15 @@ export class ApprovalFlowCoordinator {
       "waiting_approval",
       `awaiting approval for ${input.title}`,
     );
-    // Store messageId in approval metadata for resume
     const approval = await this.deps.approvalGate.createApproval({
       runId: input.runId,
+      toolCallId: input.requestedAction.toolCallId,
       title: input.title,
       description: input.description,
       riskLevel: input.riskLevel,
       requestedAction: {
         ...input.requestedAction,
-        // §P1-2: Embed messageId so resume knows which message to continue
         messageId: input.messageId,
-      } as unknown as {
-        skillId: string;
-        arguments: Record<string, unknown>;
-        permissions: Permission[];
       },
     });
     this.deps.eventBus.emit(
@@ -291,11 +168,9 @@ export class ApprovalFlowCoordinator {
         skillId: input.requestedAction.skillId,
         argumentsPreview: summarizeArguments(input.requestedAction.arguments),
         reasons: buildRiskReasons(input.riskLevel, input.requestedAction),
-        // §P1-2: Include messageId in the event for frontend tracking
         messageId: input.messageId,
       },
       { runId: input.runId, conversationId: input.conversationId },
     );
-    return approval;
   }
 }

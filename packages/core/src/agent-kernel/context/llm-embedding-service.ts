@@ -129,7 +129,7 @@ export class LlmEmbeddingService implements EmbeddingService {
             this._degradedAt = Date.now();
             console.warn(
               "[embedding] Provider API call failed, switching to lexical fallback. " +
-              "Semantic short-circuit (IntentRouter Layer 1) is now disabled. " +
+              "Semantic catalog ranking is now disabled. " +
               `Will retry the real provider in ${LlmEmbeddingService.DEGRADED_RECOVERY_MS / 1000}s.`,
             );
           }
@@ -237,8 +237,8 @@ export class LlmEmbeddingService implements EmbeddingService {
 
   /**
    * Whether a real embedding provider is configured AND has not
-   * degraded to fallback. Callers that short-circuit on semantic
-   * similarity (e.g. IntentRouter Layer 1) MUST check this before
+   * degraded to fallback. Callers that rank by semantic similarity MUST
+   * check this before
    * trusting cosine-similarity scores.
    */
   get hasRealProvider(): boolean {

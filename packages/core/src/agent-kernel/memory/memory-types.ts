@@ -11,9 +11,6 @@ import type {
   AgentContext,
   AgentLoopInput,
   AgentObservation,
-  AgentPlan,
-  AgentReflection,
-  RoutedIntent,
 } from "../loop-types.js";
 
 export interface MemoryCandidate {
@@ -34,11 +31,10 @@ export interface MemoryCandidate {
 export interface MemoryWriteInput {
   input: AgentLoopInput;
   context: AgentContext;
-  intent: RoutedIntent;
-  plan?: AgentPlan;
   responseMessageId?: string;
   observation?: AgentObservation;
-  reflection?: AgentReflection;
+  /** True after the ReAct runner produced a final answer. */
+  turnCompleted?: boolean;
   /** When true, force a conversation summary even if goal is not yet achieved.
    *  Set when token budget is strained or many turns have passed. */
   forceSummary?: boolean;

@@ -3,20 +3,12 @@ import type { LlmProvider, ChatCompletionRequest, ChatCompletionDelta } from "..
 // ── Model Purpose ────────────────────────────────────────────────────────
 
 /**
- * ModelPurpose categorizes each LLM call by its role in the Agent Loop.
- * This enables routing calls to different models optimized for each task,
- * and tracking cost/latency by purpose (§3 of architecture next steps).
+ * ReAct has one semantic dialogue purpose. Summary compression is retained as
+ * context infrastructure and never chooses an Agent action.
  */
 export type ModelPurpose =
-  | "intent_classification"
-  | "tool_argument_generation"
-  | "reflection"
   | "response_composition"
-  | "summary_compression"
-  | "embedding"
-  | "planning"
-  | "replanning"
-  | "clarification";
+  | "summary_compression";
 
 // ── Model Config ─────────────────────────────────────────────────────────
 
@@ -131,13 +123,8 @@ export interface ModelRouterStats {
 /**
  * ModelRouter — routes LLM calls to the most appropriate model based on purpose.
  *
- * Design (§3):
- * - intent_classification → low-cost model
- * - tool_argument_generation → structured-output capable model
- * - reflection → stable reasoning model
- * - response_composition → primary dialogue model
- * - summary_compression → low-cost long-context model
- * - embedding → dedicated embedding provider
+ * `response_composition` is the sole semantic Agent route. Context summary
+ * compression may use a cheaper model but cannot select actions or tools.
  *
  * Fallback: if the primary model fails, falls back to the next matching
  * route or the configured fallback model. Never silently fails a run.
@@ -431,14 +418,8 @@ export function createSingleModelRouter(
   modelCallRecorder?: ModelCallRecorder,
 ): ModelRouter {
   const allPurposes: ModelPurpose[] = [
-    "intent_classification",
-    "tool_argument_generation",
-    "reflection",
     "response_composition",
     "summary_compression",
-    "planning",
-    "replanning",
-    "clarification",
   ];
 
   return new ModelRouter({
@@ -457,41 +438,25 @@ export function createSingleModelRouter(
 }
 
 /**
- * Create a ModelRouter with separate providers for different purpose tiers.
- *
- * Tier 1 (low-cost): intent_classification, summary_compression
- * Tier 2 (reasoning): reflection, planning, replanning
- * Tier 3 (primary): response_composition, tool_argument_generation, clarification
+ * Create a ModelRouter with a primary ReAct model and a cheaper context
+ * summarizer. Neither route creates a second semantic decision pipeline.
  */
 export function createTieredModelRouter(params: {
   lowCost: ModelConfig;
-  reasoning?: ModelConfig;
   primary: ModelConfig;
   fallback?: ModelConfig;
 }): ModelRouter {
   const routes: ModelRoute[] = [
     {
-      purposes: ["intent_classification", "summary_compression"],
+      purposes: ["summary_compression"],
       priority: 0,
       config: params.lowCost,
     },
   ];
 
-  if (params.reasoning) {
-    routes.push({
-      purposes: ["reflection", "planning", "replanning"],
-      priority: 1,
-      config: params.reasoning,
-    });
-  }
-
   routes.push({
-    purposes: [
-      "response_composition",
-      "tool_argument_generation",
-      "clarification",
-    ],
-    priority: params.reasoning ? 2 : 1,
+    purposes: ["response_composition"],
+    priority: 1,
     config: params.primary,
   });
 

@@ -233,9 +233,9 @@ export class JsonRpcRouter {
       }
 
       case "run.resume": {
-        const { runId } = runResumeSchema.parse(command.params ?? {});
+        const { runId, message } = runResumeSchema.parse(command.params ?? {});
         const agent = await this.deps.getChatAgent();
-        return { result: await agent.resumeRun(runId) };
+        return { result: await agent.resumeRun(runId, message) };
       }
 
       case "run.retry": {

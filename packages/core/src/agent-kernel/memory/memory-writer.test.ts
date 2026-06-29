@@ -1,7 +1,7 @@
 import { describe, expect, test } from "vitest";
 import { InMemoryDatabaseContext } from "@sunpilot/storage";
 import { DefaultMemoryWriter } from "./memory-writer.js";
-import type { AgentContext, AgentLoopInput, RoutedIntent } from "../loop-types.js";
+import type { AgentContext, AgentLoopInput } from "../loop-types.js";
 
 const loopInput: AgentLoopInput = {
   runId: "run_1",
@@ -28,17 +28,6 @@ const context: AgentContext = {
   tokenEstimate: 10,
 };
 
-const intent: RoutedIntent = {
-  type: "casual_chat",
-  confidence: 0.8,
-  requiresPlanning: false,
-  requiresTool: false,
-  requiresApproval: false,
-  riskLevel: "low",
-  candidateSkills: [],
-  reason: "test",
-};
-
 describe("DefaultMemoryWriter", () => {
   test("writes explicit user memory with scope isolation fields", async () => {
     const db = new InMemoryDatabaseContext();
@@ -48,7 +37,7 @@ describe("DefaultMemoryWriter", () => {
       clock: () => new Date("2026-06-06T00:00:00.000Z"),
     });
 
-    const result = await writer.writeFromTurn({ input: loopInput, context, intent, responseMessageId: "msg_assistant" });
+    const result = await writer.writeFromTurn({ input: loopInput, context, responseMessageId: "msg_assistant" });
 
     expect(result.written).toEqual([
       expect.objectContaining({
@@ -70,7 +59,6 @@ describe("DefaultMemoryWriter", () => {
     const result = await writer.writeFromTurn({
       input: { ...loopInput, message: "remember: api_key=sk-abcdefghijklmnopqrstuvwxyz123456" },
       context,
-      intent,
     });
 
     expect(result.written).toHaveLength(0);
@@ -100,7 +88,7 @@ describe("DefaultMemoryWriter", () => {
       clock: () => new Date("2026-06-06T00:00:00.000Z"),
     });
 
-    const result = await writer.writeFromTurn({ input: loopInput, context, intent });
+    const result = await writer.writeFromTurn({ input: loopInput, context });
 
     expect(result.superseded).toEqual([{ oldMemoryId: "memory_old", newMemoryId: "memory_new" }]);
     expect((await db.memory.search({ query: "concise", userId: "user_1" })).map((memory) => memory.id)).toEqual(["memory_new"]);

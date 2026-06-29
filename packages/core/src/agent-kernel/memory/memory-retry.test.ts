@@ -87,16 +87,6 @@ describe("MemoryRetryWrapper", () => {
         limits: { maxTokens: 1000, reservedForOutput: 100, usedTokensEstimate: 10 },
         tokenEstimate: 10,
       },
-      intent: {
-        type: "casual_chat",
-        confidence: 0.8,
-        requiresPlanning: false,
-        requiresTool: false,
-        requiresApproval: false,
-        riskLevel: "low",
-        candidateSkills: [],
-        reason: "test",
-      },
     };
   }
 

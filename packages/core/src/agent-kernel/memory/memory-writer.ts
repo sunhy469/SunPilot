@@ -205,25 +205,6 @@ export class DefaultMemoryWriter {
       });
     }
 
-    if (!explicit && input.intent.type === "memory_update") {
-      const type = classifyMemoryType(message);
-      const scope = defaultScopeForType(type, input.input.userId);
-      candidates.push({
-        key: keyFor(type, message),
-        title: titleFor(type, message),
-        content: message,
-        summary: message,
-        type,
-        scope,
-        scopeId: scopeIdFor(scope, input),
-        source: "memory_update_intent",
-        confidence: 0.72,
-        importance: 0.62,
-        reason: "intent router classified the turn as a memory update",
-        metadata: { trigger: "memory_update_intent" },
-      });
-    }
-
     // Generate conversation summary when:
     // 1. A tool task completes successfully (goalAchieved), OR
     // 2. The conversation has grown large (forceSummary — token or turn trigger), OR
@@ -241,9 +222,7 @@ export class DefaultMemoryWriter {
       input.context.messages.length >= 20 && !input.observation;
     const shouldSummarize =
       (input.observation &&
-        (input.reflection?.goalAchieved ||
-          input.forceSummary ||
-          shouldRollingSummarize)) ||
+        (input.turnCompleted || input.forceSummary || shouldRollingSummarize)) ||
       shouldSummarizeByMessageCount;
     if (shouldSummarize) {
       // §7.2: Branch on whether this turn had tool calls. Pure-chat
@@ -252,8 +231,6 @@ export class DefaultMemoryWriter {
       // tool evidence.
       const hasToolTurn = !!input.observation;
       const obs = input.observation;
-      const refl = input.reflection;
-
       let content: string;
       let goalText: string;
       let summaryText: string | undefined;
@@ -286,17 +263,14 @@ export class DefaultMemoryWriter {
           })
           .join(", ");
 
-        goalText = refl?.summary ?? "Conversation progress";
-        summaryText = refl?.summary ?? obs.summary;
+        goalText = input.input.message || "Conversation progress";
+        summaryText = obs.summary;
         content = [
           `Goal: ${goalText}`,
           obs.summary ? `Summary: ${obs.summary}` : "",
           toolDetails ? `Tools executed:\n${toolDetails}` : "",
           structuredFacts ? `Results: ${structuredFacts}` : "",
           artifactDetails ? `Artifacts created:\n${artifactDetails}` : "",
-          refl?.missingInfo?.length
-            ? `Open questions: ${refl.missingInfo.join(", ")}`
-            : "",
         ]
           .filter(Boolean)
           .join("\n\n");
@@ -310,15 +284,12 @@ export class DefaultMemoryWriter {
         const topicGuess = userMessages[0]
           ? userMessages[0].replace(/\n/g, " ").trim()
           : "General conversation";
-        goalText = refl?.summary ?? "Casual conversation";
-        summaryText = refl?.summary ?? topicGuess;
+        goalText = "Casual conversation";
+        summaryText = topicGuess;
         content = [
           `Topic: ${topicGuess}`,
           `Messages: ${input.context.messages.length}`,
           summaryText ? `Summary: ${summaryText}` : "",
-          refl?.missingInfo?.length
-            ? `Open questions: ${refl.missingInfo.join(", ")}`
-            : "",
         ]
           .filter(Boolean)
           .join("\n\n");
@@ -337,11 +308,11 @@ export class DefaultMemoryWriter {
             ? obs.toolCalls.filter((tc) => tc.status === "completed").length /
               obs.toolCalls.length
             : 1;
-        const reflConfidence = refl?.confidence ?? 0.7;
+        const completionConfidence = input.turnCompleted ? 1 : 0.7;
         const hasArtifacts = hasToolTurn && !!obs && obs.artifacts.length > 0;
-        const hasQuestions = (refl?.missingInfo?.length ?? 0) > 0;
+        const hasQuestions = false;
         const qualityScore = Math.round(
-          (reflConfidence * 0.4 +
+          (completionConfidence * 0.4 +
             toolSuccessRate * 0.3 +
             (hasArtifacts ? 0.15 : 0) +
             (hasQuestions ? 0 : 0.15)) *
@@ -349,7 +320,7 @@ export class DefaultMemoryWriter {
         ) / 100;
 
         // Dynamic importance: goal-achieved summaries more important
-        const dynImportance = refl?.goalAchieved
+        const dynImportance = input.turnCompleted
           ? 0.75
           : input.forceSummary
             ? 0.65
@@ -365,9 +336,6 @@ export class DefaultMemoryWriter {
         // ── Stale detection metadata (§6) ────────────────────────────
         // Summaries can become stale when goals change or facts are updated.
         const staleSignals: string[] = [];
-        if (refl && !refl.goalAchieved && refl.missingInfo?.length) {
-          staleSignals.push("goal_not_achieved");
-        }
         if (hasQuestions) {
           staleSignals.push("has_open_questions");
         }
@@ -389,7 +357,7 @@ export class DefaultMemoryWriter {
             ? "completed tool task summary with structured results"
             : "pure-chat long conversation summary",
           metadata: {
-            trigger: refl?.goalAchieved
+            trigger: input.turnCompleted
               ? "completed_tool_task"
               : input.forceSummary
                 ? "force_summary"
@@ -401,14 +369,14 @@ export class DefaultMemoryWriter {
             runId: input.input.runId,
             artifactIds: hasToolTurn && obs ? obs.artifacts.map((a) => a.id) : [],
             toolCallIds: hasToolTurn && obs ? obs.toolCalls.map((tc) => tc.id) : [],
-            goalAchieved: refl?.goalAchieved ?? false,
-            confidence: refl?.confidence,
+            turnCompleted: input.turnCompleted ?? false,
+            confidence: completionConfidence,
             timestamp: now,
             messageRange: range,
             quality: {
               score: qualityScore,
               toolSuccessRate,
-              reflectionConfidence: reflConfidence,
+              completionConfidence,
               hasArtifacts,
               hasOpenQuestions: hasQuestions,
               toolCount: hasToolTurn && obs ? obs.toolCalls.length : 0,

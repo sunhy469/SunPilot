@@ -3,7 +3,6 @@ import type {
   AgentLoopStatus,
   AgentLoopInput,
   AgentLoopResult,
-  ToolDecision,
 } from './loop-types.js';
 import { isTerminal, LEGAL_TRANSITIONS } from './state/run-state-machine.js';
 

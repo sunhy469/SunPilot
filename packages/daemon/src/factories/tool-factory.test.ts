@@ -2,28 +2,14 @@ import { describe, expect, test } from "vitest";
 import { InMemoryDatabaseContext } from "@sunpilot/storage";
 import type { InstalledSkillRecord, StepRecord } from "@sunpilot/protocol";
 import {
-  parseEnv,
   InMemoryAgentEventBus,
-  LlmEmbeddingService,
-  SkillEmbeddingCache,
-  ModelRouter,
-  PermissionPolicy,
   ToolSandbox,
   TaskScopedPermissionManager,
   PromptInjectionDetector,
   ToolSafetyBoundary,
-  type LlmProvider,
 } from "@sunpilot/core";
 
 import { createToolLayer } from "./tool-factory.js";
-
-const fakeLlm: LlmProvider = {
-  id: "fake",
-  model: "fake-model",
-  async *streamChat() {
-    yield { delta: "fake", raw: {} };
-  },
-};
 
 const installedSkill: InstalledSkillRecord = {
   id: "test.files",
@@ -70,21 +56,7 @@ const installedSkill: InstalledSkillRecord = {
 describe("createToolLayer", () => {
   function setup(opts?: { skillRunner?: any }) {
     const db = new InMemoryDatabaseContext();
-    const env = parseEnv(process.env);
     const rawEventBus = new InMemoryAgentEventBus();
-    const embeddingService = new LlmEmbeddingService({ dimension: 1536 });
-    const skillEmbeddingCache = new SkillEmbeddingCache(embeddingService);
-    const modelRouter = new ModelRouter({
-      routes: [
-        {
-          purposes: ["response_composition"],
-          priority: 0,
-          modelId: "dp",
-          config: { id: "dp", label: "DP", provider: fakeLlm, model: "fake-model" },
-        },
-      ],
-    });
-    const permissionPolicy = new PermissionPolicy();
     const sandbox = new ToolSandbox("moderate");
     const permissionManager = new TaskScopedPermissionManager();
     const injectionDetector = new PromptInjectionDetector({ blockCritical: true });
@@ -94,36 +66,20 @@ describe("createToolLayer", () => {
       permissionManager,
       injectionDetector,
     });
-    const saveMessage = async () => {};
-
     return createToolLayer({
       database: db,
       rawEventBus,
       skillRegistry: { list: () => [installedSkill] } as any,
       skillRunner: opts?.skillRunner,
-      toolArgLlm: fakeLlm,
-      planningLlm: fakeLlm,
-      replanningLlm: fakeLlm,
-      embeddingService,
-      skillEmbeddingCache,
-      modelRouter,
-      permissionPolicy,
       toolSafetyBoundary,
-      saveMessage,
     });
   }
 
   test("returns all tool-pipeline components", () => {
     const result = setup();
-    expect(result.toolArgBuilder).toBeDefined();
-    expect(result.toolRetriever).toBeDefined();
     expect(result.listSkillSummaries).toBeTypeOf("function");
-    expect(result.planner).toBeDefined();
-    expect(result.planValidator).toBeDefined();
-    expect(result.replanner).toBeDefined();
     expect(result.skillExecutor).toBeDefined();
     expect(result.executionOrchestrator).toBeDefined();
-    expect(result.toolDecisionEngine).toBeDefined();
   });
 
   test("listSkillSummaries produces fully-qualified capability ids (<skill-id>:<capability-name>)", async () => {
@@ -211,17 +167,4 @@ describe("createToolLayer", () => {
     expect(executionOrchestrator).toBeDefined();
   });
 
-  test("planValidator and replanner share the same listSkillSummaries closure", async () => {
-    const { planValidator, replanner, listSkillSummaries } = setup();
-    expect(planValidator).toBeDefined();
-    expect(replanner).toBeDefined();
-    // Verify they can both invoke the shared skill summary lister
-    const summaries = await listSkillSummaries();
-    expect(summaries.length).toBeGreaterThan(0);
-  });
-
-  test("toolDecisionEngine is wired with planningLlm and modelRouter", () => {
-    const { toolDecisionEngine } = setup();
-    expect(toolDecisionEngine).toBeDefined();
-  });
 });

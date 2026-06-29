@@ -1,48 +1,38 @@
 /**
- * Context factory — wires the context builder (with memory RAG), intent
- * router, memory writer (retry-wrapped), and trace manager.
+ * Context factory — wires context building, memory RAG/writes and tracing.
  *
  * Extracted from composition-root.ts (Batch 4 §3).
  */
 import type { DatabaseContext } from "@sunpilot/storage";
 import type { MemorySearchInput } from "@sunpilot/protocol";
 import {
-  BasicReflectionEngine,
   ContextBuilder,
   DefaultMemoryWriter,
-  IntentRouter,
   LlmEmbeddingService,
   MemoryRetryWrapper,
   MmrMemoryReranker,
   MultiHopRetriever,
   RepositoryTraceManager,
   SimpleQueryExpander,
-  SkillEmbeddingCache,
   SummaryStaleDetector,
   TraceManager,
   type AgentEventBus,
   type AttachmentRef,
-  type Env,
   type LlmProvider,
 } from "@sunpilot/core";
 import type { SkillRegistry } from "@sunpilot/skill-runner";
 
 export interface ContextFactoryDeps {
   database: DatabaseContext;
-  env: Env;
   rawEventBus: AgentEventBus;
   embeddingService: LlmEmbeddingService;
-  skillEmbeddingCache: SkillEmbeddingCache;
-  intentLlm: LlmProvider;
-  reflectionLlm: LlmProvider;
+  summaryLlm: LlmProvider;
   skillRegistry: SkillRegistry;
   systemPrompt?: string;
 }
 
 export interface ContextFactoryResult {
   contextBuilder: ContextBuilder;
-  intentRouter: IntentRouter;
-  reflectionEngine: BasicReflectionEngine;
   rawMemoryWriter: DefaultMemoryWriter;
   memoryWriter: MemoryRetryWrapper;
   traceManager: RepositoryTraceManager | TraceManager;
@@ -51,7 +41,7 @@ export interface ContextFactoryResult {
 export function createContextLayer(
   deps: ContextFactoryDeps,
 ): ContextFactoryResult {
-  const { database, env, rawEventBus, embeddingService, skillEmbeddingCache, skillRegistry } = deps;
+  const { database, rawEventBus, embeddingService, skillRegistry } = deps;
 
   // ── Context ────────────────────────────────────────────────────
   const staleDetector = new SummaryStaleDetector();
@@ -60,7 +50,7 @@ export function createContextLayer(
     staleDetector,
     summarizeMemory: async (content: string, maxChars: number) => {
       let summary = "";
-      for await (const chunk of deps.reflectionLlm.streamChat({
+      for await (const chunk of deps.summaryLlm.streamChat({
         messages: [
           {
             role: "system",
@@ -218,22 +208,6 @@ export function createContextLayer(
     },
   });
 
-  // ── Intent ─────────────────────────────────────────────────────
-  const embeddingThreshold = parseFloat(
-    env.SUNPILOT_INTENT_EMBEDDING_THRESHOLD ?? "0.95",
-  );
-  const intentRouter = new IntentRouter({
-    llm: deps.intentLlm,
-    embeddingService,
-    skillEmbeddingCache,
-    embeddingShortCircuitThreshold: embeddingThreshold,
-  });
-
-  // ── Reflection ─────────────────────────────────────────────────
-  const reflectionEngine = new BasicReflectionEngine({
-    llm: deps.reflectionLlm,
-  });
-
   // ── Memory ────────────────────────────────────────────────────
   const rawMemoryWriter = new DefaultMemoryWriter({
     repository: database.memory,
@@ -252,8 +226,6 @@ export function createContextLayer(
 
   return {
     contextBuilder,
-    intentRouter,
-    reflectionEngine,
     rawMemoryWriter,
     memoryWriter,
     traceManager,

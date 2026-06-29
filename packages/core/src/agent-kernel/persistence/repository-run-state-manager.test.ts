@@ -20,15 +20,13 @@ describe("RepositoryRunStateManager", () => {
     const manager = new RepositoryRunStateManager(db);
 
     await manager.createRun(loopInput);
-    await manager.markStatus(loopInput.runId, "context_building");
-    await manager.markStatus(loopInput.runId, "intent_routing");
-    const state = await manager.markStatus(loopInput.runId, "tool_deciding");
+    const state = await manager.markStatus(loopInput.runId, "running");
 
     expect(state).toEqual(
       expect.objectContaining({
         runId: loopInput.runId,
         conversationId: loopInput.conversationId,
-        status: "tool_deciding",
+        status: "running",
         goal: loopInput.message,
       }),
     );
@@ -38,22 +36,20 @@ describe("RepositoryRunStateManager", () => {
         id: loopInput.runId,
         conversationId: loopInput.conversationId,
         mode: "agent",
-        status: "tool_deciding",
+        status: "running",
         goal: loopInput.message,
         context: expect.objectContaining({
-          agentStatus: "tool_deciding",
+          agentStatus: "running",
           statusHistory: expect.arrayContaining([
             expect.objectContaining({ nextStatus: "created" }),
-            expect.objectContaining({ nextStatus: "tool_deciding" }),
+            expect.objectContaining({ nextStatus: "running" }),
           ]),
         }),
       }),
     );
     await expect(db.runStatusHistory.listByRunId(loopInput.runId)).resolves.toEqual([
       expect.objectContaining({ nextStatus: "created" }),
-      expect.objectContaining({ previousStatus: "created", nextStatus: "context_building" }),
-      expect.objectContaining({ previousStatus: "context_building", nextStatus: "intent_routing" }),
-      expect.objectContaining({ previousStatus: "intent_routing", nextStatus: "tool_deciding" }),
+      expect.objectContaining({ previousStatus: "created", nextStatus: "running" }),
     ]);
   });
 

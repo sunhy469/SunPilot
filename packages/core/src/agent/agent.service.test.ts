@@ -443,6 +443,50 @@ describe("AgentService", () => {
     );
   });
 
+  test("resumeRun continues an interrupted ReAct checkpoint on the same run", async () => {
+    const resumed: string[] = [];
+    const { service } = createService({
+      runStateManager: {
+        getRun: async () => ({
+          runId: "run_checkpoint",
+          conversationId: "conv_checkpoint",
+          status: "interrupted",
+          mode: "agent",
+          taskState: {
+            gatheredFacts: {
+              reactCheckpoint: { version: 1, transcript: [] },
+            },
+          },
+          createdAt: "2026-06-06T00:00:00.000Z",
+          updatedAt: "2026-06-06T00:00:01.000Z",
+        }),
+      } as any,
+      loopEngine: {
+        resumeInterrupted: async ({ runId }: { runId: string }) => {
+          resumed.push(runId);
+          return {
+            runId,
+            conversationId: "conv_checkpoint",
+            assistantMessageId: "msg_checkpoint",
+            status: "completed" as const,
+            artifacts: [],
+            toolCalls: [],
+          };
+        },
+      } as any,
+    });
+
+    await expect(service.resumeRun("run_checkpoint")).resolves.toEqual({
+      resumed: true,
+      originalRunId: "run_checkpoint",
+      runId: "run_checkpoint",
+      conversationId: "conv_checkpoint",
+      messageId: "msg_checkpoint",
+      status: "completed",
+    });
+    expect(resumed).toEqual(["run_checkpoint"]);
+  });
+
   test("resumeRun rejects active or completed runs", async () => {
     const db = new InMemoryDatabaseContext();
     const { service, conversations } = createService({

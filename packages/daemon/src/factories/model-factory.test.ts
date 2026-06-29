@@ -13,7 +13,7 @@ const fakeLlmProvider: LlmProvider = {
 };
 
 describe("createModelLayer", () => {
-  test("returns embeddingService, skillEmbeddingCache, modelRouter, saveMessage, and 6 purpose LLMs", () => {
+  test("returns the model router and the non-agent summary adapter", () => {
     const db = new InMemoryDatabaseContext();
     const env = parseEnv(process.env);
 
@@ -27,12 +27,7 @@ describe("createModelLayer", () => {
     expect(result.skillEmbeddingCache).toBeDefined();
     expect(result.modelRouter).toBeDefined();
     expect(result.saveMessage).toBeTypeOf("function");
-    expect(result.intentLlm).toBeDefined();
-    expect(result.toolArgLlm).toBeDefined();
-    expect(result.reflectionLlm).toBeDefined();
-    expect(result.responseLlm).toBeDefined();
-    expect(result.planningLlm).toBeDefined();
-    expect(result.replanningLlm).toBeDefined();
+    expect(result.summaryLlm).toBeDefined();
   });
 
   test.sequential("isolates injected llmProvider from host model secrets", () => {
@@ -104,18 +99,18 @@ describe("createModelLayer", () => {
     expect(embeddingService.hasRealProvider).toBe(false);
   });
 
-  test("purpose providers delegate to ModelRouter for streaming", async () => {
+  test("summary adapter delegates to ModelRouter", async () => {
     const db = new InMemoryDatabaseContext();
     const env = parseEnv(process.env);
 
-    const { responseLlm } = createModelLayer({
+    const { summaryLlm } = createModelLayer({
       database: db,
       env,
       llmProvider: fakeLlmProvider,
     });
 
     const chunks: string[] = [];
-    for await (const chunk of responseLlm.streamChat({
+    for await (const chunk of summaryLlm.streamChat({
       messages: [{ role: "user", content: "hi" }],
     })) {
       chunks.push(chunk.delta);

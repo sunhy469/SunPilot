@@ -202,7 +202,7 @@ describe("createAgentLoopService", () => {
             // After tool execution, return text content and exit the loop
             yield { delta: "The file contains: file contents.", raw: {} };
           } else {
-            // Intent routing / planning calls
+            // Defensive fallback when tools are disabled.
             yield { delta: "file_operation", raw: {} };
           }
         },
@@ -371,17 +371,28 @@ describe("createAgentLoopService", () => {
         id: "test",
         model: "test",
         async *streamChat(request: any) {
-          // When the streaming path sends tool definitions, throw so the
-          // old path with full safety pipeline (sandbox → permission →
-          // ApprovalGate) takes over. The streaming path doesn't yet support
-          // approval pausing.
-          if (request.tools && request.tools.length > 0) {
-            throw new Error(
-              "Streaming fallback: approval flow requires old path",
-            );
+          const hasToolResults = request.messages?.some(
+            (message: any) => message.role === "tool",
+          );
+          if (request.tools?.length > 0 && !hasToolResults) {
+            yield {
+              delta: "This command needs approval.",
+              toolCalls: [{
+                index: 0,
+                id: "tc_approval_shell",
+                type: "function" as const,
+                function: {
+                  name: request.tools[0]?.function.name,
+                  arguments: JSON.stringify({ command: "pnpm build" }),
+                },
+              }],
+              raw: {},
+            };
+          } else if (hasToolResults) {
+            yield { delta: "The approved build completed successfully.", raw: {} };
+          } else {
+            yield { delta: "No tool is available.", raw: {} };
           }
-          // Intent routing calls — return shell_operation to match high-risk skill
-          yield { delta: "shell_operation", raw: {} };
         },
       },
     });
@@ -496,6 +507,73 @@ describe("createAgentLoopService", () => {
         expect.objectContaining({ type: "agent.tool.completed" }),
         expect.objectContaining({ type: "agent.run.completed" }),
       ]),
+    );
+  });
+
+  test("feeds approval rejection back into the same ReAct transcript", async () => {
+    const db = new InMemoryDatabaseContext();
+    const executedSteps: StepRecord[] = [];
+    let sawRejectionObservation = false;
+    const { service } = createAgentLoopService({
+      database: db,
+      skillRegistry: { list: () => [highRiskSkill] } as any,
+      skillRunner: {
+        async execute(step: StepRecord) {
+          executedSteps.push(step);
+          return { content: "must not run" };
+        },
+      } as any,
+      llmProvider: {
+        id: "test",
+        model: "test",
+        async *streamChat(request: any) {
+          const toolMessages = request.messages?.filter(
+            (message: any) => message.role === "tool",
+          ) ?? [];
+          if (toolMessages.length === 0) {
+            yield {
+              delta: "I need approval.",
+              toolCalls: [{
+                index: 0,
+                id: "tc_rejected_shell",
+                type: "function" as const,
+                function: {
+                  name: request.tools[0]?.function.name,
+                  arguments: '{"command":"pnpm build"}',
+                },
+              }],
+              raw: {},
+            };
+          } else {
+            sawRejectionObservation = toolMessages.some((message: any) =>
+              String(message.content).includes("rejected"),
+            );
+            yield { delta: "I will not run the rejected command.", raw: {} };
+          }
+        },
+      },
+    });
+
+    const result = await service.handleChatCommand(
+      { message: "run pnpm build" },
+      { source: "api" },
+    );
+    expect(result.status).toBe("waiting_approval");
+    const [approval] = await db.approvals.list();
+    await service.reject(approval!.id, "tester", "not now");
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    console.log("REJECTION_DEBUG", await db.runs.findById(result.runId), await db.events.listByRunId(result.runId));
+    await waitFor(async () =>
+      (await db.runs.findById(result.runId))?.status === "completed",
+    );
+
+    expect(executedSteps).toEqual([]);
+    expect(sawRejectionObservation).toBe(true);
+    await expect(db.runs.findById(result.runId)).resolves.toEqual(
+      expect.objectContaining({ status: "completed" }),
+    );
+    await expect(db.approvals.findById(approval!.id)).resolves.toEqual(
+      expect.objectContaining({ status: "rejected" }),
     );
   });
 
