@@ -713,27 +713,32 @@ export function useChat(
         setSendState("streaming");
       }
 
+      // §Guard: Only process terminal events for the currently active run.
+      // Stale events from previous runs (e.g. a late agent.run.failed) must
+      // not overwrite sendState after the active run has already completed.
+      const eventRunId = (event.params as { runId?: string }).runId;
+      const isActiveRunEvent = eventRunId && eventRunId === activeRunIdRef.current;
+
       if (event.method === "agent.message.completed") {
-        finishActiveRun({ sendState: "completed" });
+        if (isActiveRunEvent) finishActiveRun({ sendState: "completed" });
       }
 
       // ── Agent message completed via content-block event ──────────
-      // (agent.response.completed UI handler removed — agent.message.completed handles this)
       if (event.method === "agent.run.completed") {
-        finishActiveRun({ sendState: "completed" });
+        if (isActiveRunEvent) finishActiveRun({ sendState: "completed" });
       }
 
       // ── Agent run failed ──────────────────────────────────────
       if (event.method === "agent.run.failed") {
-        finishActiveRun({
+        if (isActiveRunEvent) finishActiveRun({
           sendState: "failed",
-          error: event.params.error.message,
+          error: (event.params as { error?: { message?: string } }).error?.message,
         });
       }
 
       // ── Agent run cancelled ───────────────────────────────────
       if (event.method === "agent.run.cancelled") {
-        finishActiveRun({ sendState: "failed" });
+        if (isActiveRunEvent) finishActiveRun({ sendState: "failed" });
         // §Frontend gap: Mark the active assistant message as stopped
         setMessages((items) =>
           items.map((item) =>
@@ -746,15 +751,17 @@ export function useChat(
 
       // ── Agent run interrupted ─────────────────────────────────
       if (event.method === "agent.run.interrupted") {
-        finishActiveRun({ sendState: "failed" });
-        // §Frontend gap: Mark the active assistant message as stopped
-        setMessages((items) =>
-          items.map((item) =>
-            item.role === "assistant" && item.status === "streaming"
-              ? { ...item, status: "stopped" as const }
-              : item,
-          ),
-        );
+        if (isActiveRunEvent) {
+          finishActiveRun({ sendState: "failed" });
+          // Mark the active assistant message as stopped
+          setMessages((items) =>
+            items.map((item) =>
+              item.role === "assistant" && item.status === "streaming"
+                ? { ...item, status: "stopped" as const }
+                : item,
+            ),
+          );
+        }
       }
     });
     return socket;

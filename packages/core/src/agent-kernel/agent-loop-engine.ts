@@ -259,17 +259,12 @@ export class AgentLoopEngine {
     }
 
     try {
-      // §Parallel optimization: Optionally launch LLM pre-inference
-      // concurrently with context building. Pre-inference uses only the
-      // user message + system prompt (no context) and does NOT write to
-      // the formal AssistantMessageStream — it only collects text and
-      // tool hints.
-      // §P3 opt: The pre-inference promise is passed into buildContextAndIntent
-      // so it can be awaited AFTER context building but BEFORE intent routing.
-      // This lets the pre-inference result skip the main IntentRouter Layer 2
-      // LLM call when it completes quickly enough.
+      // §ReAct: Launch pre-inference concurrently with context building.
+      // Pre-inference now produces both a thinking text (written to the
+      // stream as a "progress" text part) and JSON routing hints. The
+      // thinking text replaces the old template preface ("我先调用xxx").
       const preliminaryPromise = this.deps.enablePreliminaryInference && this.deps.modelRouter
-        ? this.preliminaryInference.run(input, signal)
+        ? this.preliminaryInference.run(input, signal, stream)
         : undefined;
 
       // §P3 opt: buildContextAndIntent awaits the pre-inference internally
@@ -376,9 +371,25 @@ export class AgentLoopEngine {
 
       switch (decision.type) {
         case "use_tool":
-        case "no_tool":
+        case "no_tool": {
+          // §ReAct: When pre-inference already wrote thinking text and tools
+          // are confidently matched, skip the tool loop's first LLM turn —
+          // the thinking text is already in the stream and tools are
+          // pre-determined. Saves one LLM call per run.
+          const hasPreInferenceThinking = !!(
+            preliminary?.thinkingText &&
+            preliminary.thinkingText.trim().length > 0
+          );
+          const skipFirstLlmTurn =
+            decision.type === "use_tool" &&
+            hasPreInferenceThinking &&
+            (decision.toolCalls?.length ?? 0) > 0;
           // §P1-1: Pass pre-created stream for early progress status
-          return this.runContentBlockLoop(input, context, intent, plan, decision, messageId, signal, stream);
+          return this.runContentBlockLoop(
+            input, context, intent, plan, decision, messageId, signal, stream,
+            skipFirstLlmTurn || undefined,
+          );
+        }
         case "ask_clarification":
           return this.runOutcomes.handleClarification(input, decision, signal);
         case "require_approval":
@@ -427,6 +438,10 @@ export class AgentLoopEngine {
      *  content blocks are appended here. When absent, a new stream is
      *  created (backward-compatible fallback for approval/resume paths). */
     existingStream?: AssistantMessageStream,
+    /** §ReAct: When true, skip the first streamLlmTurn() in the native
+     *  tool loop. Pre-inference already wrote thinking text to the stream
+     *  AND the tools are pre-determined — go directly to tool execution. */
+    skipFirstLlmTurn?: boolean,
   ): Promise<AgentLoopResult> {
     const { runId, conversationId } = input;
 
@@ -483,6 +498,7 @@ export class AgentLoopEngine {
             permissionMode: input.permissionMode,
             stream,
             toolSkillIds: decision.toolCalls?.map((tc) => tc.skillId),
+            skipFirstLlmTurn,
           },
           signal,
         );

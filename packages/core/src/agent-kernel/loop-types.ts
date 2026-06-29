@@ -507,13 +507,19 @@ export type ToolDecision =
 
 /** Result of the preliminary LLM inference that runs in parallel with
  *  context building. The pre-inference uses only the user message +
- *  system prompt (no context), generating a structured JSON routing hint
- *  (not user-visible text) and extracting tool-matching hints for faster
- *  downstream routing. §P2: Text output is internal-only — it is never
- *  written to the user-facing stream. */
+ *  system prompt (no context), producing a structured JSON routing hint
+ *  and a brief thinking text that IS written to the user-facing stream
+ *  as progress/thinking content (replacing the old template preface).
+ *  §ReAct: Thinking text is user-visible and serves as the natural
+ *  "I'm about to do X" explanation. */
 export interface PreliminaryInferenceResult {
   /** Pre-inference text — internal routing hint only (§P2). */
   text: string;
+  /** §ReAct: Brief thinking/preface text extracted from the pre-inference
+   *  response. This is written to the stream as a "progress" text part
+   *  so the user sees a natural-language explanation of what the agent
+   *  is about to do (replaces the old template preface). */
+  thinkingText?: string;
   /** §P3 opt: Intent type from the pre-inference LLM call.
    *  When set and confidence ≥ 0.7, the main IntentRouter skips
    *  its own Layer 2 LLM call, saving ~200-800ms.
@@ -692,6 +698,10 @@ export interface ToolDecisionEngine {
       toolSkillIds?: string[];
       /** Optional stream for content-block parts emission (§Phase 3). */
       stream?: IAssistantMessageStream;
+      /** §ReAct: When true, skip the first streamLlmTurn() entirely.
+       *  Pre-inference already wrote thinking text AND the tools are
+       *  pre-determined — go directly to tool execution. */
+      skipFirstLlmTurn?: boolean;
     },
     signal: AbortSignal,
   ): Promise<{

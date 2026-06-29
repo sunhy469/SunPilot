@@ -319,11 +319,11 @@ export async function runLauncher(deps: LauncherDeps = {}): Promise<number> {
       let target = `${webUrl}/`;
       try {
         const parsedTarget = new URL(target);
-        const isLocalTarget =
-          parsedTarget.hostname === "127.0.0.1" ||
-          parsedTarget.hostname === "localhost" ||
-          parsedTarget.hostname === "[::1]";
-        const token = isLocalTarget ? readLocalToken() : undefined;
+        // A10: Always read the local bearer token and inject it as a
+        // URL fragment so the browser can authenticate against the
+        // daemon regardless of whether it's accessed via localhost or
+        // a production domain (e.g. tradeagent.asia via nginx).
+        const token = readLocalToken();
         if (token) {
           parsedTarget.hash = new URLSearchParams({ "sunpilot-token": token }).toString();
           target = parsedTarget.toString();

@@ -59,23 +59,32 @@ describe("createPersistenceLayer", () => {
     expect(seen[0]?.sequence).toBe(42);
   });
 
-  test("skips persistence for agent.message.part.delta (transient streaming)", async () => {
+  test("forwards lifecycle and delta events synchronously to liveEventBus without persist", () => {
     const db = new InMemoryDatabaseContext();
     const { rawEventBus, liveEventBus } = createPersistenceLayer({ database: db });
 
     const seen: AgentEvent[] = [];
-    liveEventBus.subscribe(async (event) => {
+    liveEventBus.subscribe((event) => {
       seen.push(event);
     });
 
+    // message.started, part.started, and part.delta are sync-forwarded
+    // so the frontend receives them in correct order before any persisted events.
     rawEventBus.publish(
-      makeEvent({ type: "agent.message.part.delta", payload: { delta: "tok" } }),
+      makeEvent({ type: "agent.message.started", payload: {} }),
+    );
+    rawEventBus.publish(
+      makeEvent({ type: "agent.message.part.started", payload: { part: {} } }),
+    );
+    rawEventBus.publish(
+      makeEvent({ type: "agent.message.part.delta", payload: { delta: "hello" } }),
     );
 
-    await new Promise((resolve) => setImmediate(resolve));
-    await new Promise((resolve) => setImmediate(resolve));
-
-    expect(seen.length).toBe(0);
+    // All three are forwarded synchronously (no DB persist)
+    expect(seen.length).toBe(3);
+    expect(seen[0]!.type).toBe("agent.message.started");
+    expect(seen[1]!.type).toBe("agent.message.part.started");
+    expect(seen[2]!.type).toBe("agent.message.part.delta");
   });
 
   test("returns AbortRegistry, RunStateManager, EventSink, and RunInitializer bound to the same DB", () => {
