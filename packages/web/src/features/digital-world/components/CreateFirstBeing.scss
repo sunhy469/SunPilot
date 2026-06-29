@@ -1,0 +1,84 @@
+.create-first-being {
+  position: absolute;
+  inset: 0;
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.create-first-being__backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(10, 14, 23, 0.82);
+}
+
+.create-first-being__card {
+  position: relative;
+  width: 100%;
+  max-width: 420px;
+  margin: 0 16px;
+  background: linear-gradient(135deg, #111827 0%, #1a2332 100%);
+  border: 1px solid #1e3a5f;
+  border-radius: 12px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.48);
+}
+
+.create-first-being__card .ant-card-body {
+  padding: 28px 24px 24px;
+}
+
+.create-first-being__header {
+  text-align: center;
+  margin-bottom: 24px;
+}
+
+.create-first-being__header-icon {
+  font-size: 36px;
+  color: #06b6d4;
+  margin-bottom: 8px;
+}
+
+.create-first-being__title {
+  font-size: 18px;
+  font-weight: 700;
+  color: #e8edf3;
+  margin: 0 0 6px;
+}
+
+.create-first-being__subtitle {
+  font-size: 13px;
+  color: #8899aa;
+  margin: 0;
+  line-height: 1.5;
+}
+
+/* Ant Design form overrides for dark theme */
+.create-first-being__card .ant-form-item-label > label {
+  color: #b0bec5;
+  font-size: 13px;
+}
+
+.create-first-being__card .ant-input,
+.create-first-being__card .ant-input-affix-wrapper,
+.create-first-being__card .ant-select-selector {
+  background: #0d1520;
+  border-color: #1e3a5f;
+  color: #e8edf3;
+}
+
+.create-first-being__card .ant-input::placeholder,
+.create-first-being__card .ant-select-selection-placeholder {
+  color: #5a6d80;
+}
+
+.create-first-being__card .ant-select-arrow {
+  color: #5a6d80;
+}
+
+.create-first-being__card .ant-btn-primary {
+  height: 44px;
+  font-size: 15px;
+  font-weight: 600;
+  border-radius: 8px;
+}

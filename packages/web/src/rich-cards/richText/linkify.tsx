@@ -1,5 +1,36 @@
 import { type ReactNode } from "react";
 
+/**
+ * Allowed URL schemes for rendered links. Prevents `javascript:`, `data:`,
+ * and other dangerous schemes from being used in href attributes.
+ * Only `http:`, `https:`, and `mailto:` are permitted.
+ */
+const ALLOWED_URL_SCHEMES = new Set(["http:", "https:", "mailto:"]);
+
+/**
+ * Sanitize a URL: return it if the scheme is allowed, otherwise return
+ * undefined (the link will not be rendered as clickable).
+ */
+export function sanitizeUrl(url: string | undefined): string | undefined {
+  if (!url) return undefined;
+  const trimmed = url.trim();
+  if (trimmed === "") return undefined;
+  try {
+    const parsed = new URL(trimmed);
+    if (ALLOWED_URL_SCHEMES.has(parsed.protocol)) {
+      return trimmed;
+    }
+    return undefined;
+  } catch {
+    // Relative URLs (e.g. "/path") have no scheme — allow them as they
+    // resolve against the current origin and can't execute scripts.
+    if (trimmed.startsWith("/") && !trimmed.startsWith("//")) {
+      return trimmed;
+    }
+    return undefined;
+  }
+}
+
 /** URL pattern that handles trailing punctuation correctly */
 const URL_RE = /https?:\/\/[^\s<>\u4e00-\u9fff)\]}",;]+[^\s<>\u4e00-\u9fff)\]}",;.!?]/g;
 
@@ -34,9 +65,11 @@ export function linkify(text: string): LinkifySegment[] {
   // Extract markdown links first
   processed = processed.replace(MD_LINK_RE, (match, label, url) => {
     const placeholder = `\x00LINK${counter}\x00`;
+    // Sanitize the URL: reject javascript:, data:, and other dangerous schemes.
+    const safeHref = sanitizeUrl(url);
     placeholders.push({
       placeholder,
-      segment: { type: "link", content: label, href: url },
+      segment: { type: "link", content: label, href: safeHref },
     });
     counter++;
     return placeholder;
@@ -136,6 +169,11 @@ export function linkifyToNodes(
           </a>
         );
       case "link":
+        // If the URL was rejected by sanitizeUrl (e.g. javascript: scheme),
+        // render as plain text instead of a clickable link.
+        if (!seg.href) {
+          return <span key={key}>{seg.content}</span>;
+        }
         return (
           <a key={key} href={seg.href} target="_blank" rel="noopener noreferrer" className="rich-text-link">
             {seg.content}

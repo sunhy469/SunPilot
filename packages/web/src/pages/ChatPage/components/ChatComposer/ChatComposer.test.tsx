@@ -35,7 +35,7 @@ describe("ChatComposer", () => {
     await userEvent.type(textbox, "hello world");
     await userEvent.click(screen.getByRole("button", { name: "发送" }));
 
-    expect(onSend).toHaveBeenCalledWith("hello world", [], "auto", "seed");
+    expect(onSend).toHaveBeenCalledWith("hello world", [], "auto", "dp");
   });
 
   test("does not call onSend when input is empty and no files", async () => {
@@ -72,7 +72,7 @@ describe("ChatComposer", () => {
     await userEvent.type(textbox, "quick send");
     await userEvent.keyboard("{Enter}");
 
-    expect(onSend).toHaveBeenCalledWith("quick send", [], "auto", "seed");
+    expect(onSend).toHaveBeenCalledWith("quick send", [], "auto", "dp");
   });
 
   test("does not send on Shift+Enter (multiline)", async () => {
@@ -189,7 +189,7 @@ describe("ChatComposer", () => {
     render(<ChatComposer onSend={onSend} />);
 
     // The model selector should show the default model
-    expect(screen.getByText("Seed-2.0-lite")).toBeInTheDocument();
+    expect(screen.getByText("Deepseek-v4-flash")).toBeInTheDocument();
   });
 
   test("shows permission selector", () => {

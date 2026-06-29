@@ -1,6 +1,6 @@
 export type AgentMessageRole = "system" | "user" | "assistant";
 
-import type { AssistantMessagePart } from "@sunpilot/protocol";
+import type { AssistantMessagePart, ChatSendParams } from "@sunpilot/protocol";
 
 export interface AgentMessage {
   id: string;
@@ -34,6 +34,7 @@ export interface AgentConversation {
 export interface AgentChatRequest {
   conversationId?: string;
   message: string;
+  attachments: ChatSendParams["attachments"];
 }
 
 export interface AgentChatResponse {

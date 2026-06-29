@@ -1,26 +1,40 @@
 import { Graphics } from "pixi.js";
 import {
   ROAD_WIDTH,
-  ROAD_CENTER_WIDTH,
-  ROAD_DASH_LENGTH,
-  ROAD_DASH_GAP,
   ROAD_INTERSECTION_RADIUS,
+  ROAD_TYPE_COLORS,
+  type RoadType,
   getCurrentWorldTheme,
 } from "../constants";
 import type { WorldNodeData, WorldEdgeData } from "../types";
 
 /**
- * Renders roads between workstation nodes (§9.3.3).
+ * Renders roads between workstation nodes.
  *
- * Each road is drawn as:
- *   1. A solid outer line (theme.roadColor, ROAD_WIDTH) — the road surface.
- *   2. A dashed center line (theme.roadCenterColor) — the lane divider.
+ * Batch 5 Phase 2 (§9.5 §3.4): the double-line + dashed center style has
+ * been replaced with a single line per edge, colored by the inferred road
+ * type (cyan = data, purple = product, amber = control). Flowing particles
+ * along the edges are handled by ParticleLayer.
  *
- * Additionally, a rounded "intersection cap" circle is drawn at every node
- * position so roads connect smoothly at junctions.
- *
- * Task 13 (§9.5.4): road colors are read from the active WorldTheme.
+ * Task 13 (§9.5.4): road colors are read from the active WorldTheme for the
+ * intersection caps; type colors are theme-independent (semantic).
  */
+
+// Node types that indicate each road type when connected by an edge.
+const PRODUCT_NODE_TYPES = new Set([
+  "video_workstation",
+  "artifact_box",
+  "tiktok_station",
+]);
+const DATA_NODE_TYPES = new Set(["material_library"]);
+
+/** Infer the road type from the connected nodes' types. */
+function inferRoadType(from: WorldNodeData, to: WorldNodeData): RoadType {
+  if (DATA_NODE_TYPES.has(from.type) || DATA_NODE_TYPES.has(to.type)) return "data";
+  if (PRODUCT_NODE_TYPES.has(from.type) || PRODUCT_NODE_TYPES.has(to.type)) return "product";
+  return "control";
+}
+
 export class RoadLayer {
   private graphics?: Graphics;
 
@@ -31,74 +45,59 @@ export class RoadLayer {
     const g = new Graphics();
     const theme = getCurrentWorldTheme();
 
-    // ── 1. Road surface (solid lines between connected nodes) ──
-    g.setStrokeStyle({
-      width: ROAD_WIDTH,
-      color: theme.roadColor,
-      cap: "round",
-      join: "round",
-    });
+    // ── Single-line roads colored by inferred type ──
+    // Group strokes by road type so each type is a single batch.
+    const edgesByType = new Map<RoadType, { from: WorldNodeData; to: WorldNodeData }[]>();
     for (const edge of edges) {
       const from = nodeMap.get(edge.fromNodeId);
       const to = nodeMap.get(edge.toNodeId);
       if (!from || !to) continue;
-
-      g.moveTo(from.position.x, from.position.y);
-      g.lineTo(to.position.x, to.position.y);
-    }
-    g.stroke();
-
-    // ── 2. Dashed center line (lane divider) ──
-    // PixiJS 8 Graphics has no native dash support, so we manually emit
-    // short segments along each edge.
-    g.setStrokeStyle({
-      width: ROAD_CENTER_WIDTH,
-      color: theme.roadCenterColor,
-      cap: "butt",
-    });
-    const dashLen = ROAD_DASH_LENGTH;
-    const gapLen = ROAD_DASH_GAP;
-    const stepLen = dashLen + gapLen;
-
-    for (const edge of edges) {
-      const from = nodeMap.get(edge.fromNodeId);
-      const to = nodeMap.get(edge.toNodeId);
-      if (!from || !to) continue;
-
-      const fx = from.position.x;
-      const fy = from.position.y;
-      const tx = to.position.x;
-      const ty = to.position.y;
-      const dx = tx - fx;
-      const dy = ty - fy;
-      const dist = Math.hypot(dx, dy);
-      if (dist < stepLen) continue; // too short to dash
-
-      const ux = dx / dist;
-      const uy = dy / dist;
-
-      // Skip the first/last bit so dashes don't overlap the intersection cap.
-      const margin = ROAD_INTERSECTION_RADIUS;
-      const start = margin;
-      const end = dist - margin;
-
-      for (let pos = start; pos + dashLen <= end; pos += stepLen) {
-        const sx = fx + ux * pos;
-        const sy = fy + uy * pos;
-        const ex = fx + ux * (pos + dashLen);
-        const ey = fy + uy * (pos + dashLen);
-        g.moveTo(sx, sy);
-        g.lineTo(ex, ey);
+      const type = inferRoadType(from, to);
+      let arr = edgesByType.get(type);
+      if (!arr) {
+        arr = [];
+        edgesByType.set(type, arr);
       }
+      arr.push({ from, to });
     }
-    g.stroke();
 
-    // ── 3. Rounded intersection caps at each node ──
-    // These cover the point where multiple roads meet, giving a smooth
-    // rounded junction instead of a sharp crossing.
+    for (const [type, edgeList] of edgesByType) {
+      const color = ROAD_TYPE_COLORS[type];
+      g.setStrokeStyle({
+        width: ROAD_WIDTH,
+        color,
+        alpha: 0.7,
+        cap: "round",
+        join: "round",
+      });
+      for (const { from, to } of edgeList) {
+        g.moveTo(from.position.x, from.position.y);
+        g.lineTo(to.position.x, to.position.y);
+      }
+      g.stroke();
+    }
+
+    // ── Rounded intersection caps at each node ──
+    // Drawn in the theme's roadColor (neutral) so junctions blend with all
+    // road types meeting at a node.
     for (const node of nodes) {
       g.circle(node.position.x, node.position.y, ROAD_INTERSECTION_RADIUS);
-      g.fill({ color: theme.roadColor });
+      g.fill({ color: theme.roadColor, alpha: 0.8 });
+    }
+
+    // ── Glowing dots at edge midpoints (Batch 5 Phase 2 §3.4) ──
+    // A small glowing circle at the midpoint of each edge where road types
+    // transition, adding a "data node" topology feel.
+    for (const edge of edges) {
+      const from = nodeMap.get(edge.fromNodeId);
+      const to = nodeMap.get(edge.toNodeId);
+      if (!from || !to) continue;
+      const type = inferRoadType(from, to);
+      const color = ROAD_TYPE_COLORS[type];
+      const mx = (from.position.x + to.position.x) / 2;
+      const my = (from.position.y + to.position.y) / 2;
+      g.circle(mx, my, 2);
+      g.fill({ color, alpha: 0.9 });
     }
 
     this.graphics = g;

@@ -1,13 +1,14 @@
-import { Application, Container, FillGradient, Graphics } from "pixi.js";
+import { Application, Container, Graphics } from "pixi.js";
 import {
   getCurrentWorldTheme,
   setCurrentWorldTheme,
+  GRID_PARALLAX_FACTOR,
   type WorldTheme,
 } from "../constants";
 import { mockNodes, mockEdges, mockBeing } from "../mock/mockWorld";
 import type { WorldNodeData, WorldEdgeData, DigitalBeingData } from "../types";
 import type { RouteAnimator } from "../path/route-animation";
-import { WorldGrid } from "./WorldGrid";
+import { WorldGrid, type CameraBounds } from "./WorldGrid";
 import { RoadLayer } from "./RoadLayer";
 import { WorkstationNode, buildIconTextureCache, type IconTextureCache } from "./WorkstationNode";
 import { DigitalBeingEntity } from "./DigitalBeingEntity";
@@ -45,9 +46,10 @@ export class WorldApp {
   // viewport child ordering (getChildAt(0) was fragile).
   private gridGraphics?: Graphics;
 
-  // §9.3.3: background gradient layer (bottom-most viewport child). Drawn as a
-  // large rect filled with a vertical FillGradient (light blue → white).
-  private _bgGradient?: Graphics;
+  // Batch 5 Phase 1: set to true after the first explicit app.render() in
+  // mount(). Until then, ParticleLayer startup is deferred so the first frame
+  // paints without waiting for particle/road-light Graphics creation.
+  private _firstFrameDone = false;
 
   // §9.3.1: mouse-follow — a canvas pointermove listener that converts the
   // screen position to world coordinates and feeds it to every being so their
@@ -192,6 +194,26 @@ export class WorldApp {
     this.setupCamera();
     this.setupNodeInteraction();
     this.setupMouseTracking();
+
+    // Batch 5 Phase 1 (§9.5 — load performance): render the first frame
+    // explicitly instead of waiting for the ticker. WebGL shader compilation
+    // happens during init(), so the canvas would otherwise stay blank until
+    // the first tick fires.
+    app.render();
+    this._firstFrameDone = true;
+
+    // Batch 5 Phase 1: defer ParticleLayer startup to after the first frame
+    // so particle/road-light Graphics creation doesn't block initial paint.
+    if (this._particleLayer) {
+      const pw = app.renderer.width / (app.renderer.resolution || 1);
+      const ph = app.renderer.height / (app.renderer.resolution || 1);
+      requestAnimationFrame(() => {
+        if (this._disposed) return;
+        this._particleLayer?.setBounds(pw, ph);
+        this._particleLayer?.setRoads(this._nodes, this._edges);
+        this._particleLayer?.start();
+      });
+    }
   }
 
   /**
@@ -255,6 +277,8 @@ export class WorldApp {
     if (!this.app) return;
     this.app.renderer.resize(width, height);
     this.redrawGrid();
+    // Batch 5 Phase 2: update ambient particle distribution on resize.
+    this._particleLayer?.setBounds(width, height);
   }
 
   destroy() {
@@ -485,6 +509,11 @@ export class WorldApp {
     if (!this.app?.canvas) return;
     const canvas = this.app.canvas as HTMLCanvasElement;
     this.camera = new CameraController(this.viewport, canvas);
+
+    // Batch 5 Phase 1 (§9.5 — infinite canvas): redraw the grid whenever the
+    // viewport moves (drag or zoom) so the visible dot range follows the
+    // camera. Without this, panning past the initial grid area shows blank.
+    this.camera.onViewportMove = () => this.redrawGrid();
 
     // Initial fit
     this.fitWorldToView();
@@ -792,9 +821,6 @@ export class WorldApp {
     this.gridGraphics = undefined;
     this.grid.destroy();
     this.roadLayer.destroy();
-    // §9.3.3: release the background gradient Graphics.
-    this._bgGradient?.destroy();
-    this._bgGradient = undefined;
     for (const c of this.nodeContainers) {
       c.destroy({ children: true });
     }
@@ -825,18 +851,12 @@ export class WorldApp {
   private drawWorld() {
     if (!this.app) return;
 
-    // 0. §9.3.3: background gradient layer (bottom-most). A large rect filled
-    // with a vertical FillGradient (light blue → white) covering the world
-    // bounds with padding so the gradient stays visible while panning.
-    this._bgGradient = this.drawBackgroundGradient();
-    this.viewport.addChild(this._bgGradient);
-
-    // 1. 网格 — large enough to cover expanded world
-    const gridW = Math.max(this.app.renderer.width, 3000);
-    const gridH = Math.max(this.app.renderer.height, 2000);
+    // 1. 网格 — Batch 5 Phase 1: draw only the visible area (plus buffer) so
+    // the canvas behaves as an infinite grid that follows the viewport.
     // C20: keep an explicit reference instead of relying on child order.
-    this.gridGraphics = this.grid.draw(gridW, gridH);
+    this.gridGraphics = this.grid.draw(this.getCameraBounds());
     this.viewport.addChild(this.gridGraphics);
+    this.applyGridParallax();
 
     // 2. 道路
     const roadGfx = this.roadLayer.draw(this._nodes, this._edges);
@@ -883,15 +903,25 @@ export class WorldApp {
     // 5. Task 11: particle effects — working sparks, road flow lights, Zzz.
     //    The getter reads live being positions each frame so particles track
     //    beings during route animations.
+    //    Batch 5 Phase 1: ParticleLayer.setRoads() + start() are deferred to
+    //    after the first frame on initial mount so particle/road-light
+    //    Graphics creation doesn't block the initial paint. On subsequent
+    //    redraws (setData/setTheme) the first frame is already done, so start
+    //    immediately.
     this._particleLayer = new ParticleLayer(this.app.ticker, () =>
       this._beingDataList.map((bd) => {
         const e = this._beings.get(bd.id);
         return { id: bd.id, x: e?.container.x ?? 0, y: e?.container.y ?? 0, status: bd.status };
       }),
     );
-    this._particleLayer.setRoads(this._nodes, this._edges);
-    this._particleLayer.start();
     this.viewport.addChild(this._particleLayer.container);
+    if (this._firstFrameDone) {
+      const w = this.app.renderer.width / (this.app.renderer.resolution || 1);
+      const h = this.app.renderer.height / (this.app.renderer.resolution || 1);
+      this._particleLayer.setBounds(w, h);
+      this._particleLayer.setRoads(this._nodes, this._edges);
+      this._particleLayer.start();
+    }
   }
 
   private redrawGrid() {
@@ -899,53 +929,54 @@ export class WorldApp {
     // C20: operate on the explicit grid reference instead of getChildAt(0),
     // which was fragile and assumed the grid was always the first child.
     const oldGrid = this.gridGraphics;
-    const gridW = Math.max(this.app.renderer.width, 3000);
-    const gridH = Math.max(this.app.renderer.height, 2000);
-    this.gridGraphics = this.grid.draw(gridW, gridH);
+    this.gridGraphics = this.grid.draw(this.getCameraBounds());
     if (oldGrid) {
       this.viewport.removeChild(oldGrid);
       oldGrid.destroy();
     }
-    // §9.3.3: insert the grid just above the background gradient (which must
-    // stay bottom-most). addChildAt(grid, 0) would push the gradient above the
-    // grid, so we move the gradient back to index 0 afterwards.
+    // Batch 5 Phase 1: the background gradient layer has been removed — the
+    // solid `app.renderer.background.color` (set in mount/setTheme) serves as
+    // the base color. The grid is always the bottom-most viewport child.
     this.viewport.addChildAt(this.gridGraphics, 0);
-    if (this._bgGradient) {
-      this.viewport.setChildIndex(this._bgGradient, 0);
-    }
+    // Batch 5 Phase 2: apply parallax offset so the grid moves at 0.92x the
+    // camera speed, adding subtle depth.
+    this.applyGridParallax();
   }
 
   /**
-   * §9.3.3: build the background gradient Graphics. Covers the world bounds
-   * (plus padding) with a vertical linear FillGradient from
-   * theme.canvasBgGradientTop → theme.canvasBgGradientBottom so the canvas
-   * has a soft wash instead of a flat color.
-   *
-   * Task 13 (§9.5.4): gradient endpoints come from the active WorldTheme.
+   * Batch 5 Phase 2 (§9.5 §3.2 — parallax): offset the grid Graphics position
+   * by -8% of the camera position (converted to world space) so the grid
+   * visually lags slightly behind the world objects during panning.
    */
-  private drawBackgroundGradient(): Graphics {
-    const g = new Graphics();
-    const bounds = this.computeWorldBounds();
-    const theme = getCurrentWorldTheme();
-    // Fall back to a default area when there are no nodes (bounds are infinite).
-    const haveBounds = Number.isFinite(bounds.minX) && Number.isFinite(bounds.maxX);
-    const pad = 300;
-    const x0 = haveBounds ? bounds.minX - pad : -pad;
-    const y0 = haveBounds ? bounds.minY - pad : -pad;
-    const w = haveBounds ? (bounds.maxX - bounds.minX) + pad * 2 : 3000 + pad * 2;
-    const h = haveBounds ? (bounds.maxY - bounds.minY) + pad * 2 : 2000 + pad * 2;
-    g.rect(x0, y0, w, h);
-    g.fill(new FillGradient({
-      type: "linear",
-      start: { x: 0, y: 0 },
-      end: { x: 0, y: 1 },
-      colorStops: [
-        { offset: 0, color: theme.canvasBgGradientTop },
-        { offset: 1, color: theme.canvasBgGradientBottom },
-      ],
-      textureSpace: "local",
-    }));
-    return g;
+  private applyGridParallax() {
+    if (!this.gridGraphics) return;
+    const scale = this.viewport.scale.x || 1;
+    this.gridGraphics.x = (-GRID_PARALLAX_FACTOR * this.viewport.x) / scale;
+    this.gridGraphics.y = (-GRID_PARALLAX_FACTOR * this.viewport.y) / scale;
+  }
+
+  /**
+   * Batch 5 Phase 1 (§9.5 — infinite canvas): compute the visible world-space
+   * rectangle from the current camera transform (viewport position + scale +
+   * renderer size). Used by the grid so it only draws dots inside the
+   * viewport plus a small buffer, enabling effectively infinite panning.
+   */
+  private getCameraBounds(): CameraBounds {
+    if (!this.app) {
+      return { minX: 0, minY: 0, maxX: 3000, maxY: 2000 };
+    }
+    const screenW = this.app.renderer.width / (this.app.renderer.resolution || 1);
+    const screenH = this.app.renderer.height / (this.app.renderer.resolution || 1);
+    // viewport.toLocal maps screen-space (CSS) coordinates to world coords
+    // accounting for both position and scale.
+    const topLeft = this.viewport.toLocal({ x: 0, y: 0 });
+    const bottomRight = this.viewport.toLocal({ x: screenW, y: screenH });
+    return {
+      minX: Math.min(topLeft.x, bottomRight.x),
+      minY: Math.min(topLeft.y, bottomRight.y),
+      maxX: Math.max(topLeft.x, bottomRight.x),
+      maxY: Math.max(topLeft.y, bottomRight.y),
+    };
   }
 
   /**

@@ -255,7 +255,7 @@ export function RunDebugPanel({ runId, conversationId, baseUrl = "" }: RunDebugP
     const controller = new AbortController();
     fetchTrace(controller.signal);
     return () => controller.abort();
-  }, [selectedRunId, baseUrl]);
+  }, [fetchTrace]);
 
   // ── Loading ──
   if (loading) {
@@ -460,7 +460,7 @@ export function RunDebugPanel({ runId, conversationId, baseUrl = "" }: RunDebugP
             type="warning"
             showIcon
             icon={<SafetyOutlined />}
-            message={`Safety Events (${safetyEvents.length})`}
+            title={`Safety Events (${safetyEvents.length})`}
             description={
               <List
                 size="small"
@@ -656,7 +656,7 @@ function SpansTab({ spans }: { spans: SpanRecord[] }) {
             </Flex>
           )}
           {s.error && (
-            <Alert type="error" message={s.error} style={{ marginTop: 8 }} />
+            <Alert type="error" title={s.error} style={{ marginTop: 8 }} />
           )}
         </Card>
       );
@@ -753,7 +753,7 @@ function ModelsTab({ modelCalls }: { modelCalls: ModelCallRecord[] }) {
             )}
           </Flex>
           {mc.error != null && (
-            <Alert type="error" message={String(mc.error)} style={{ marginTop: 8 }} />
+            <Alert type="error" title={String(mc.error)} style={{ marginTop: 8 }} />
           )}
         </Card>
       ))}

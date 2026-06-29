@@ -1,10 +1,7 @@
 import {
-  DEEPSEEK_API_KEY_ENV,
   DEFAULT_LLM_BASE_URL,
   DEFAULT_LLM_MODEL,
   LLM_API_KEY_ENV,
-  LLM_BASE_URL_ENV,
-  LLM_MODEL_ENV,
 } from "./llm.config.js";
 import { normalizeBaseUrl, safeResponseText } from "./llm-utils.js";
 import type {
@@ -163,26 +160,6 @@ export class OpenAICompatibleChatProvider implements LlmProvider {
       }
     }
   }
-}
-
-export function createDefaultLlmProvider(
-  env: NodeJS.ProcessEnv = process.env,
-  fetchImpl?: FetchLike,
-): OpenAICompatibleChatProvider {
-  const apiKey = env[LLM_API_KEY_ENV] ?? env[DEEPSEEK_API_KEY_ENV];
-  if (!apiKey) {
-    throw new Error(
-      `${LLM_API_KEY_ENV} or ${DEEPSEEK_API_KEY_ENV} is required.`,
-    );
-  }
-  return new OpenAICompatibleChatProvider(
-    {
-      apiKey,
-      baseUrl: env[LLM_BASE_URL_ENV] ?? DEFAULT_LLM_BASE_URL,
-      model: env[LLM_MODEL_ENV] ?? DEFAULT_LLM_MODEL,
-    },
-    fetchImpl,
-  );
 }
 
 async function* parseOpenAIStream(

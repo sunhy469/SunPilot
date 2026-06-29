@@ -11,7 +11,7 @@ export function ErrorMessageCard({
     <Alert
       type="error"
       showIcon
-      message="请求失败"
+      title="请求失败"
       description={message}
       action={
         onRetry ? (

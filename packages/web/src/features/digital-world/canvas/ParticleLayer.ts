@@ -1,10 +1,15 @@
 import { Container, Graphics, Text, Ticker } from "pixi.js";
 import type { WorldNodeData, WorldEdgeData } from "../types";
+import { ROAD_TYPE_COLORS, type RoadType } from "../constants";
 
 // Task 11 (§9.3.4): particle effects.
 //  - working/publishing beings emit rising sparks above their head
 //  - sleeping beings emit floating "z" characters
 //  - roads carry flowing light points indicating data flow
+//
+// Batch 5 Phase 2 (§3.4 + §3.6):
+//  - road flow lights colored by road type (cyan/purple/amber)
+//  - ambient particles: very sparse, slow-rising dots for "data space" depth
 
 interface BeingSnapshot {
   id: string;
@@ -29,28 +34,62 @@ interface RoadLight {
   toY: number;
   progress: number; // 0..1 along the edge
   speed: number;
+  color: number;
+}
+
+interface AmbientParticle {
+  gfx: Graphics;
+  x: number;
+  y: number;
+  vy: number;
+  alpha: number;
+  alphaPhase: number;
 }
 
 const WORKING_PARTICLE_INTERVAL = 18; // frames between spark spawns per working being
 const ZZZ_INTERVAL = 55;
 const MAX_PARTICLES = 90;
-// Being anchor is at the feet (y=0); head sits around y=-55, so particles
-// spawn just above the head.
-const HEAD_OFFSET_Y = -58;
+const MAX_AMBIENT = 40;
+// Batch 5 Phase 4: geometric core floats at y=-28 with radius 16, so the top
+// is at y=-44. Sparks spawn just above the core.
+const HEAD_OFFSET_Y = -48;
+
+// Node types that indicate each road type (mirrors RoadLayer's inference).
+const PRODUCT_NODE_TYPES = new Set([
+  "video_workstation",
+  "artifact_box",
+  "tiktok_station",
+]);
+const DATA_NODE_TYPES = new Set(["material_library"]);
+
+function inferRoadType(from: WorldNodeData, to: WorldNodeData): RoadType {
+  if (DATA_NODE_TYPES.has(from.type) || DATA_NODE_TYPES.has(to.type)) return "data";
+  if (PRODUCT_NODE_TYPES.has(from.type) || PRODUCT_NODE_TYPES.has(to.type)) return "product";
+  return "control";
+}
 
 export class ParticleLayer {
   readonly container: Container;
 
   private particles: Particle[] = [];
   private roadLights: RoadLight[] = [];
+  private ambientParticles: AmbientParticle[] = [];
   private spawnCounters = new Map<string, number>();
   private callback: ((ticker: Ticker) => void) | null = null;
+  private ambientCallback: ((ticker: Ticker) => void) | null = null;
+  private _bounds: { width: number; height: number } = { width: 1200, height: 800 };
 
   constructor(
     private readonly ticker: Ticker,
     private readonly getBeings: () => BeingSnapshot[],
   ) {
     this.container = new Container();
+  }
+
+  /** Set the canvas bounds for ambient particle distribution. */
+  setBounds(width: number, height: number) {
+    this._bounds = { width, height };
+    this.initAmbient();
   }
 
   /** (Re)build the road flow lights from the current node/edge set. */
@@ -63,9 +102,11 @@ export class ParticleLayer {
       const from = nodeMap.get(edge.fromNodeId);
       const to = nodeMap.get(edge.toNodeId);
       if (!from || !to) continue;
+      const type = inferRoadType(from, to);
+      const color = ROAD_TYPE_COLORS[type];
       const gfx = new Graphics();
-      gfx.circle(0, 0, 2.2);
-      gfx.fill({ color: 0xfde68a, alpha: 0.9 });
+      gfx.circle(0, 0, 2.5);
+      gfx.fill({ color, alpha: 0.9 });
       this.container.addChild(gfx);
       this.roadLights.push({
         gfx,
@@ -75,6 +116,29 @@ export class ParticleLayer {
         toY: to.position.y,
         progress: Math.random(),
         speed: 0.004 + Math.random() * 0.003,
+        color,
+      });
+    }
+  }
+
+  /** Initialize ambient particles (sparse, slow-rising dots). */
+  private initAmbient() {
+    for (const ap of this.ambientParticles) ap.gfx.destroy();
+    this.ambientParticles = [];
+
+    const count = Math.min(MAX_AMBIENT, Math.floor((this._bounds.width * this._bounds.height) / 30000));
+    for (let i = 0; i < count; i++) {
+      const gfx = new Graphics();
+      gfx.circle(0, 0, 0.8 + Math.random() * 0.6);
+      gfx.fill({ color: 0x6b7c99, alpha: 0.2 + Math.random() * 0.15 });
+      this.container.addChildAt(gfx, 0);
+      this.ambientParticles.push({
+        gfx,
+        x: Math.random() * this._bounds.width,
+        y: Math.random() * this._bounds.height,
+        vy: -(0.08 + Math.random() * 0.06),
+        alpha: 0.15 + Math.random() * 0.15,
+        alphaPhase: Math.random() * Math.PI * 2,
       });
     }
   }
@@ -126,10 +190,24 @@ export class ParticleLayer {
       rl.gfx.y = rl.fromY + (rl.toY - rl.fromY) * rl.progress;
       rl.gfx.alpha = 0.35 + Math.sin(rl.progress * Math.PI) * 0.5;
     }
+
+    // Advance ambient particles (slow upward drift + alpha pulsing).
+    for (const ap of this.ambientParticles) {
+      ap.y += ap.vy * dt;
+      ap.alphaPhase += 0.02 * dt;
+      if (ap.y < -10) {
+        ap.y = this._bounds.height + 10;
+        ap.x = Math.random() * this._bounds.width;
+      }
+      ap.gfx.x = ap.x;
+      ap.gfx.y = ap.y;
+      ap.gfx.alpha = ap.alpha + Math.sin(ap.alphaPhase) * 0.05;
+    }
   }
 
   private spawnWorkingSpark(x: number, y: number) {
-    const palette = [0xfbbf24, 0xf59e0b, 0xfde68a];
+    // Batch 5 Phase 4: cyan sparks match the geometric core's working color.
+    const palette = [0x06b6d4, 0x22d3ee, 0x67e8f9];
     const color = palette[Math.floor(Math.random() * palette.length)]!;
     const gfx = new Graphics();
     gfx.circle(0, 0, 1.6 + Math.random() * 1.2);
@@ -176,10 +254,16 @@ export class ParticleLayer {
       this.ticker.remove(this.callback);
       this.callback = null;
     }
+    if (this.ambientCallback) {
+      this.ticker.remove(this.ambientCallback);
+      this.ambientCallback = null;
+    }
     for (const p of this.particles) p.gfx.destroy();
     this.particles = [];
     for (const rl of this.roadLights) rl.gfx.destroy();
     this.roadLights = [];
+    for (const ap of this.ambientParticles) ap.gfx.destroy();
+    this.ambientParticles = [];
     this.spawnCounters.clear();
     this.container.destroy({ children: false });
   }

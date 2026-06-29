@@ -155,7 +155,7 @@ export function RecentConversations({
     });
   };
 
-  const renderConv = (conv: Conversation) => {
+  const renderConv = (conv: Conversation, keyPrefix: string) => {
     const isActive = active && conv.id === activeConversationId;
     const title = conversationTitle(conv.title) || "未命名";
 
@@ -182,7 +182,7 @@ export function RecentConversations({
 
     return (
       <Flex
-        key={conv.id}
+        key={`${keyPrefix}:${conv.id}`}
         justify="space-between"
         align="center"
         className={`recent-item-wrap${isActive ? " recent-item-wrap--active" : ""}`}
@@ -226,7 +226,7 @@ export function RecentConversations({
             onToggle={() => setProjectsExpanded((v) => !v)}
           />
           {projectsExpanded &&
-            projectConversations.slice(0, 10).map(renderConv)}
+            projectConversations.slice(0, 10).map((conv) => renderConv(conv, "project"))}
         </>
       )}
 
@@ -251,7 +251,7 @@ export function RecentConversations({
                   <Text className="recent-time-group__label">
                     {getTimeGroupLabel(group as TimeGroup)}
                   </Text>
-                  {convs.map(renderConv)}
+                  {convs.map((conv) => renderConv(conv, group))}
                 </Flex>
               );
             })}
@@ -269,7 +269,7 @@ export function RecentConversations({
         }}
         okText="确定"
         cancelText="取消"
-        destroyOnClose
+        destroyOnHidden
       >
         <Input
           value={renameValue}

@@ -1,3 +1,4 @@
+import { Fragment } from "react";
 import { Progress, Typography, Tooltip } from "antd";
 import type {
   BarChartCardData,
@@ -41,7 +42,11 @@ export function BarChartCard({
           <div key={`${item.label}-${idx}`} className="rich-bars__row">
             <Text className="rich-bars__label">{item.label}</Text>
             <Progress
-              percent={Math.min(100, (item.value / max) * 100)}
+              percent={
+                Number.isFinite(item.value) && Number.isFinite(max) && max > 0
+                  ? Math.min(100, (item.value / max) * 100)
+                  : 0
+              }
               strokeColor={item.color ?? CHART_COLORS[idx % CHART_COLORS.length]}
               size="small"
               showInfo={false}
@@ -482,8 +487,8 @@ export function HeatmapCard({
           ))}
           {/* Data rows */}
           {data.rows.map((rowLabel, ri) => (
-            <>
-              <Text key={`row-${ri}`} type="secondary" style={{ fontSize: 11, paddingRight: 6, whiteSpace: "nowrap" }}>{rowLabel}</Text>
+            <Fragment key={`row-${ri}`}>
+              <Text type="secondary" style={{ fontSize: 11, paddingRight: 6, whiteSpace: "nowrap" }}>{rowLabel}</Text>
               {data.columns.map((_, ci) => {
                 const cell = cellMap.get(`${ri}-${ci}`);
                 const ratio = cell ? (cell.value - minVal) / range : 0;
@@ -507,7 +512,7 @@ export function HeatmapCard({
                   </Tooltip>
                 );
               })}
-            </>
+            </Fragment>
           ))}
         </div>
       </div>

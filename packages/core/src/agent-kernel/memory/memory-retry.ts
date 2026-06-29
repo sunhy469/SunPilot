@@ -26,7 +26,8 @@ const DEFAULT_BASE_DELAY_MS = 500;
  * On failure, retries up to `maxRetries` times with exponential backoff
  * (500ms → 1000ms). If all attempts fail, returns a partial result with
  * the successfully written records (empty if none) and emits an
- * `agent.memory.write_failed` event so the issue is surfaced.
+ * `agent.error` event (category: "memory") so the issue is surfaced
+ * through the standard protocol event vocabulary.
  */
 export class MemoryRetryWrapper implements MemoryWriter {
   private readonly config: Required<MemoryRetryConfig>;
@@ -85,15 +86,24 @@ export class MemoryRetryWrapper implements MemoryWriter {
       }
     }
 
-    // All retries exhausted — emit diagnostic event and return partial
+    // All retries exhausted — emit agent.error (category: "memory") so the
+    // issue surfaces through the standard protocol event vocabulary. This
+    // replaces the previous non-protocol "agent.memory.write_failed" event.
     const errorMessage =
       lastError instanceof Error ? lastError.message : String(lastError);
-    this.eventBus.emit("agent.memory.write_failed" as any, {
-      code: "AGENT_MEMORY_WRITE_FAILED",
-      message: `Memory write failed after ${this.config.maxRetries + 1} attempts: ${errorMessage}`,
-      category: "memory",
-      retryable: false,
-    } as any, {} as any);
+    const runId = input.input?.runId;
+    const conversationId = input.input?.conversationId;
+    this.eventBus.emit(
+      "agent.error",
+      {
+        runId,
+        code: "AGENT_MEMORY_WRITE_FAILED",
+        message: `Memory write failed after ${this.config.maxRetries + 1} attempts: ${errorMessage}`,
+        category: "memory",
+        retryable: false,
+      },
+      { runId, conversationId },
+    );
 
     return lastPartial ?? { written: [], rejected: [], superseded: [] };
   }

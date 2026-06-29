@@ -175,7 +175,7 @@ export class PostgresMemoryRepository implements MemoryRepository {
       : -1;
 
     const semanticSql = hasEmbedding
-      ? `(1 - (embedding <=> $${embeddingParamIndex}::vector)) * 0.45`
+      ? `COALESCE((1 - (embedding <=> $${embeddingParamIndex}::vector)) * 0.45, 0)`
       : `0`;
     const keywordSql = hasQuery
       ? `(
@@ -212,11 +212,14 @@ export class PostgresMemoryRepository implements MemoryRepository {
     const scoreSql = `(${keywordSql} + ${semanticSql} + ${qualitySql})`;
 
     // ── Query filtering ─────────────────────────────────────────────
-    // When a text query is provided, ILIKE acts as a pre-filter for
-    // lexical relevance. When ONLY embedding is provided (pure vector
-    // recall), skip the ILIKE constraint so semantic results surface.
-    // When embedding is available alongside a query, use hybrid: ILIKE
-    // pre-filters the candidate set but vector score still contributes.
+    // Two-path candidate union: when BOTH query and embedding are present,
+    // we do NOT apply a hard ILIKE pre-filter. Instead, the hybrid score
+    // (keyword + semantic + quality) handles ranking. Records that match
+    // lexically get the keyword boost; records that match semantically get
+    // the vector boost. This prevents pure-semantic matches from being
+    // excluded when they don't share exact keywords with the query.
+    // When ONLY a text query is present (no embedding), ILIKE pre-filter
+    // is still applied to keep the candidate set bounded.
     const params: unknown[] = [...values];
     let queryClause = where;
 
@@ -225,10 +228,14 @@ export class PostgresMemoryRepository implements MemoryRepository {
     }
     if (hasQuery) {
       params.push(escapedQuery);
-      queryClause = `${where ? `${where} AND` : "WHERE"} (title ILIKE '%' || $${queryParamIndex} || '%' ESCAPE '\\' OR summary ILIKE '%' || $${queryParamIndex} || '%' ESCAPE '\\' OR content ILIKE '%' || $${queryParamIndex} || '%' ESCAPE '\\' OR key ILIKE '%' || $${queryParamIndex} || '%' ESCAPE '\\' OR value::text ILIKE '%' || $${queryParamIndex} || '%' ESCAPE '\\')`;
+      // Only apply ILIKE pre-filter when there's no embedding (pure lexical
+      // search). When embedding is present, let hybrid scoring rank all
+      // candidates — the keyword component already contributes 0 for
+      // non-matching records, so they sort lower but aren't excluded.
+      if (!hasEmbedding) {
+        queryClause = `${where ? `${where} AND` : "WHERE"} (title ILIKE '%' || $${queryParamIndex} || '%' ESCAPE '\\' OR summary ILIKE '%' || $${queryParamIndex} || '%' ESCAPE '\\' OR content ILIKE '%' || $${queryParamIndex} || '%' ESCAPE '\\' OR key ILIKE '%' || $${queryParamIndex} || '%' ESCAPE '\\' OR value::text ILIKE '%' || $${queryParamIndex} || '%' ESCAPE '\\')`;
+      }
     }
-    // When only embedding (no text query), no ILIKE pre-filter —
-    // pure vector recall based on cosine similarity.
 
     // Push scope boost bind parameters (if any)
     if (stepIdParamIdx > 0) {
@@ -257,7 +264,7 @@ export class PostgresMemoryRepository implements MemoryRepository {
       `SELECT ${MEMORY_COLUMNS}, ${scoreSql} AS score, ${relevanceSql} AS relevance
        FROM memory_metadata
        ${queryClause}
-       ORDER BY score DESC, updated_at DESC
+       ORDER BY score DESC NULLS LAST, updated_at DESC
        LIMIT $${params.length}`,
       params,
     );

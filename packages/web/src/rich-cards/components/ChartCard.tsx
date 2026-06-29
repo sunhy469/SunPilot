@@ -35,7 +35,11 @@ export function ChartCard({
             <div key={item.label} className="rich-bars__row">
               <Text className="rich-bars__label">{item.label}</Text>
               <Progress
-                percent={Math.min(100, (item.value / total) * 100)}
+                percent={
+                  Number.isFinite(item.value) && Number.isFinite(total) && total > 0
+                    ? Math.min(100, (item.value / total) * 100)
+                    : 0
+                }
                 strokeColor={item.color ?? "#1f7aff"}
                 size="small"
                 showInfo={false}

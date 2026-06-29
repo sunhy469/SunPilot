@@ -131,6 +131,9 @@ export function StatusPanel({ open, beingId, onClose }: StatusPanelProps) {
   }, [open, beingId, request]);
 
   // ── Derived stats ──
+  // todayRef recomputes when the panel reopens or the being changes so the
+  // "today" boundary reflects the current view rather than the first mount.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   const todayRef = useMemo(() => new Date(), [open, beingId]);
 
   const completedToday = useMemo(() => {

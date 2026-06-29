@@ -88,7 +88,7 @@ export const listAuditLogsQuerySchema = z.object({
 export const uploadPresignBodySchema = z.object({
   fileName: z.string().min(1, "fileName is required"),
   contentType: z.string().default("application/octet-stream"),
-  sizeBytes: z.number().positive().optional(),
+  sizeBytes: z.number().positive("sizeBytes must be a positive number"),
 });
 
 export const updateConversationBodySchema = z.object({

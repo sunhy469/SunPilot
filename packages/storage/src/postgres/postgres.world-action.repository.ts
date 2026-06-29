@@ -85,6 +85,20 @@ export class PostgresWorldActionRepository implements WorldActionRepository {
     return result.rows.map(mapAction);
   }
 
+  async findByAgentRunId(runId: string): Promise<WorldActionRecord | null> {
+    // Uses idx_world_actions_agent_run (agent_run_id). Filtering by
+    // status = 'running' narrows to the single in-flight action that owns
+    // the run — completed runs leave the column set but status != 'running'.
+    const result = await this.pool.query(
+      `SELECT ${ACTION_COLUMNS} FROM world_actions
+       WHERE agent_run_id = $1 AND status = 'running'
+       LIMIT 1`,
+      [runId],
+    );
+    if (result.rows.length === 0) return null;
+    return mapAction(result.rows[0]);
+  }
+
   async update(id: string, patch: UpdateWorldActionPatch): Promise<WorldActionRecord | null> {
     const sets: string[] = [];
     const values: unknown[] = [];

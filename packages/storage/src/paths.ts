@@ -21,14 +21,18 @@ export interface SunPilotConfig {
   version: 1;
   server: {
     host: "127.0.0.1";
+    /** Used at daemon startup unless overridden by SUNPILOT_PORT or --port. */
     port: number;
   };
   security: {
+    /** Used at daemon startup unless SUNPILOT_DISABLE_TOKEN_AUTH is explicit. */
     requireLocalToken: boolean;
     allowLan: false;
   };
   skills: {
+    /** Absolute paths, or paths relative to SUNPILOT_HOME. */
     directories: string[];
+    /** Watch configured directories and reload registry changes. */
     autoReload: boolean;
   };
   storage: {
@@ -80,14 +84,15 @@ export function writeSunPilotConfig(config: SunPilotConfig, paths = getSunPilotP
 
 export function updateSunPilotConfig(patch: Partial<SunPilotConfig>, paths = getSunPilotPaths()): SunPilotConfig {
   const current = readSunPilotConfig(paths);
+  const safePatch = patch && typeof patch === "object" && !Array.isArray(patch) ? patch : {};
   return writeSunPilotConfig(
     {
       ...current,
-      ...patch,
-      server: { ...current.server, ...patch.server },
-      security: { ...current.security, ...patch.security },
-      skills: { ...current.skills, ...patch.skills },
-      storage: { ...current.storage, ...patch.storage }
+      ...safePatch,
+      server: { ...current.server, ...safePatch.server, host: "127.0.0.1" },
+      security: { ...current.security, ...safePatch.security, allowLan: false },
+      skills: { ...current.skills, ...safePatch.skills },
+      storage: { ...current.storage, ...safePatch.storage, home: paths.home }
     },
     paths
   );
@@ -151,7 +156,9 @@ function normalizeSunPilotConfig(input: Partial<SunPilotConfig>, paths: SunPilot
 }
 
 function positiveInteger(value: number | undefined, fallback: number): number {
-  return typeof value === "number" && Number.isInteger(value) && value > 0 ? value : fallback;
+  return typeof value === "number" && Number.isInteger(value) && value > 0 && value <= 65_535
+    ? value
+    : fallback;
 }
 
 function stringArray(value: string[] | undefined, fallback: string[]): string[] {

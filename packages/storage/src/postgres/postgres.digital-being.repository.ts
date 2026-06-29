@@ -131,6 +131,8 @@ export class PostgresDigitalBeingRepository implements DigitalBeingRepository {
 
     for (const [column, value] of Object.entries(fields)) {
       if (value !== undefined) {
+        // `null` is an explicit clear → written as SQL NULL.
+        // `undefined` (field absent) is skipped entirely.
         sets.push(`${column} = $${idx}`);
         values.push(value);
         idx++;

@@ -190,7 +190,7 @@ export function SettingsPage() {
         {error && (
           <Alert
             type="error"
-            message={error}
+            title={error}
             closable
             onClose={() => setError(null)}
             style={{ marginBottom: 16 }}

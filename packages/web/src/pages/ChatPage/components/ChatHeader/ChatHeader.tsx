@@ -131,7 +131,7 @@ export function ChatHeader({
         onCancel={handleRenameCancel}
         okText="确定"
         cancelText="取消"
-        destroyOnClose
+        destroyOnHidden
       >
         <Input
           value={renameValue}

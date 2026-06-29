@@ -353,7 +353,7 @@ export function useChat(
         return;
       }
     },
-    [conversationId, setConversationId, setMessages, setError],
+    [conversationId, setConversationId, setMessages, setError, finishActiveRun],
   );
 
   const appendAssistantActivity = useCallback(
@@ -762,8 +762,8 @@ export function useChat(
     appendAssistantActivity,
     applyAgentEvent,
     finishActiveRun,
+    clearResponseTimer,
     markRunActive,
-    conversationId,
     setConversationId,
     setMessages,
     setPendingState,
@@ -906,7 +906,6 @@ export function useChat(
     [
       conversationId,
       ensureSocket,
-      pending,
       setMessages,
       setPendingState,
       startResponseTimer,

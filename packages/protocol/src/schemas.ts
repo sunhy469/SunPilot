@@ -48,6 +48,6 @@ export const skillManifestSchema = z.object({
       }),
     )
     .min(1),
-  permissions: permissionDeclarationSchema
+  permissions: permissionDeclarationSchema,
+  trust: z.enum(["local-trusted", "isolated"]).default("isolated")
 });
-

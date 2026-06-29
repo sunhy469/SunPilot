@@ -11,6 +11,7 @@ import { ArtifactBoxPanel } from "./components/ArtifactBoxPanel";
 import { BeingChatPanel } from "./components/BeingChatPanel";
 import { StatusPanel } from "./components/StatusPanel";
 import { ActionLogPanel } from "./components/ActionLogPanel";
+import { CreateFirstBeing } from "./components/CreateFirstBeing";
 import { createRequest } from "../../shared/api/client";
 import { endpoints } from "../../shared/api/endpoints";
 import "./DigitalWorld.scss";
@@ -27,7 +28,11 @@ const NODE_PANEL_MAP: Record<string, "artifacts" | "tasks" | "status" | "chat"> 
 
 export function DigitalWorld() {
   const canvasHostRef = useRef<HTMLDivElement | null>(null);
-  const { nodes, edges, being, beings, loaded, isMock } = useDigitalWorldBootstrap();
+  // refreshKey is incremented after a being is created to trigger a re-fetch
+  // of the world state, transitioning from the creation guide to normal view.
+  const [refreshKey, setRefreshKey] = useState(0);
+  const { nodes, edges, being, beings, loaded, isMock, error, needsBeing } =
+    useDigitalWorldBootstrap(refreshKey);
   const [taskPanelOpen, setTaskPanelOpen] = useState(false);
   const [artifactPanelOpen, setArtifactPanelOpen] = useState(false);
   const [chatPanelOpen, setChatPanelOpen] = useState(false);
@@ -75,19 +80,19 @@ export function DigitalWorld() {
   }, [worldRef, loaded]);
 
   const handleWakeSleep = useCallback(async () => {
-    if (!being?.id) return;
+    if (!activeBeing?.id) return;
     try {
-      if (being.status === "sleeping") {
-        await request(endpoints.digitalBeingWake(being.id), { method: "POST" });
+      if (activeBeing.status === "sleeping") {
+        await request(endpoints.digitalBeingWake(activeBeing.id), { method: "POST" });
         message.success("已唤醒数字生命");
       } else {
-        await request(endpoints.digitalBeingSleep(being.id), { method: "POST", body: JSON.stringify({ reason: "manual" }) });
+        await request(endpoints.digitalBeingSleep(activeBeing.id), { method: "POST", body: JSON.stringify({ reason: "manual" }) });
         message.success("数字生命已休眠");
       }
     } catch {
       message.error("操作失败");
     }
-  }, [being, request]);
+  }, [activeBeing, request]);
 
   const handleDockAction = useCallback((key: string) => {
     switch (key) {
@@ -175,10 +180,13 @@ export function DigitalWorld() {
     };
 
     window.addEventListener("keydown", onKeyDown);
+    // Capture the current world instance at effect setup time — by the time
+    // cleanup runs the ref may have been reassigned (or null during unmount).
+    const worldAtSetup = worldRef.current;
     return () => {
       window.removeEventListener("keydown", onKeyDown);
       // Ensure animations are running when the component unmounts.
-      worldRef.current?.setAnimationPaused(false);
+      worldAtSetup?.setAnimationPaused(false);
     };
   }, [worldRef, triggerMoveTo]);
 
@@ -197,8 +205,24 @@ export function DigitalWorld() {
   return (
     <section className="digital-world">
       <div ref={canvasHostRef} className="digital-world__canvas-host" />
+      {needsBeing && loaded && !isMock && (
+        <CreateFirstBeing
+          nodes={nodes}
+          request={request}
+          onCreated={() => setRefreshKey((k) => k + 1)}
+        />
+      )}
+      {!loaded && (
+        <div className="digital-world__loading">
+          <div className="digital-world__loading-spinner" />
+          <span className="digital-world__loading-text">正在加载数字世界…</span>
+        </div>
+      )}
       {isMock && loaded && (
         <div className="digital-world__mock-badge">DEV MOCK</div>
+      )}
+      {error && loaded && !isMock && (
+        <div className="digital-world__error-banner">{error}</div>
       )}
       <WorldFloatingDock
         onAction={handleDockAction}

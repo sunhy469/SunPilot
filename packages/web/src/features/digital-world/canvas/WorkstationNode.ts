@@ -1,4 +1,4 @@
-import { Container, FillGradient, Graphics, Sprite, Ticker, Text, Texture } from "pixi.js";
+import { Container, Graphics, Sprite, Ticker, Text, Texture } from "pixi.js";
 import { NODE_BORDER_RADIUS, getCurrentWorldTheme } from "../constants";
 import type { WorldNodeData } from "../types";
 
@@ -305,11 +305,13 @@ export class WorkstationNode {
     // Task 13 (§9.5.4): card bg + label text color follow the active theme.
     const theme = getCurrentWorldTheme();
 
+    // Batch 5 Phase 2 (§3.3): hexagon shape — flat-top regular polygon.
+    const hexRadius = Math.min(w, h) / 2 * 0.9;
+    const hexRotation = Math.PI / 6; // flat-top
+
     // ── Drop shadow (stays at base, does NOT lift with the card) ──
-    // Drawn as a slightly offset, semi-transparent rounded rect for a soft
-    // shadow look without the cost of a blur filter.
     const shadow = new Graphics();
-    shadow.roundRect(-w / 2 + 1, -h / 2 + 3, w, h, NODE_BORDER_RADIUS);
+    shadow.regularPoly(0, 3, hexRadius, 6, hexRotation);
     shadow.fill({ color: 0x000000, alpha: SHADOW_BASE_ALPHA });
     container.addChild(shadow);
 
@@ -317,32 +319,11 @@ export class WorkstationNode {
     const card = new Container();
     container.addChild(card);
 
-    // ── Background card with rounded corners ──
+    // ── Background hexagon ──
     const bg = new Graphics();
-    bg.roundRect(-w / 2, -h / 2, w, h, NODE_BORDER_RADIUS);
+    bg.regularPoly(0, 0, hexRadius, 6, hexRotation);
     bg.fill({ color: theme.nodeBg });
     card.addChild(bg);
-
-    // ── Top gradient bar (accent → white, horizontal sweep) ──
-    const topBarH = 4;
-    const topBar = new Graphics();
-    topBar.roundRect(-w / 2, -h / 2, w, topBarH, NODE_BORDER_RADIUS);
-    topBar.fill(new FillGradient({
-      type: "linear",
-      start: { x: 0, y: 0 },
-      end: { x: 1, y: 0 },
-      colorStops: [
-        { offset: 0, color: accent },
-        { offset: 1, color: 0xffffff },
-      ],
-    }));
-    card.addChild(topBar);
-
-    // ── Accent side stripe (left edge, below top bar) ──
-    const stripe = new Graphics();
-    stripe.roundRect(-w / 2, -h / 2 + topBarH, 4, h - topBarH, 2);
-    stripe.fill({ color: accent, alpha: 0.85 });
-    card.addChild(stripe);
 
     // ── Icon glow (soft radial halo behind icon) ──
     const iconCx = 0;
@@ -356,8 +337,6 @@ export class WorkstationNode {
     // ── Type-specific icon (cached Sprite or Graphics fallback) ──
     const cachedTexture = iconTextures?.get(node.type);
     if (cachedTexture) {
-      // Reuse the pre-rendered Texture via a Sprite instead of rebuilding
-      // Graphics commands every frame.
       const iconSprite = new Sprite(cachedTexture);
       iconSprite.anchor.set(0.5);
       iconSprite.x = iconCx;
@@ -365,7 +344,6 @@ export class WorkstationNode {
       iconSprite.scale.set(iconSize / ICON_TEXTURE_REFERENCE_SIZE);
       card.addChild(iconSprite);
     } else {
-      // Fallback: rebuild Graphics (e.g. before textures are generated).
       const iconGfx = new Graphics();
       const drawer = ICON_DRAWERS[node.type];
       if (drawer) {
@@ -374,47 +352,66 @@ export class WorkstationNode {
       card.addChild(iconGfx);
     }
 
-    // ── Name label (12px system font, improved contrast) ──
+    // ── Name label (13px, font-weight 600, letter-spacing 0.5px) ──
     const label = new Text({
       text: node.name,
       style: {
         fill: theme.textColor,
-        fontSize: 12,
+        fontSize: 13,
         fontFamily: "system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif",
         fontWeight: "600",
+        letterSpacing: 0.5,
       },
     });
     label.anchor.set(0.5);
     label.y = h / 2 - 14;
     card.addChild(label);
 
-    // ── Status indicator (top-right) with pulse animation ──
-    // Drawn as a child Container so we can scale-pulse it independently.
-    const statusLight = new Graphics();
-    const slx = w / 2 - 10;
-    const sly = -h / 2 + 10;
-    // Outer glow halo
-    statusLight.circle(slx, sly, 5);
-    statusLight.fill({ color: statusColor, alpha: 0.2 });
-    // Core dot
-    statusLight.circle(slx, sly, 3);
-    statusLight.fill({ color: statusColor });
-    // Highlight glint
-    statusLight.circle(slx - 0.8, sly - 0.8, 1);
-    statusLight.fill({ color: 0xffffff, alpha: 0.7 });
-    card.addChild(statusLight);
+    // ── Status ring glow (Batch 5 Phase 2 §3.3) ──
+    // Replaces the top-right dot with a full-ring glow line around the
+    // hexagon. Active nodes have a breathing alpha animation.
+    const statusRing = new Graphics();
+    statusRing.regularPoly(0, 0, hexRadius + 2, 6, hexRotation);
+    statusRing.stroke({ color: statusColor, width: 2, alpha: 0.6 });
+    card.addChild(statusRing);
 
-    // ── Border overlays (normal + hover highlight) ──
+    // ── Accent border ──
     const border = new Graphics();
-    border.roundRect(-w / 2, -h / 2, w, h, NODE_BORDER_RADIUS);
-    border.stroke({ color: 0xe5e7eb, width: 1.5 });
+    border.regularPoly(0, 0, hexRadius, 6, hexRotation);
+    border.stroke({ color: theme.nodeBorder, width: 1.5 });
     card.addChild(border);
 
     const hoverBorder = new Graphics();
-    hoverBorder.roundRect(-w / 2, -h / 2, w, h, NODE_BORDER_RADIUS);
+    hoverBorder.regularPoly(0, 0, hexRadius, 6, hexRotation);
     hoverBorder.stroke({ color: accent, width: 2 });
     hoverBorder.alpha = 0;
     card.addChild(hoverBorder);
+
+    // ── Data bar indicator (Batch 5 Phase 2 §3.3) ──
+    // Small bar chart below the hexagon — decorative "data throughput" bars.
+    const dataBarY = hexRadius + 6;
+    const dataBarCount = 5;
+    const dataBarW = 4;
+    const dataBarGap = 2;
+    const dataBarMaxH = 10;
+    const dataBars: Graphics[] = [];
+    const dataBarContainer = new Container();
+    dataBarContainer.y = dataBarY;
+    card.addChild(dataBarContainer);
+    const totalDataBarW = dataBarCount * dataBarW + (dataBarCount - 1) * dataBarGap;
+    for (let i = 0; i < dataBarCount; i++) {
+      const bar = new Graphics();
+      const bh = 3 + Math.random() * (dataBarMaxH - 3);
+      bar.rect(
+        -totalDataBarW / 2 + i * (dataBarW + dataBarGap),
+        -bh,
+        dataBarW,
+        bh,
+      );
+      bar.fill({ color: accent, alpha: 0.5 });
+      dataBarContainer.addChild(bar);
+      dataBars.push(bar);
+    }
 
     // ── Hover + pulse animation (self-cleaning via "destroyed" event) ──
     let hoverAmount = 0;       // current animated hover (0..1)
@@ -435,15 +432,13 @@ export class WorkstationNode {
       border.alpha = 1 - hoverAmount * 0.5;
       hoverBorder.alpha = hoverAmount;
 
-      // Status-light pulse (scale + alpha oscillation)
+      // Status ring breathing glow (Batch 5 Phase 2 §3.3)
       pulseFrame++;
       const pulse = Math.sin(pulseFrame * PULSE_SPEED);
-      statusLight.scale.set(1 + pulse * PULSE_AMPLITUDE);
-      statusLight.alpha = 0.85 + pulse * 0.15;
+      statusRing.alpha = 0.4 + pulse * 0.3;
+      statusRing.scale.set(1 + pulse * 0.02);
     };
     Ticker.shared.add(animate);
-    // Clean up the ticker callback when the container is destroyed so
-    // animations don't leak across redraws / teardown.
     container.on("destroyed", () => {
       Ticker.shared.remove(animate);
     });

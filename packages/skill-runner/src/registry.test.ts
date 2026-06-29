@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
@@ -43,6 +43,7 @@ function writeSkill(root: string, overrides: Record<string, unknown> = {}) {
           }
         ],
         permissions: {},
+        trust: "local-trusted",
         ...overrides
       },
       null,
@@ -124,5 +125,24 @@ describe("SkillRegistry manifest path hardening", () => {
         expect.objectContaining({ action: "skill.load", target: "test.good-skill" })
       ])
     );
+  });
+
+  test("rejects symlink escapes and locks package contents until reload", async () => {
+    const skillRoot = join(home, "skills", "locked-skill");
+    writeSkill(skillRoot);
+    const registry = new SkillRegistry(registryStore(), [join(home, "skills")]);
+    const [skill] = await registry.reload();
+    expect(skill).toBeDefined();
+    expect(() => registry.verifyIntegrity(skill!)).not.toThrow();
+
+    writeFileSync(join(skillRoot, "dist", "index.js"), "export default { changed: true };\n");
+    expect(() => registry.verifyIntegrity(skill!)).toThrow("changed after registry load");
+
+    await registry.reload();
+    unlinkSync(join(skillRoot, "dist", "index.js"));
+    const outside = join(home, "outside.js");
+    writeFileSync(outside, "export default {};\n");
+    symlinkSync(outside, join(skillRoot, "dist", "index.js"));
+    await expect(registry.reload()).resolves.toEqual([]);
   });
 });

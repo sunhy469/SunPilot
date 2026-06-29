@@ -2,7 +2,7 @@ import { type ReactNode, useMemo } from "react";
 import { Typography } from "antd";
 import type { RichTextValue } from "./types";
 import { normalizeRichText } from "./types";
-import { linkify, linkifyToNodes } from "./linkify";
+import { linkify, linkifyToNodes, sanitizeUrl } from "./linkify";
 
 const { Text } = Typography;
 
@@ -39,10 +39,15 @@ export function RichTextRenderer({
 
   const { format, href, tone } = normalized;
 
-  // Case 1: explicit href → render as link
+  // Case 1: explicit href → render as link (after sanitizing the scheme)
   if (href) {
+    const safeHref = sanitizeUrl(href);
+    if (!safeHref) {
+      // Rejected scheme (e.g. javascript:) → render as plain text
+      return <>{text}</>;
+    }
     return (
-      <a href={href} target="_blank" rel="noopener noreferrer" className="rich-text-link">
+      <a href={safeHref} target="_blank" rel="noopener noreferrer" className="rich-text-link">
         {text}
       </a>
     );

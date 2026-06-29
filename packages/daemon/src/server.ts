@@ -1,6 +1,12 @@
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  lstatSync,
+  readdirSync,
+  readFileSync,
+  writeFileSync,
+} from "node:fs";
 import { createRequire } from "node:module";
-import { dirname, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import fastifyStatic from "@fastify/static";
@@ -8,7 +14,6 @@ import Fastify, { type FastifyReply } from "fastify";
 import { ZodError } from "zod";
 import {
   AgentService,
-  createDefaultLlmProvider,
   InMemoryAgentEventBus,
   parseEnv,
   RepositoryApprovalExpiryService,
@@ -116,13 +121,26 @@ function extractBearerToken(header: unknown): string | undefined {
  * Minimal in-memory sliding-window rate limiter.
  * Used because @fastify/rate-limit is not a project dependency. Limits per-IP
  * request counts within a rolling window; protects against trivial DoS.
+ *
+ * Memory management: empty buckets are deleted immediately in `check()`, and
+ * a periodic sweep removes any buckets that have fully expired. This prevents
+ * unbounded Map growth when many distinct IPs are seen (e.g., behind a proxy
+ * with spoofed X-Forwarded-For headers).
  */
 class SlidingWindowRateLimiter {
   private readonly hits = new Map<string, number[]>();
+  private sweepTimer: ReturnType<typeof setInterval> | undefined;
+
   constructor(
     private readonly windowMs: number,
     private readonly maxRequests: number,
-  ) {}
+  ) {
+    // Periodic sweep: remove expired buckets every windowMs.
+    // This catches buckets that were last accessed near the end of a window
+    // and would otherwise linger until the same IP hits again.
+    this.sweepTimer = setInterval(() => this.sweep(), this.windowMs);
+    this.sweepTimer.unref?.();
+  }
 
   check(ip: string): boolean {
     const now = Date.now();
@@ -130,22 +148,128 @@ class SlidingWindowRateLimiter {
     const bucket = this.hits.get(ip);
     const fresh = bucket ? bucket.filter((ts) => ts > cutoff) : [];
     if (fresh.length >= this.maxRequests) {
+      // Rate limited — update the bucket (with trimmed timestamps) but
+      // don't add a new entry. Return false.
       this.hits.set(ip, fresh);
       return false;
     }
+    // Under the limit — add this request's timestamp.
     fresh.push(now);
     this.hits.set(ip, fresh);
     return true;
+  }
+
+  /** Remove all buckets whose entries have all expired. */
+  private sweep(): void {
+    const cutoff = Date.now() - this.windowMs;
+    for (const [ip, bucket] of this.hits) {
+      const fresh = bucket.filter((ts) => ts > cutoff);
+      if (fresh.length === 0) {
+        this.hits.delete(ip);
+      } else if (fresh.length !== bucket.length) {
+        this.hits.set(ip, fresh);
+      }
+    }
+  }
+
+  dispose(): void {
+    if (this.sweepTimer) {
+      clearInterval(this.sweepTimer);
+      this.sweepTimer = undefined;
+    }
+    this.hits.clear();
   }
 }
 
 const AUTH_EXEMPT_PATHS = new Set(["/healthz", "/readyz"]);
 
+function requiresLocalAuthorization(path: string): boolean {
+  return path === "/metrics" || path.startsWith("/v1/");
+}
+
+function linuxProcessStartTicks(pid = process.pid): string | undefined {
+  if (process.platform !== "linux") return undefined;
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+    const commandEnd = stat.lastIndexOf(")");
+    if (commandEnd < 0) return undefined;
+    // Fields after `(comm)` start at field 3 (state); starttime is field 22.
+    return stat.slice(commandEnd + 1).trim().split(/\s+/)[19];
+  } catch {
+    return undefined;
+  }
+}
+
+function configuredSkillDirectories(
+  directories: string[],
+  home: string,
+): string[] {
+  return [...new Set(directories.map((directory) =>
+    resolve(isAbsolute(directory) ? directory : join(home, directory)),
+  ))];
+}
+
+function skillDirectoryFingerprint(roots: string[]): string {
+  const output: string[] = [];
+  const visit = (directory: string) => {
+    if (output.length >= 20_000 || !existsSync(directory)) return;
+    const directoryStat = lstatSync(directory);
+    if (directoryStat.isSymbolicLink()) return;
+    output.push(`${directory}:${directoryStat.mtimeMs}`);
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      if (entry.name === "node_modules" || entry.isSymbolicLink()) continue;
+      const path = join(directory, entry.name);
+      if (entry.isDirectory()) {
+        visit(path);
+      } else if (entry.isFile()) {
+        const stat = lstatSync(path);
+        output.push(`${path}:${stat.size}:${stat.mtimeMs}`);
+      }
+    }
+  };
+  for (const root of roots) visit(root);
+  return output.join("\n");
+}
+
+function watchSkillDirectories(
+  roots: string[],
+  reload: () => Promise<unknown>,
+  onError: (error: unknown) => void,
+): () => void {
+  let fingerprint = skillDirectoryFingerprint(roots);
+  let reloading = false;
+  const timer = setInterval(() => {
+    if (reloading) return;
+    try {
+      const next = skillDirectoryFingerprint(roots);
+      if (next === fingerprint) return;
+      fingerprint = next;
+      reloading = true;
+      void reload()
+        .then(() => { fingerprint = skillDirectoryFingerprint(roots); })
+        .catch(onError)
+        .finally(() => { reloading = false; });
+    } catch (error) {
+      onError(error);
+    }
+  }, 1_000);
+  timer.unref();
+
+  return () => {
+    clearInterval(timer);
+  };
+}
+
 export async function createDaemon(options: DaemonOptions = {}) {
-  const host = options.host ?? "127.0.0.1";
-  const port = options.port ?? 3737;
   const env = parseEnv(process.env);
   const paths = ensureSunPilotHome(getSunPilotPaths());
+  const runtimeConfig = readSunPilotConfig(paths);
+  const host = options.host ?? runtimeConfig.server.host;
+  const port = options.port ?? (
+    process.env.SUNPILOT_PORT !== undefined
+      ? env.SUNPILOT_PORT
+      : runtimeConfig.server.port
+  );
   const database = options.database ?? (await createDatabaseContext());
   const shouldCloseDatabase = !options.database;
 
@@ -158,7 +282,9 @@ export async function createDaemon(options: DaemonOptions = {}) {
   // launcher, browser fetch via the web client) can read it.
   //
   // SUNPILOT_DISABLE_TOKEN_AUTH=1 opts out for local development / tests.
-  const tokenAuthEnabled = env.SUNPILOT_DISABLE_TOKEN_AUTH !== "1";
+  const tokenAuthEnabled = process.env.SUNPILOT_DISABLE_TOKEN_AUTH !== undefined
+    ? env.SUNPILOT_DISABLE_TOKEN_AUTH !== "1"
+    : runtimeConfig.security.requireLocalToken;
   let localToken: string | undefined;
   if (tokenAuthEnabled) {
     try {
@@ -182,7 +308,11 @@ export async function createDaemon(options: DaemonOptions = {}) {
   await recoverAgentRuntimeRuns(database);
 
   const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
-  const skillRegistry = new SkillRegistry(database, [paths.skills]);
+  const skillDirectories = configuredSkillDirectories(
+    runtimeConfig.skills.directories,
+    paths.home,
+  );
+  const skillRegistry = new SkillRegistry(database, skillDirectories);
   await skillRegistry.reload();
   const skillRunner = new SkillRunner(
     {
@@ -221,12 +351,11 @@ export async function createDaemon(options: DaemonOptions = {}) {
   const getChatAgent = async (): Promise<AgentService> => {
     if (chatAgent) return chatAgent as AgentService;
     chatAgentInit ??= (async () => {
-      const llmProvider = options.llmProvider ?? createDefaultLlmProvider();
       const { service, modelRouter, updateMemory, skillEmbeddingCache, embeddingService } = createAgentLoopService({
         database,
         skillRegistry,
         skillRunner,
-        llmProvider,
+        llmProvider: options.llmProvider,
         enableEnvironmentProviders: !options.llmProvider,
         eventBus,
         liveEventBus,
@@ -245,8 +374,18 @@ export async function createDaemon(options: DaemonOptions = {}) {
   const app = Fastify({
     logger: { level: env.SUNPILOT_LOG_LEVEL },
   });
-  app.setErrorHandler((error, _request, reply) => {
+  app.setErrorHandler((error, request, reply) => {
     if (error instanceof RuntimeError) {
+      if (error.statusCode >= 500) {
+        app.log.error(
+          { err: error, url: request.url, method: request.method },
+          "Runtime error in request",
+        );
+        return reply.code(error.statusCode).send({
+          error: error.code,
+          message: "An internal server error occurred.",
+        });
+      }
       return reply
         .code(error.statusCode)
         .send({ error: error.code, message: error.message });
@@ -258,15 +397,25 @@ export async function createDaemon(options: DaemonOptions = {}) {
         issues: error.issues,
       });
     }
-    const message = error instanceof Error ? error.message : String(error);
-    return reply.code(500).send({ error: "internal_error", message });
+    // Log the full error server-side with request context for debugging,
+    // but return a generic message to the client to avoid leaking internal
+    // details (database SQL, LLM response bodies, file paths, etc.).
+    app.log.error(
+      { err: error, url: request.url, method: request.method },
+      "Unhandled error in request",
+    );
+    return reply.code(500).send({
+      error: "internal_error",
+      message: "An internal server error occurred.",
+    });
   });
   // ── Auth + rate limiting hook (C9/C10) ─────────────────────────────
   // Order: exempt health probes → rate limit → token auth → origin check.
   // - A valid bearer token authorizes any client (covers curl/CLI/scripts and
   //   the browser when it forwards the token).
-  // - Without a token, only same-origin browser requests (Origin present and
-  //   allowed) pass; non-browser clients without a token are rejected.
+  // - Static UI assets remain public so the browser can bootstrap. Every
+  //   stateful/API route requires the bearer token when token auth is enabled;
+  //   Origin/Host are not authentication and can be spoofed by scripts.
   const rateLimiter = new SlidingWindowRateLimiter(
     env.SUNPILOT_RATE_LIMIT_WINDOW_MS,
     env.SUNPILOT_RATE_LIMIT_MAX,
@@ -285,21 +434,15 @@ export async function createDaemon(options: DaemonOptions = {}) {
       return;
     }
 
+    if (!requiresLocalAuthorization(path)) return;
+
     if (tokenAuthEnabled) {
       const presented = extractBearerToken(request.headers.authorization);
       const tokenOk = presented && localToken ? safeEqual(presented, localToken) : false;
       if (!tokenOk) {
-        // Fall back to Origin check for browser clients. Same-origin
-        // navigations (typing the URL in the address bar) don't send an
-        // Origin header; use the Host header as a fallback so the first
-        // page load works without a token.
-        const clientOrigin =
-          request.headers.origin ?? `https://${request.hostname}`;
-        if (!isAllowedLocalOrigin(clientOrigin, port)) {
-          await reply
-            .code(401)
-            .send({ error: "unauthorized", message: "Missing or invalid token." });
-        }
+        await reply
+          .code(401)
+          .send({ error: "unauthorized", message: "Missing or invalid token." });
       }
     } else {
       // Token auth disabled (local dev): still enforce the Origin boundary
@@ -359,14 +502,23 @@ export async function createDaemon(options: DaemonOptions = {}) {
       },
     },
     getModels: () => {
-      const hasSeed = !!env.SUNPILOT_SEED_LLM_API_KEY;
+      const hasSeed = !options.llmProvider && !!env.SUNPILOT_SEED_LLM_API_KEY;
+      const hasDp = Boolean(
+        options.llmProvider ||
+        env.SUNPILOT_DP_LLM_API_KEY ||
+        env.SUNPILOT_LLM_API_KEY ||
+        env.DEEPSEEK_API_KEY
+      );
       const dpModel = env.SUNPILOT_DP_LLM_MODEL ?? env.SUNPILOT_LLM_MODEL ?? "deepseek-v4-flash";
       const seedModel = env.SUNPILOT_SEED_LLM_MODEL ?? "doubao-seed-2-0-lite-260428";
       return [
-        { id: "dp", label: "Deepseek-v4-flash", provider: "deepseek", model: dpModel, available: true },
+        { id: "dp", label: "Deepseek-v4-flash", provider: "deepseek", model: dpModel, available: hasDp },
         { id: "seed", label: "Seed-2.0-lite", provider: "volcengine-ark", model: seedModel, available: hasSeed },
       ];
     },
+    getDefaultModelId: () => !options.llmProvider && env.SUNPILOT_SEED_LLM_API_KEY
+      ? "seed"
+      : "dp",
     updateMemory: async (id, input) => {
       if (!_updateMemory) {
         // Agent loop not yet initialized — fall back to direct update
@@ -393,17 +545,28 @@ export async function createDaemon(options: DaemonOptions = {}) {
         event.type === "agent.run.completed" ? "completed" :
         event.type === "agent.run.failed" ? "failed" : "cancelled";
 
-      // Collect artifacts from the run if completed
+      // Collect artifacts from the run if completed.
+      // The agent loop emits `artifacts` as an array of artifact IDs (string[]),
+      // NOT as objects. We must load the actual ArtifactRecord from the
+      // database to obtain type/name/path for the WorldArtifact.
       const artifacts: Array<{ type: string; title: string; uri?: string }> = [];
       if (runStatus === "completed" && event.payload) {
         const payload = event.payload as Record<string, unknown>;
-        if (Array.isArray(payload["artifacts"])) {
-          for (const a of payload["artifacts"] as Array<Record<string, unknown>>) {
-            artifacts.push({
-              type: (a["type"] as string) ?? "unknown",
-              title: (a["title"] as string) ?? (a["name"] as string) ?? "产物",
-              uri: a["uri"] as string | undefined,
-            });
+        const rawArtifacts = payload["artifacts"];
+        if (Array.isArray(rawArtifacts)) {
+          // Each element is an artifact ID string.
+          const artifactIds = rawArtifacts.filter(
+            (id): id is string => typeof id === "string" && id.length > 0,
+          );
+          for (const id of artifactIds) {
+            const record = await database.artifacts.findById(id);
+            if (record) {
+              artifacts.push({
+                type: record.type,
+                title: record.name,
+                uri: record.path || record.storageKey,
+              });
+            }
           }
         }
       }
@@ -517,18 +680,44 @@ export async function createDaemon(options: DaemonOptions = {}) {
   // §F5: periodic idempotency key cleanup — removes expired in-flight
   // reservations so they don't block retries indefinitely.
   let idempotencyCleanupTimer: ReturnType<typeof setInterval> | null = null;
+  let stopSkillWatcher: (() => void) | undefined;
 
   return {
     app,
     paths,
+    runtime: {
+      host,
+      port,
+      tokenAuthEnabled,
+      skillDirectories,
+      skillAutoReload: runtimeConfig.skills.autoReload,
+    },
     async start() {
       await app.listen({ host, port });
-      writeFileSync(paths.pidFile, String(process.pid), { mode: 0o600 });
+      // P1-12: Write a structured PID file with a stable Linux process-birth
+      // identity. The launcher verifies it before signaling so a reused PID
+      // can never cause it to kill an unrelated process.
+      writeFileSync(
+        paths.pidFile,
+        JSON.stringify({
+          pid: process.pid,
+          startedAt: new Date().toISOString(),
+          processStartTicks: linuxProcessStartTicks(),
+        }),
+        { mode: 0o600 },
+      );
       ws.attach(app.server);
 
       // Start background workers
       staleDetectionWorker.start();
       pruningWorker.start();
+      if (runtimeConfig.skills.autoReload) {
+        stopSkillWatcher = watchSkillDirectories(
+          skillDirectories,
+          apiDeps.skills.reload,
+          (error) => app.log.warn({ err: error }, "Skill auto-reload watcher failed"),
+        );
+      }
       // §F5: clean up expired idempotency keys every 10 minutes
       idempotencyCleanupTimer = setInterval(async () => {
         try {
@@ -564,10 +753,13 @@ export async function createDaemon(options: DaemonOptions = {}) {
     async stop() {
       staleDetectionWorker.stop();
       pruningWorker.stop();
+      stopSkillWatcher?.();
+      stopSkillWatcher = undefined;
       if (idempotencyCleanupTimer) {
         clearInterval(idempotencyCleanupTimer);
         idempotencyCleanupTimer = null;
       }
+      rateLimiter.dispose();
 
       await database.audit.create({
         actor: AuditActor.Daemon,

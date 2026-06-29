@@ -284,6 +284,19 @@ export interface PermissionDeclaration {
   shell?: boolean;
 }
 
+/**
+ * Trust level declared by a Skill manifest.
+ *
+ * - `local-trusted`: source is locally vetted, but execution still occurs in
+ *   a short-lived child process so timeout and interruption are enforceable.
+ * - `isolated`: untrusted third-party source; the same child-process boundary
+ *   is mandatory and all privileged operations must use Skill SDK IPC.
+ *
+ * Trust describes source provenance; it never opts a Skill into daemon-process
+ * execution.
+ */
+export type SkillTrustLevel = "local-trusted" | "isolated";
+
 export interface SkillManifestCapability {
   name: string;
   title: string;
@@ -306,6 +319,12 @@ export interface SkillManifest {
   runtime: { node: string; module: "esm" };
   capabilities: SkillManifestCapability[];
   permissions: PermissionDeclaration;
+  /**
+   * Explicit trust declaration. See {@link SkillTrustLevel}.
+   * Parsed manifests always contain this field; legacy files default to
+   * `isolated`. Both values use process isolation.
+   */
+  trust: SkillTrustLevel;
 }
 
 export interface InstalledSkillRecord {
@@ -319,5 +338,3 @@ export interface InstalledSkillRecord {
   installedAt: string;
   updatedAt: string;
 }
-
-

@@ -1,22 +1,11 @@
 import { describe, expect, test } from "vitest";
 import { LlmEmbeddingService } from "./llm-embedding-service.js";
 import type { EmbeddingProvider } from "./llm-embedding-service.js";
-import type { LlmProvider } from "../../llm/llm.provider.js";
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
 interface TrackedProvider extends EmbeddingProvider {
   callCount: number;
-}
-
-function stubLlmProvider(): LlmProvider {
-  return {
-    id: "test",
-    model: "test-model",
-    streamChat() {
-      throw new Error("not used in embedding service");
-    },
-  } as unknown as LlmProvider;
 }
 
 function stubEmbeddingProvider(): TrackedProvider {
@@ -40,7 +29,6 @@ describe("LlmEmbeddingService — basic embedding", () => {
   test("embed returns vector from real provider", async () => {
     const provider = stubEmbeddingProvider();
     const svc = new LlmEmbeddingService({
-      llm: stubLlmProvider(),
       embeddingProvider: provider,
       dimension: 4,
     });
@@ -54,7 +42,6 @@ describe("LlmEmbeddingService — basic embedding", () => {
   test("embed caches result — second call is a hit", async () => {
     const provider = stubEmbeddingProvider();
     const svc = new LlmEmbeddingService({
-      llm: stubLlmProvider(),
       embeddingProvider: provider,
       dimension: 4,
     });
@@ -69,7 +56,6 @@ describe("LlmEmbeddingService — basic embedding", () => {
   test("embed returns same result from cache as from provider", async () => {
     const provider = stubEmbeddingProvider();
     const svc = new LlmEmbeddingService({
-      llm: stubLlmProvider(),
       embeddingProvider: provider,
       dimension: 4,
     });
@@ -81,7 +67,6 @@ describe("LlmEmbeddingService — basic embedding", () => {
 
   test("embed falls back to keyword hash when no provider configured", async () => {
     const svc = new LlmEmbeddingService({
-      llm: stubLlmProvider(),
       dimension: 4,
       // no embeddingProvider
     });
@@ -101,7 +86,6 @@ describe("LlmEmbeddingService — basic embedding", () => {
       },
     };
     const svc = new LlmEmbeddingService({
-      llm: stubLlmProvider(),
       embeddingProvider: failing,
       dimension: 4,
     });
@@ -115,7 +99,6 @@ describe("LlmEmbeddingService — basic embedding", () => {
   test("embedBatch returns vectors for all texts", async () => {
     const provider = stubEmbeddingProvider();
     const svc = new LlmEmbeddingService({
-      llm: stubLlmProvider(),
       embeddingProvider: provider,
       dimension: 4,
     });
@@ -128,7 +111,6 @@ describe("LlmEmbeddingService — basic embedding", () => {
   test("embedBatch uses cache for already-known texts", async () => {
     const provider = stubEmbeddingProvider();
     const svc = new LlmEmbeddingService({
-      llm: stubLlmProvider(),
       embeddingProvider: provider,
       dimension: 4,
     });
@@ -153,7 +135,6 @@ describe("LlmEmbeddingService — basic embedding", () => {
       },
     };
     const svc = new LlmEmbeddingService({
-      llm: stubLlmProvider(),
       embeddingProvider: failing,
       dimension: 4,
     });
@@ -173,7 +154,6 @@ describe("LlmEmbeddingService — LRU cache", () => {
     // Use a tiny max size for testing. We can't override MAX_CACHE_SIZE
     // directly, so we insert 1001 entries and verify the first is evicted.
     const svc = new LlmEmbeddingService({
-      llm: stubLlmProvider(),
       embeddingProvider: provider,
       dimension: 4,
     });
@@ -205,7 +185,6 @@ describe("LlmEmbeddingService — LRU cache", () => {
   test("LRU access reorders: accessed entry preserved on eviction", async () => {
     const provider = stubEmbeddingProvider();
     const svc = new LlmEmbeddingService({
-      llm: stubLlmProvider(),
       embeddingProvider: provider,
       dimension: 4,
     });
@@ -232,13 +211,12 @@ describe("LlmEmbeddingService — LRU cache", () => {
   });
 
   test("default dimension is 1536", () => {
-    const svc = new LlmEmbeddingService({ llm: stubLlmProvider() });
+    const svc = new LlmEmbeddingService({});
     expect(svc.dimension).toBe(1536);
   });
 
   test("custom dimension is respected", () => {
     const svc = new LlmEmbeddingService({
-      llm: stubLlmProvider(),
       dimension: 256,
     });
     expect(svc.dimension).toBe(256);
@@ -251,7 +229,6 @@ describe("LlmEmbeddingService — concurrent dedup", () => {
   test("concurrent embed calls deduplicate to one API call", async () => {
     const provider = stubEmbeddingProvider();
     const svc = new LlmEmbeddingService({
-      llm: stubLlmProvider(),
       embeddingProvider: provider,
       dimension: 4,
     });
@@ -270,7 +247,6 @@ describe("LlmEmbeddingService — concurrent dedup", () => {
   test("after concurrent embed, cache is populated", async () => {
     const provider = stubEmbeddingProvider();
     const svc = new LlmEmbeddingService({
-      llm: stubLlmProvider(),
       embeddingProvider: provider,
       dimension: 4,
     });
@@ -295,7 +271,6 @@ describe("LlmEmbeddingService — concurrent dedup", () => {
       },
     };
     const svc = new LlmEmbeddingService({
-      llm: stubLlmProvider(),
       embeddingProvider: failing,
       dimension: 4,
     });
@@ -323,7 +298,6 @@ describe("LlmEmbeddingService — concurrent dedup", () => {
       },
     };
     const svc = new LlmEmbeddingService({
-      llm: stubLlmProvider(),
       embeddingProvider: failing,
       dimension: 4,
     });
@@ -343,7 +317,6 @@ describe("LlmEmbeddingService — degraded mode", () => {
   test("hasRealProvider is true when provider configured and active", () => {
     const provider = stubEmbeddingProvider();
     const svc = new LlmEmbeddingService({
-      llm: stubLlmProvider(),
       embeddingProvider: provider,
     });
     expect(svc.hasRealProvider).toBe(true);
@@ -359,7 +332,6 @@ describe("LlmEmbeddingService — degraded mode", () => {
       },
     };
     const svc = new LlmEmbeddingService({
-      llm: stubLlmProvider(),
       embeddingProvider: failing,
     });
 
@@ -370,14 +342,13 @@ describe("LlmEmbeddingService — degraded mode", () => {
   test("isDegraded is false when provider works", () => {
     const provider = stubEmbeddingProvider();
     const svc = new LlmEmbeddingService({
-      llm: stubLlmProvider(),
       embeddingProvider: provider,
     });
     expect(svc.isDegraded).toBe(false);
   });
 
   test("isDegraded is true when no provider configured", () => {
-    const svc = new LlmEmbeddingService({ llm: stubLlmProvider() });
+    const svc = new LlmEmbeddingService({});
     expect(svc.isDegraded).toBe(true);
   });
 
@@ -391,7 +362,6 @@ describe("LlmEmbeddingService — degraded mode", () => {
       },
     };
     const svc = new LlmEmbeddingService({
-      llm: stubLlmProvider(),
       embeddingProvider: failing,
     });
 
@@ -409,7 +379,6 @@ describe("LlmEmbeddingService — degraded mode", () => {
       },
     };
     const svc = new LlmEmbeddingService({
-      llm: stubLlmProvider(),
       embeddingProvider: failing,
     });
 
@@ -439,7 +408,6 @@ describe("LlmEmbeddingService — degraded mode", () => {
       },
     };
     const svc = new LlmEmbeddingService({
-      llm: stubLlmProvider(),
       embeddingProvider: flaky,
       dimension: 4,
     });
@@ -464,7 +432,6 @@ describe("LlmEmbeddingService — preWarm", () => {
   test("preWarm populates cache", async () => {
     const provider = stubEmbeddingProvider();
     const svc = new LlmEmbeddingService({
-      llm: stubLlmProvider(),
       embeddingProvider: provider,
       dimension: 4,
     });
@@ -481,7 +448,6 @@ describe("LlmEmbeddingService — preWarm", () => {
   test("preWarm skips already-cached texts", async () => {
     const provider = stubEmbeddingProvider();
     const svc = new LlmEmbeddingService({
-      llm: stubLlmProvider(),
       embeddingProvider: provider,
       dimension: 4,
     });
@@ -497,7 +463,6 @@ describe("LlmEmbeddingService — preWarm", () => {
   test("preWarm empty array is no-op", async () => {
     const provider = stubEmbeddingProvider();
     const svc = new LlmEmbeddingService({
-      llm: stubLlmProvider(),
       embeddingProvider: provider,
     });
 
@@ -513,7 +478,6 @@ describe("LlmEmbeddingService — invalidateCache", () => {
   test("invalidateCache clears all cached entries", async () => {
     const provider = stubEmbeddingProvider();
     const svc = new LlmEmbeddingService({
-      llm: stubLlmProvider(),
       embeddingProvider: provider,
       dimension: 4,
     });
@@ -533,7 +497,6 @@ describe("LlmEmbeddingService — invalidateCache", () => {
   test("invalidateCache resets cache stats", async () => {
     const provider = stubEmbeddingProvider();
     const svc = new LlmEmbeddingService({
-      llm: stubLlmProvider(),
       embeddingProvider: provider,
       dimension: 4,
     });
@@ -551,7 +514,6 @@ describe("LlmEmbeddingService — invalidateCache", () => {
   test("invalidateCache clears both cache and pending map", async () => {
     const provider = stubEmbeddingProvider();
     const svc = new LlmEmbeddingService({
-      llm: stubLlmProvider(),
       embeddingProvider: provider,
       dimension: 4,
     });
@@ -582,7 +544,6 @@ describe("LlmEmbeddingService — invalidateCache", () => {
 describe("LlmEmbeddingService — keyword fallback", () => {
   test("keyword embed returns fixed-dimension vector", async () => {
     const svc = new LlmEmbeddingService({
-      llm: stubLlmProvider(),
       dimension: 10,
     });
 
@@ -591,7 +552,7 @@ describe("LlmEmbeddingService — keyword fallback", () => {
   });
 
   test("keyword embed is deterministic", async () => {
-    const svc = new LlmEmbeddingService({ llm: stubLlmProvider() });
+    const svc = new LlmEmbeddingService({});
 
     const r1 = await svc.embed("hello");
     const r2 = await svc.embed("hello");
@@ -599,7 +560,7 @@ describe("LlmEmbeddingService — keyword fallback", () => {
   });
 
   test("keyword embed handles empty text", async () => {
-    const svc = new LlmEmbeddingService({ llm: stubLlmProvider() });
+    const svc = new LlmEmbeddingService({});
 
     const vec = await svc.embed("");
     expect(vec).toHaveLength(1536);
@@ -607,7 +568,6 @@ describe("LlmEmbeddingService — keyword fallback", () => {
 
   test("keyword embed handles CJK text", async () => {
     const svc = new LlmEmbeddingService({
-      llm: stubLlmProvider(),
       dimension: 4,
     });
 
@@ -620,7 +580,6 @@ describe("LlmEmbeddingService — keyword fallback", () => {
 
   test("keyword vectors are L2 normalized", async () => {
     const svc = new LlmEmbeddingService({
-      llm: stubLlmProvider(),
       dimension: 4,
     });
 
@@ -633,7 +592,7 @@ describe("LlmEmbeddingService — keyword fallback", () => {
   });
 
   test("keyword fallback is cached", async () => {
-    const svc = new LlmEmbeddingService({ llm: stubLlmProvider() });
+    const svc = new LlmEmbeddingService({});
 
     const r1 = await svc.embed("hello");
     const r2 = await svc.embed("hello");
@@ -647,7 +606,6 @@ describe("LlmEmbeddingService — cacheStats", () => {
   test("cacheStats tracks hits and misses", async () => {
     const provider = stubEmbeddingProvider();
     const svc = new LlmEmbeddingService({
-      llm: stubLlmProvider(),
       embeddingProvider: provider,
       dimension: 4,
     });
@@ -671,7 +629,6 @@ describe("LlmEmbeddingService — cacheStats", () => {
   test("cacheStats returns a snapshot (not live reference)", () => {
     const provider = stubEmbeddingProvider();
     const svc = new LlmEmbeddingService({
-      llm: stubLlmProvider(),
       embeddingProvider: provider,
     });
 

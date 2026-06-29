@@ -22,6 +22,10 @@ export class CameraController {
   onDragEnd?: () => void;
   /** Called when a click occurs (not a drag). */
   onWorldClick?: (worldX: number, worldY: number) => void;
+  /** Batch 5 Phase 1: fired whenever the viewport position or scale changes
+   *  (drag or zoom) so dependents like the grid can redraw only the newly
+   *  visible area instead of relying on a fixed-size canvas. */
+  onViewportMove?: () => void;
 
   constructor(viewport: Container, canvas: HTMLCanvasElement) {
     this.viewport = viewport;
@@ -128,6 +132,7 @@ export class CameraController {
     if (this.hasDragged) {
       this.viewport.x = this.startViewportX + dx;
       this.viewport.y = this.startViewportY + dy;
+      this.onViewportMove?.();
     }
   };
 
@@ -153,5 +158,6 @@ export class CameraController {
     const pivotY = e.clientY - rect.top;
     const delta = e.deltaY > 0 ? -1 : 1;
     this.zoom(delta, pivotX, pivotY);
+    this.onViewportMove?.();
   };
 }

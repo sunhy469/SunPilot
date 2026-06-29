@@ -1,6 +1,5 @@
 import { describe, expect, test } from "vitest";
 import {
-  createDefaultLlmProvider,
   DEFAULT_LLM_BASE_URL,
   DEFAULT_LLM_MODEL,
   OpenAICompatibleChatProvider,
@@ -50,16 +49,6 @@ describe("OpenAICompatibleChatProvider", () => {
     });
   });
 
-  test("creates the default provider from SunPilot env values", async () => {
-    const provider = createDefaultLlmProvider({
-      SUNPILOT_LLM_API_KEY: "env-key",
-      SUNPILOT_LLM_BASE_URL: "https://example.test/v1",
-      SUNPILOT_LLM_MODEL: "custom-model",
-    });
-
-    expect(provider.model).toBe("custom-model");
-  });
-
   test("preserves provider base URL paths when building the chat completions endpoint", async () => {
     const calls: Array<{ input: string | URL; init?: RequestInit }> = [];
     const provider = new OpenAICompatibleChatProvider(
@@ -85,20 +74,6 @@ describe("OpenAICompatibleChatProvider", () => {
 
     expect(String(calls[0]?.input)).toBe(
       "https://ark.cn-beijing.volces.com/api/v3/chat/completions",
-    );
-  });
-
-  test("allows DEEPSEEK_API_KEY as a fallback secret name", () => {
-    const provider = createDefaultLlmProvider({
-      DEEPSEEK_API_KEY: "deepseek-key",
-    });
-
-    expect(provider.model).toBe(DEFAULT_LLM_MODEL);
-  });
-
-  test("does not create a provider without an API key", () => {
-    expect(() => createDefaultLlmProvider({})).toThrow(
-      "SUNPILOT_LLM_API_KEY or DEEPSEEK_API_KEY is required.",
     );
   });
 });

@@ -1,13 +1,14 @@
 import type { ChatSendParams, ChatStopParams } from "./types";
+import { withLocalTokenQuery } from "../../shared/auth/local-token";
 
 export function createChatSocket(): WebSocket {
   const protocol = location.protocol === "https:" ? "wss:" : "ws:";
-  return new WebSocket(`${protocol}//${location.host}/v1/ws`);
+  return new WebSocket(withLocalTokenQuery(`${protocol}//${location.host}/v1/ws`));
 }
 
 export function chatSocketUrl(): string {
   const protocol = location.protocol === "https:" ? "wss:" : "ws:";
-  return `${protocol}//${location.host}/v1/ws`;
+  return withLocalTokenQuery(`${protocol}//${location.host}/v1/ws`);
 }
 
 /**

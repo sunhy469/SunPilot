@@ -74,7 +74,7 @@ export class DigitalBeingService {
     }
     const updated = await this.deps.database.digitalBeings.update(id, {
       status: "idle",
-      sleepReason: undefined,
+      sleepReason: null,
     });
     if (!updated) {
       throw new BeingNotFoundError(id);

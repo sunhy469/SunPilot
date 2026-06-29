@@ -1013,6 +1013,17 @@ export class InMemoryDatabaseContextImplementation implements DatabaseContext {
       this.worldTaskRecords.set(id, updated);
       return updated;
     },
+    claimIfQueued: async (id: string, startedAt: string): Promise<WorldTaskRecord | null> => {
+      const existing = this.worldTaskRecords.get(id);
+      if (!existing || existing.status !== "queued") return null;
+      const updated: WorldTaskRecord = {
+        ...existing,
+        status: "running",
+        startedAt,
+      };
+      this.worldTaskRecords.set(id, updated);
+      return updated;
+    },
   };
 
   readonly worldActions = {
@@ -1044,6 +1055,14 @@ export class InMemoryDatabaseContextImplementation implements DatabaseContext {
       [...this.worldActionRecords.values()]
         .filter((a) => a.beingId === beingId)
         .sort(byCreatedAtDesc),
+    findByAgentRunId: async (runId: string): Promise<WorldActionRecord | null> => {
+      for (const action of this.worldActionRecords.values()) {
+        if (action.agentRunId === runId && action.status === "running") {
+          return action;
+        }
+      }
+      return null;
+    },
     update: async (id: string, patch: UpdateWorldActionPatch): Promise<WorldActionRecord | null> => {
       const existing = this.worldActionRecords.get(id);
       if (!existing) return null;

@@ -10,7 +10,7 @@ import { z } from 'zod';
 export const chatSendSchema = z.object({
   clientRequestId: z.string().optional(),
   conversationId: z.string().optional(),
-  message: z.string().min(1, 'message is required'),
+  message: z.string().default(''),
   mode: z.enum(['chat', 'agent']).default('agent'),
   permissionMode: z.enum(['ask', 'auto', 'full']).default('auto'),
   modelId: z.enum(['dp', 'seed']).optional(),
@@ -30,6 +30,17 @@ export const chatSendSchema = z.object({
       }),
     )
     .default([]),
+}).superRefine((val, ctx) => {
+  // Allow attachment-only messages: message may be empty IF at least one
+  // attachment is present. A completely empty request (no text, no
+  // attachments) is still rejected.
+  if (val.message.trim().length === 0 && val.attachments.length === 0) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['message'],
+      message: 'message is required when no attachments are provided',
+    });
+  }
 });
 
 export const chatStopSchema = z.object({
