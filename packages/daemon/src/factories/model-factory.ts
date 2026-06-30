@@ -101,7 +101,7 @@ export function createModelLayer(deps: ModelFactoryDeps): ModelFactoryResult {
 
   // ── Dual-Model Router (§dual-model) ──────────────────────────────
   const allPurposes: ModelPurpose[] = [
-    "response_composition",
+    "react_turn",
     "summary_compression",
   ];
 

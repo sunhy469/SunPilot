@@ -12,15 +12,18 @@ import type {
   ReactCheckpoint,
   ReactLoopResult,
 } from "../react-loop/react-types.js";
+import { parseReactCheckpoint } from "../persistence/react-checkpoint-repository.js";
 import { RUN_PHASE_LABELS } from "./constants.js";
 import { ApprovalFlowCoordinator } from "./approval-flow.js";
+import { RunOutcomeCoordinator } from "./run-outcomes.js";
 
 /** Re-enters the exact persisted ReAct transcript after a human decision. */
 export class ApprovalContinuationCoordinator {
-  constructor(
-    private readonly deps: AgentLoopEngineDeps,
-    private readonly _restorePlanVersion: (runId: string, version: number) => void,
-  ) {}
+  private readonly runOutcomes: RunOutcomeCoordinator;
+
+  constructor(private readonly deps: AgentLoopEngineDeps) {
+    this.runOutcomes = new RunOutcomeCoordinator(deps, () => undefined);
+  }
 
   async continueAfterRejection(
     input: {
@@ -59,6 +62,7 @@ export class ApprovalContinuationCoordinator {
     }
     completeWaitingStatuses(stream, checkpoint.partsSnapshot, "已拒绝，正在重新规划");
     await this.deps.runStateManager.markStatus(input.runId, "running");
+    this.deps.traceManager?.startTrace(input.runId, input.conversationId);
 
     try {
       const result = await this.deps.reactLoopRunner.resumeAfterRejection(
@@ -74,6 +78,8 @@ export class ApprovalContinuationCoordinator {
       return this.finishOrSuspend(agentInput, context, stream, result, signal);
     } catch (error) {
       return this.handleFailure(agentInput, stream, error, signal);
+    } finally {
+      this.deps.traceManager?.endTrace(input.runId);
     }
   }
 
@@ -135,6 +141,7 @@ export class ApprovalContinuationCoordinator {
       runId: string;
       conversationId?: string;
       userId?: string;
+      userMessageId?: string;
       message: string;
     },
     signal: AbortSignal,
@@ -145,6 +152,7 @@ export class ApprovalContinuationCoordinator {
       runId: run.runId,
       conversationId: input.conversationId ?? run.conversationId,
       userId: input.userId,
+      userMessageId: input.userMessageId,
       message: input.message,
       mode: run.mode === "chat" ? "chat" : "agent",
       modelId: checkpoint.modelId,
@@ -165,6 +173,7 @@ export class ApprovalContinuationCoordinator {
       }
     }
     await this.deps.runStateManager.markStatus(run.runId, "running");
+    this.deps.traceManager?.startTrace(run.runId, agentInput.conversationId);
     try {
       const result = await this.deps.reactLoopRunner.resumeWithUserInput(
         {
@@ -179,6 +188,8 @@ export class ApprovalContinuationCoordinator {
       return this.finishOrSuspend(agentInput, context, stream, result, signal);
     } catch (error) {
       return this.handleFailure(agentInput, stream, error, signal);
+    } finally {
+      this.deps.traceManager?.endTrace(run.runId);
     }
   }
 
@@ -200,6 +211,7 @@ export class ApprovalContinuationCoordinator {
     const context = await this.deps.contextBuilder.build(agentInput, signal);
     const stream = this.hydrate(checkpoint);
     await this.deps.runStateManager.markStatus(run.runId, "running");
+    this.deps.traceManager?.startTrace(run.runId, run.conversationId);
     try {
       const result = await this.deps.reactLoopRunner.resumeInterrupted(
         { agentInput, context, checkpoint, stream },
@@ -208,6 +220,8 @@ export class ApprovalContinuationCoordinator {
       return this.finishOrSuspend(agentInput, context, stream, result, signal);
     } catch (error) {
       return this.handleFailure(agentInput, stream, error, signal);
+    } finally {
+      this.deps.traceManager?.endTrace(run.runId);
     }
   }
 
@@ -263,6 +277,23 @@ export class ApprovalContinuationCoordinator {
     }
 
     const completed = await stream.complete();
+    await this.runOutcomes.writeMemories({
+      input,
+      context,
+      responseMessageId: completed.messageId,
+      turnCompleted: true,
+      observation: result.toolCalls.length > 0
+        ? {
+            runId: input.runId,
+            toolCalls: result.toolCalls,
+            artifacts: result.artifacts,
+            summary: result.toolCalls.map((call) => call.summary).join("\n"),
+          }
+        : undefined,
+      forceSummary:
+        context.messages.length >= 20 ||
+        context.limits.usedTokensEstimate / Math.max(1, context.limits.maxTokens) > 0.4,
+    });
     await this.deps.runStateManager.markStatus(input.runId, "completed");
     this.deps.eventBus.emit(
       "agent.run.completed",
@@ -368,6 +399,7 @@ function buildAgentInput(input: {
   runId: string;
   conversationId: string;
   userId?: string;
+  userMessageId?: string;
   message: string;
   mode: "chat" | "agent";
   modelId?: "dp" | "seed";
@@ -376,7 +408,7 @@ function buildAgentInput(input: {
   return {
     runId: input.runId,
     conversationId: input.conversationId,
-    userMessageId: input.runId,
+    userMessageId: input.userMessageId ?? input.runId,
     userId: input.userId,
     message: input.message,
     mode: input.mode,
@@ -396,13 +428,8 @@ function requireReactCheckpoint(
       code: "AGENT_REACT_CHECKPOINT_MISSING",
     });
   }
-  const candidate = checkpoint as ReactCheckpoint;
-  if (
-    candidate.version !== 1 ||
-    !Array.isArray(candidate.transcript) ||
-    !Array.isArray(candidate.pendingToolCalls) ||
-    !Array.isArray(candidate.partsSnapshot)
-  ) {
+  const candidate = parseReactCheckpoint(checkpoint);
+  if (!candidate) {
     throw Object.assign(new Error("Run contains an invalid ReAct checkpoint"), {
       code: "AGENT_REACT_CHECKPOINT_INVALID",
     });

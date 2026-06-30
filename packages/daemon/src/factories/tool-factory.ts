@@ -69,6 +69,7 @@ export function createToolLayer(deps: ToolFactoryDeps): ToolFactoryResult {
           description: capability.description,
           category: categoryFromCapability(capability.name),
           enabled: s.enabled,
+          trust: s.manifest.trust,
           permissions,
           defaultTimeoutMs: 60_000,
           maxTimeoutMs: 300_000,

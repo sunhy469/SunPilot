@@ -932,11 +932,11 @@ describe("assistantMessageReducer — approval status part updates", () => {
           part: {
             id: "status_1",
             type: "status",
-            label: "正在理解需求",
+            label: "正在思考",
             status: "running",
             runId: "run_1",
             createdAt: "",
-            metadata: { phase: "intent_routing" },
+            metadata: { phase: "context_building" },
           },
         },
       },
@@ -949,7 +949,7 @@ describe("assistantMessageReducer — approval status part updates", () => {
     expect(result[0]!.parts).toHaveLength(1);
     expect(result[0]!.parts![0]).toMatchObject({
       id: "status_1",
-      label: "正在理解需求",
+      label: "正在思考",
     });
   });
 

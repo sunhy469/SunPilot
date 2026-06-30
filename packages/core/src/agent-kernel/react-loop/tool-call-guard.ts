@@ -6,10 +6,7 @@ import type {
   PlannedToolCall,
 } from "../loop-types.js";
 import type { SkillSummary } from "../tools/tool-types.js";
-import {
-  checkAnyOfUnsatisfied,
-  findMissingRequired,
-} from "../tools/tool-schema-utils.js";
+import { validateToolArguments } from "../tools/tool-argument-validator.js";
 import type { ReactObservation } from "./react-types.js";
 import { ObservationBuilder } from "./observation-builder.js";
 
@@ -32,13 +29,28 @@ export class ToolCallGuard {
     toolNameMap: Map<string, string>;
     availableSkills: SkillSummary[];
     permissionMode: PermissionMode;
-    seenSignatures: Set<string>;
+    seenSignatures: Map<string, number>;
+    maxRepeatedToolCalls: number;
   }): Promise<GuardedToolBatch> {
     const executable: PlannedToolCall[] = [];
     const approvalRequired: PlannedToolCall[] = [];
     const observations: ReactObservation[] = [];
+    const acceptedSignatures = new Map<string, string>();
+    const seenCallIds = new Set<string>();
 
     for (const call of input.calls) {
+      if (!call.id.trim() || seenCallIds.has(call.id)) {
+        observations.push(
+          this.observations.validationFailure({
+            call,
+            message: call.id.trim()
+              ? `Duplicate tool_call_id '${call.id}' in the same model turn`
+              : "Tool call is missing a tool_call_id",
+          }),
+        );
+        continue;
+      }
+      seenCallIds.add(call.id);
       const skillId = input.toolNameMap.get(call.function.name);
       const skill = skillId
         ? input.availableSkills.find((candidate) => candidate.id === skillId)
@@ -73,7 +85,7 @@ export class ToolCallGuard {
         continue;
       }
 
-      const validationErrors = validateArguments(args, skill.inputSchema);
+      const validationErrors = validateToolArguments(args, skill.inputSchema);
       if (validationErrors.length > 0) {
         observations.push(
           this.observations.validationFailure({
@@ -87,11 +99,18 @@ export class ToolCallGuard {
       }
 
       const signature = `${skillId}:${stableStringify(args)}`;
-      if (input.seenSignatures.has(signature)) {
+      if (
+        (input.seenSignatures.get(signature) ?? 0) >=
+        input.maxRepeatedToolCalls
+      ) {
         observations.push(this.observations.duplicate({ call, skillId }));
         continue;
       }
-      input.seenSignatures.add(signature);
+      input.seenSignatures.set(
+        signature,
+        (input.seenSignatures.get(signature) ?? 0) + 1,
+      );
+      acceptedSignatures.set(call.id, signature);
 
       const permission = await this.permissionPolicy.evaluate({
         userId: input.context.userId,
@@ -136,6 +155,14 @@ export class ToolCallGuard {
           arg,
           source: "llm" as const,
         })),
+        metadata: {
+          outputTrust:
+            skill.trust === "isolated" ||
+            skill.permissions.includes("network.request") ||
+            skill.sideEffects === "network"
+              ? "untrusted"
+              : "trusted",
+        },
       };
 
       if (planned.requiresApproval) approvalRequired.push(planned);
@@ -146,6 +173,8 @@ export class ToolCallGuard {
     // approval, freeze every validated call and execute none.
     if (observations.length > 0 && (executable.length > 0 || approvalRequired.length > 0)) {
       for (const call of [...executable, ...approvalRequired]) {
+        const signature = acceptedSignatures.get(call.id);
+        if (signature) decrementSignature(input.seenSignatures, signature);
         observations.push(
           this.observations.validationFailure({
             call: {
@@ -173,43 +202,10 @@ export class ToolCallGuard {
   }
 }
 
-function validateArguments(
-  args: Record<string, unknown>,
-  schema?: Record<string, unknown>,
-): string[] {
-  if (!schema) return [];
-  const errors: string[] = [];
-  const missing = findMissingRequired(args, schema);
-  for (const field of missing) errors.push(`Missing required field: ${field}`);
-  if (checkAnyOfUnsatisfied(args, schema)) {
-    errors.push("Arguments do not satisfy any allowed schema branch");
-  }
-
-  const properties = schema.properties;
-  if (properties && typeof properties === "object") {
-    for (const [field, value] of Object.entries(args)) {
-      const fieldSchema = (properties as Record<string, unknown>)[field];
-      if (!fieldSchema || typeof fieldSchema !== "object") continue;
-      const expected = (fieldSchema as Record<string, unknown>).type;
-      if (typeof expected === "string" && !matchesType(value, expected)) {
-        errors.push(`Field '${field}' must be ${expected}`);
-      }
-    }
-  }
-  return errors;
-}
-
-function matchesType(value: unknown, expected: string): boolean {
-  switch (expected) {
-    case "string": return typeof value === "string";
-    case "number": return typeof value === "number" && Number.isFinite(value);
-    case "integer": return typeof value === "number" && Number.isInteger(value);
-    case "boolean": return typeof value === "boolean";
-    case "array": return Array.isArray(value);
-    case "object": return !!value && typeof value === "object" && !Array.isArray(value);
-    case "null": return value === null;
-    default: return true;
-  }
+function decrementSignature(counts: Map<string, number>, signature: string): void {
+  const count = counts.get(signature) ?? 0;
+  if (count <= 1) counts.delete(signature);
+  else counts.set(signature, count - 1);
 }
 
 function stableStringify(value: unknown): string {

@@ -116,19 +116,128 @@ describe("AgentLoopEngine ReAct integration", () => {
       expect.objectContaining({ status: "waiting_user" }),
     );
   });
+
+  test("writes memory after a waiting_user continuation completes", async () => {
+    const runState = new InMemoryRunStateManager();
+    const existing = checkpoint("msg_existing");
+    await runState.createRun(input);
+    await runState.markStatus(input.runId, "running");
+    await runState.saveTaskState(input.runId, {
+      goal: "waiting for user",
+      completedSteps: [],
+      pendingSteps: [],
+      gatheredFacts: { reactCheckpoint: existing },
+      openQuestions: [],
+      iteration: 0,
+    });
+    await runState.markStatus(input.runId, "waiting_user");
+
+    const reactLoopRunner = {
+      run: vi.fn(),
+      resumeWithUserInput: vi.fn(async ({ stream }: {
+        stream: {
+          startTextPart(role: "final"): { id: string };
+          appendText(id: string, value: string): void;
+          completeTextPart(id: string): void;
+        };
+      }) => {
+        const part = stream.startTextPart("final");
+        stream.appendText(part.id, "继续完成");
+        stream.completeTextPart(part.id);
+        return {
+          type: "completed" as const,
+          messageId: existing.messageId,
+          content: "继续完成",
+          artifacts: [],
+          toolCalls: [],
+          checkpoint: existing,
+          timing: emptyTiming(),
+        };
+      }),
+    };
+    const writeFromTurn = vi.fn(async () => ({
+      written: [],
+      rejected: [],
+      superseded: [],
+    }));
+    const engine = createEngine(runState, reactLoopRunner, [], [], {
+      memoryWriter: { writeFromTurn },
+    });
+
+    const result = await engine.resumeWithUserInput(
+      { runId: input.runId, message: "补充信息" },
+      new AbortController().signal,
+    );
+
+    expect(result.status).toBe("completed");
+    expect(writeFromTurn).toHaveBeenCalledWith(expect.objectContaining({
+      responseMessageId: existing.messageId,
+      turnCompleted: true,
+    }));
+  });
+
+  test("keeps task-scoped safety state when a continuation suspends again", async () => {
+    const runState = new InMemoryRunStateManager();
+    const existing = checkpoint("msg_existing");
+    await runState.createRun(input);
+    await runState.markStatus(input.runId, "running");
+    await runState.saveTaskState(input.runId, {
+      goal: "waiting for user",
+      completedSteps: [],
+      pendingSteps: [],
+      gatheredFacts: { reactCheckpoint: existing },
+      openQuestions: [],
+      iteration: 0,
+    });
+    await runState.markStatus(input.runId, "waiting_user");
+
+    const reactLoopRunner = {
+      run: vi.fn(),
+      resumeWithUserInput: vi.fn(async () => ({
+        type: "waiting_user" as const,
+        messageId: existing.messageId,
+        question: "还需要一个值",
+        missingFields: ["value"],
+        checkpoint: existing,
+        timing: emptyTiming(),
+      })),
+    };
+    const clearSafetyState = vi.fn();
+    const engine = createEngine(runState, reactLoopRunner, [], [], {
+      clearSafetyState,
+    });
+
+    const result = await engine.resumeWithUserInput(
+      { runId: input.runId, message: "第一次补充" },
+      new AbortController().signal,
+    );
+
+    expect(result.status).toBe("waiting_user");
+    expect(clearSafetyState).not.toHaveBeenCalled();
+  });
 });
 
 function createEngine(
   runState: InMemoryRunStateManager,
-  reactLoopRunner: { run: ReturnType<typeof vi.fn> },
+  reactLoopRunner: {
+    run: ReturnType<typeof vi.fn>;
+    resumeWithUserInput?: ReturnType<typeof vi.fn>;
+  },
   saved: Array<{ id: string; content: string; metadata?: Record<string, unknown> }> | unknown[],
   approvals: unknown[] = [],
+  options?: {
+    memoryWriter?: {
+      writeFromTurn: ReturnType<typeof vi.fn>;
+    };
+    clearSafetyState?: ReturnType<typeof vi.fn>;
+  },
 ) {
   return new AgentLoopEngine({
     contextBuilder: { async build() { return context; } },
     reactLoopRunner: reactLoopRunner as never,
     executionOrchestrator: {
       async execute() { throw new Error("execution must be owned by the runner"); },
+      clearSafetyState: options?.clearSafetyState,
     },
     approvalGate: {
       async createApproval(value) {
@@ -143,6 +252,7 @@ function createEngine(
     saveMessage: async (message) => {
       saved.push(message);
     },
+    memoryWriter: options?.memoryWriter as never,
   });
 }
 

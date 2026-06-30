@@ -83,6 +83,7 @@ export class ContextAssemblyPipeline {
       "You are SunPilot, a concise and capable local agent assistant.";
     const rules = this.deps.systemPrompt?.rules ?? [
       "Always respond in the same language as the user.",
+      "Use rich Markdown formatting in responses: headings, lists, tables, code blocks with language tags, bold, italic, and links — to make answers clear and scannable.",
       "Use tools when they help complete the task more effectively.",
       "Cite memory sources when using remembered information.",
     ];
@@ -928,11 +929,44 @@ export class ContextAssemblyPipeline {
       // Avoid spending context tokens on the descriptive skill catalog for
       // obvious greetings. This does not decide Action availability: the
       // ReAct runner independently retrieves and exposes its tool snapshot.
+      //
+      // English patterns use \b (word boundary) — works for ASCII.
+      // Chinese patterns use a lookahead for natural phrase boundaries
+      // (punctuation / whitespace / EOS) because \b never matches CJK characters.
+      const CH_BOUNDARY = '(?=[，,。.!！?？\\s\\-—…~～、：:]|$)';
+
       const SKIP_SKILL_PATTERNS = [
-        /^(hi|hello|hey|你好|嗨|哈喽|早|晚上好|下午好)\b/i,
-        /^(thanks|thank you|thx|谢谢|多谢|感谢)\b/i,
-        /^(bye|goodbye|再见|拜拜)\b/i,
-        /^(ok|okay|好的|嗯|ok啦)\s*[.!?]?$/i,
+        // ── English ──
+        /^(hi|hello|hey|heya|heyo|howdy|good\s*morning|good\s*afternoon|good\s*evening|morning|evening)\b/i,
+        /^(thanks|thank\s*you|thx|ty|thnx)\b/i,
+        /^(bye|goodbye|see\s*(you|ya|u)|cya|later|peace)\b/i,
+        /^(ok|okay|k|alright|sure|got\s*it|understood)\b/i,
+
+        // ── Chinese greetings / 问候 ──
+        new RegExp(
+          `^(你[们]?好[啊呀哦呐吧吗喵]?|您[好][啊呀哦]?|大家[好]|` +
+          `嗨[喽啰罗]?[啊呀哦]?|哈[喽啰罗]?[啊呀哦]?|` +
+          `早[上安]?[好]?[啊呀哦]?|早上好|中午好|下午好|晚上好|晚安|` +
+          `[在][吗么不]?[?？]?)${CH_BOUNDARY}`,
+          'i'),
+
+        // ── Chinese thanks / 感谢 ──
+        new RegExp(
+          `^(谢谢[啊呀哦呐啦咯]?[你]?|多谢[啊呀哦啦咯]?|感谢[啊呀哦啦咯]?|` +
+          `谢了[啊呀哦]?|辛苦[了啦][啊呀哦]?|有劳[了]?|3[Qq]|三[Qq])${CH_BOUNDARY}`,
+          'i'),
+
+        // ── Chinese goodbyes / 告别 ──
+        new RegExp(
+          `^(再见[啊呀哦呐啦咯]?|拜拜?[啊呀哦啦]?|88|886|` +
+          `晚安[啊呀哦啦]?|回[头儿]见|下次[再]?聊|先[走撤]了)${CH_BOUNDARY}`,
+          'i'),
+
+        // ── Chinese acknowledgments / 确认 (short full-message only) ──
+        /^(好[的了啊呀哦嗯吧吗滴哟]?|嗯+[啊呀哦嗯]?|行[啊呀哦吧了]?|可以[啊呀哦]?|知道了|明白了|懂了|收到|了解|没问题[啊呀哦]?|[Oo][Kk][啦啊呀哦]?|okk?)\s*[!！?？。.,，…~\s]*$/,
+
+        // ── Pure punctuation / whitespace ──
+        /^[!！?？。.,，…~～、\s]+$/,
       ];
       const isCasualMessage = SKIP_SKILL_PATTERNS.some((p) => p.test(input.message.trim()));
       const tSkills = Date.now();

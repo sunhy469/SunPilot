@@ -63,10 +63,7 @@ export class AgentLoopEngine {
 
   constructor(private readonly deps: AgentLoopEngineDeps) {
     this.approvalFlow = new ApprovalFlowCoordinator(deps);
-    this.approvalContinuation = new ApprovalContinuationCoordinator(
-      deps,
-      () => undefined,
-    );
+    this.approvalContinuation = new ApprovalContinuationCoordinator(deps);
     this.runOutcomes = new RunOutcomeCoordinator(deps, (runId) =>
       this.cleanupRun(runId),
     );
@@ -76,7 +73,6 @@ export class AgentLoopEngine {
     input: AgentLoopInput,
     signal: AbortSignal,
   ): Promise<AgentLoopResult> {
-    this.deps.traceManager?.startTrace(input.runId, input.conversationId);
     const messageId = `msg_${crypto.randomUUID()}`;
     if (!this.deps.saveMessage) {
       throw Object.assign(
@@ -84,6 +80,7 @@ export class AgentLoopEngine {
         { code: "AGENT_STREAM_SAVE_MESSAGE_REQUIRED" },
       );
     }
+    this.deps.traceManager?.startTrace(input.runId, input.conversationId);
 
     const stream = new AssistantMessageStream({
       runId: input.runId,
@@ -100,7 +97,7 @@ export class AgentLoopEngine {
     );
     stream.start();
     const preparingStatus = stream.startStatus({
-      label: "正在准备上下文…",
+      label: "正在思考…",
       metadata: { phase: "running" },
     });
 
@@ -133,7 +130,7 @@ export class AgentLoopEngine {
       });
       stream.updateStatus(preparingStatus.id, {
         status: "completed",
-        label: "上下文已准备，正在判断下一步…",
+        label: "正在思考…",
       });
 
       const result = await this.deps.reactLoopRunner.run(
@@ -239,22 +236,18 @@ export class AgentLoopEngine {
     },
     signal: AbortSignal,
   ): Promise<AgentLoopResult> {
-    try {
-      return await this.approvalContinuation.continueAfterRejection(input, signal);
-    } finally {
-      this.cleanupRun(input.runId);
-    }
+    const result = await this.approvalContinuation.continueAfterRejection(input, signal);
+    this.cleanupIfTerminal(input.runId, result);
+    return result;
   }
 
   async resumeApprovedTool(
     approval: ApprovalResumeInput,
     signal: AbortSignal,
   ): Promise<AgentLoopResult> {
-    try {
-      return await this.approvalContinuation.resumeApprovedTool(approval, signal);
-    } finally {
-      this.cleanupRun(approval.runId);
-    }
+    const result = await this.approvalContinuation.resumeApprovedTool(approval, signal);
+    this.cleanupIfTerminal(approval.runId, result);
+    return result;
   }
 
   async resumeWithUserInput(
@@ -262,26 +255,28 @@ export class AgentLoopEngine {
       runId: string;
       conversationId?: string;
       userId?: string;
+      userMessageId?: string;
       message: string;
     },
     signal: AbortSignal,
   ): Promise<AgentLoopResult> {
-    try {
-      return await this.approvalContinuation.resumeWithUserInput(input, signal);
-    } finally {
-      this.cleanupRun(input.runId);
-    }
+    const result = await this.approvalContinuation.resumeWithUserInput(input, signal);
+    this.cleanupIfTerminal(input.runId, result);
+    return result;
   }
 
   async resumeInterrupted(
     input: { runId: string; userId?: string },
     signal: AbortSignal,
   ): Promise<AgentLoopResult> {
-    try {
-      return await this.approvalContinuation.resumeInterrupted(input, signal);
-    } finally {
-      this.cleanupRun(input.runId);
-    }
+    const result = await this.approvalContinuation.resumeInterrupted(input, signal);
+    this.cleanupIfTerminal(input.runId, result);
+    return result;
+  }
+
+  /** Release task-scoped execution grants when an inactive run is terminal. */
+  disposeRun(runId: string): void {
+    this.cleanupRun(runId);
   }
 
   private async writeMemories(
@@ -341,6 +336,16 @@ export class AgentLoopEngine {
 
   private cleanupRun(runId: string): void {
     this.deps.executionOrchestrator.clearSafetyState?.(runId);
+  }
+
+  private cleanupIfTerminal(runId: string, result: AgentLoopResult): void {
+    if (
+      result.status === "completed" ||
+      result.status === "cancelled" ||
+      result.status === "failed"
+    ) {
+      this.cleanupRun(runId);
+    }
   }
 
   private startSpan(

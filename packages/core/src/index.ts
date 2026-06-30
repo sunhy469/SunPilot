@@ -87,6 +87,11 @@ export { RepositoryApprovalExpiryService } from "./agent-kernel/persistence/repo
 export { RepositoryApprovalRequestService } from "./agent-kernel/persistence/repository-approval-request-service.js";
 export { RepositoryApprovalGate } from "./agent-kernel/persistence/repository-approval-gate.js";
 export { RepositoryRunStateManager } from "./agent-kernel/persistence/repository-run-state-manager.js";
+export {
+  RunStateReactCheckpointRepository,
+  parseReactCheckpoint,
+} from "./agent-kernel/persistence/react-checkpoint-repository.js";
+export type { ReactCheckpointRepository } from "./agent-kernel/persistence/react-checkpoint-repository.js";
 export { ModelRouter, createSingleModelRouter, createTieredModelRouter } from "./agent-kernel/model-router.js";
 export type {
   ModelPurpose,

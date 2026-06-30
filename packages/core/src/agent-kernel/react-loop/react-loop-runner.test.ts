@@ -74,9 +74,63 @@ describe("ReactLoopRunner", () => {
     );
 
     expect(result.type).toBe("completed");
+    if (result.type === "completed") {
+      expect(result.content).toBe("直接回答");
+    }
     expect(model.run).toHaveBeenCalledTimes(1);
     expect(executor.execute).not.toHaveBeenCalled();
     expect(checkpoints.at(-1)?.modelCalls).toBe(1);
+    expect(checkpoints.at(-1)?.partsSnapshot).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: "text",
+          semanticRole: "final",
+          content: "直接回答",
+        }),
+      ]),
+    );
+  });
+
+  test("includes prior observations and artifacts without emitting orphan tool roles", async () => {
+    const model = scriptedModel([{ text: "context aware", toolCalls: [] }]);
+    const { runner, stream } = createRunner(model);
+    const enrichedContext: AgentContext = {
+      ...context,
+      messages: [{ role: "tool", content: "legacy tool content" }],
+      toolResults: [{
+        toolCallId: "old_call",
+        summary: "old summary",
+        content: "old external content",
+        status: "completed",
+      }],
+      artifacts: [{
+        id: "artifact_1",
+        name: "report.md",
+        type: "text",
+        summary: "existing report",
+      }],
+    };
+
+    await runner.run(
+      { agentInput, context: enrichedContext, messageId: "msg_assistant", stream },
+      new AbortController().signal,
+    );
+
+    const messages = model.run.mock.calls[0]![0].messages as Array<{
+      role: string;
+      content: string;
+    }>;
+    expect(messages.some((message) => message.role === "tool")).toBe(false);
+    expect(messages).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        role: "system",
+        content: expect.stringContaining("old external content"),
+      }),
+      expect.objectContaining({
+        role: "system",
+        content: expect.stringContaining("artifact_1"),
+      }),
+    ]));
   });
 
   test("feeds a tool observation back to the LLM before finalizing", async () => {
@@ -95,6 +149,9 @@ describe("ReactLoopRunner", () => {
     );
 
     expect(result.type).toBe("completed");
+    if (result.type === "completed") {
+      expect(result.content).toBe("找到结果。");
+    }
     expect(executor.execute).toHaveBeenCalledTimes(1);
     const secondTurn = model.run.mock.calls[1]![0] as {
       messages: Array<{ role: string; tool_call_id?: string }>;
@@ -126,6 +183,25 @@ describe("ReactLoopRunner", () => {
     expect(secondTurn.messages.some((message) =>
       message.role === "tool" && message.content.includes("validation failed"),
     )).toBe(true);
+  });
+
+  test("persists the empty-final fallback in the transcript checkpoint", async () => {
+    const model = scriptedModel([{ text: "", toolCalls: [] }]);
+    const { runner, stream } = createRunner(model);
+
+    const result = await runner.run(
+      { agentInput, context, messageId: "msg_assistant", stream },
+      new AbortController().signal,
+    );
+
+    expect(result.type).toBe("completed");
+    if (result.type === "completed") {
+      expect(result.content).toBe("本次模型没有返回可用内容，请重试。");
+      expect(result.checkpoint.transcript.at(-1)).toEqual(expect.objectContaining({
+        role: "assistant",
+        content: "本次模型没有返回可用内容，请重试。",
+      }));
+    }
   });
 
   test("suspends through the request-input control tool", async () => {
@@ -235,6 +311,58 @@ describe("ReactLoopRunner", () => {
     expect(executor.execute.mock.calls[0]![0].calls[0].id).toBe("fixed");
   });
 
+  test("feeds tool failure back so the model can switch tools", async () => {
+    const backupSkill: SkillSummary = {
+      ...searchSkill,
+      id: "test:backup",
+      name: "Backup search",
+    };
+    const model = scriptedModel([
+      { text: "", toolCalls: [toolCall("primary_failed", { query: "shirt" })] },
+      {
+        text: "",
+        toolCalls: [{
+          id: "backup_succeeded",
+          type: "function",
+          function: {
+            name: "test_backup",
+            arguments: '{"query":"shirt"}',
+          },
+        }],
+      },
+      { text: "used backup", toolCalls: [] },
+    ]);
+    const harness = createRunner(model, [searchSkill, backupSkill], {
+      execute: async ({ calls }) => ({
+        summaries: calls.map((call) => ({
+          id: call.id,
+          skillId: call.skillId,
+          name: call.name,
+          status: call.id === "primary_failed" ? "failed" as const : "completed" as const,
+          summary: call.id === "primary_failed" ? "primary unavailable" : "backup result",
+        })),
+        artifacts: [],
+      }),
+    });
+
+    const result = await harness.runner.run(
+      { agentInput, context, messageId: "msg_assistant", stream: harness.stream },
+      new AbortController().signal,
+    );
+
+    expect(result.type).toBe("completed");
+    expect(harness.executor.execute).toHaveBeenCalledTimes(2);
+    expect(model.run.mock.calls[1]![0].messages).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          role: "tool",
+          tool_call_id: "primary_failed",
+          content: expect.stringContaining("primary unavailable"),
+        }),
+      ]),
+    );
+  });
+
   test("forces one final no-tool turn when the round budget is exhausted", async () => {
     const model = scriptedModel([
       { text: "", toolCalls: [toolCall("call_1", { query: "shirt" })] },
@@ -251,7 +379,11 @@ describe("ReactLoopRunner", () => {
 
     expect(result.type).toBe("completed");
     expect(model.run.mock.calls[1]![0]).toEqual(
-      expect.objectContaining({ disableTools: true, textRole: "final" }),
+      expect.objectContaining({
+        disableTools: true,
+        textRole: "final",
+        maxTokens: 1_000,
+      }),
     );
   });
 
@@ -403,6 +535,211 @@ describe("ReactLoopRunner", () => {
     )).rejects.toMatchObject({ name: "AbortError" });
     expect(model.run).not.toHaveBeenCalled();
   });
+
+  test("stops after cancellation during tool execution", async () => {
+    const controller = new AbortController();
+    const model = scriptedModel([
+      { text: "", toolCalls: [toolCall("cancel_tool", { query: "shirt" })] },
+    ]);
+    const harness = createRunner(model, [searchSkill], {
+      execute: async ({ calls }) => {
+        controller.abort();
+        return {
+          summaries: calls.map((call) => ({
+            id: call.id,
+            skillId: call.skillId,
+            name: call.name,
+            status: "cancelled" as const,
+            summary: "cancelled",
+          })),
+          artifacts: [],
+        };
+      },
+    });
+
+    await expect(harness.runner.run(
+      { agentInput, context, messageId: "msg_assistant", stream: harness.stream },
+      controller.signal,
+    )).rejects.toMatchObject({ name: "AbortError" });
+    expect(model.run).toHaveBeenCalledTimes(1);
+  });
+
+  test("closes native tool calls before retrying a model protocol error", async () => {
+    const model = scriptedModel([
+      {
+        text: "",
+        toolCalls: [toolCall("partial_batch", { query: "shirt" })],
+        protocolError: "incomplete native tool-call delta",
+      },
+      { text: "recovered", toolCalls: [] },
+    ]);
+    const { runner, stream, executor } = createRunner(model);
+
+    const result = await runner.run(
+      { agentInput, context, messageId: "msg_assistant", stream },
+      new AbortController().signal,
+    );
+
+    expect(result.type).toBe("completed");
+    expect(executor.execute).not.toHaveBeenCalled();
+    expect(model.run.mock.calls[1]![0].messages).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ role: "tool", tool_call_id: "partial_batch" }),
+      ]),
+    );
+  });
+
+  test("returns malformed or mixed request-input actions to the model", async () => {
+    const ask = (id: string, argumentsValue: string) => ({
+      id,
+      type: "function" as const,
+      function: { name: "agent_request_input", arguments: argumentsValue },
+    });
+    const malformedModel = scriptedModel([
+      { text: "", toolCalls: [ask("ask_bad", "{")] },
+      { text: "fixed", toolCalls: [] },
+    ]);
+    const malformedHarness = createRunner(malformedModel);
+    const malformed = await malformedHarness.runner.run(
+      {
+        agentInput,
+        context,
+        messageId: "msg_assistant",
+        stream: malformedHarness.stream,
+      },
+      new AbortController().signal,
+    );
+    expect(malformed.type).toBe("completed");
+    expect(malformedModel.run.mock.calls[1]![0].messages).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ role: "tool", tool_call_id: "ask_bad" }),
+      ]),
+    );
+
+    const mixedModel = scriptedModel([
+      {
+        text: "",
+        toolCalls: [
+          ask("ask_mixed", '{"question":"query?"}'),
+          toolCall("call_mixed", { query: "shirt" }),
+        ],
+      },
+      { text: "fixed mixed batch", toolCalls: [] },
+    ]);
+    const mixedHarness = createRunner(mixedModel);
+    const mixed = await mixedHarness.runner.run(
+      { agentInput, context, messageId: "msg_assistant", stream: mixedHarness.stream },
+      new AbortController().signal,
+    );
+    expect(mixed.type).toBe("completed");
+    expect(mixedHarness.executor.execute).not.toHaveBeenCalled();
+    expect(mixedModel.run.mock.calls[1]![0].messages).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ role: "tool", tool_call_id: "ask_mixed" }),
+        expect.objectContaining({ role: "tool", tool_call_id: "call_mixed" }),
+      ]),
+    );
+  });
+
+  test("re-retrieves tools after user input on the same transcript", async () => {
+    const model = scriptedModel([
+      {
+        text: "",
+        toolCalls: [{
+          id: "ask_refresh",
+          type: "function",
+          function: {
+            name: "agent_request_input",
+            arguments: '{"question":"query?"}',
+          },
+        }],
+      },
+      { text: "done", toolCalls: [] },
+    ]);
+    const retriever = new ToolCatalogRetriever();
+    const retrieve = vi.spyOn(retriever, "retrieve");
+    const harness = createRunner(model, [searchSkill], { retriever });
+    const waiting = await harness.runner.run(
+      { agentInput, context, messageId: "msg_assistant", stream: harness.stream },
+      new AbortController().signal,
+    );
+    if (waiting.type !== "waiting_user") throw new Error("expected waiting_user");
+
+    await harness.runner.resumeWithUserInput({
+      agentInput: { ...agentInput, message: "shoes" },
+      context: {
+        ...context,
+        currentMessage: { ...context.currentMessage, content: "shoes" },
+      },
+      checkpoint: waiting.checkpoint,
+      stream: harness.stream,
+      userMessage: "shoes",
+    }, new AbortController().signal);
+
+    expect(retrieve).toHaveBeenCalledTimes(2);
+    expect(retrieve.mock.calls[1]![0].query).toBe("shoes");
+  });
+
+  test("rejects an approval payload that differs from the frozen batch", async () => {
+    const dangerousSkill: SkillSummary = {
+      ...searchSkill,
+      id: "test:delete",
+      name: "Delete resource",
+      permissions: ["filesystem.delete"],
+      riskHints: { defaultRisk: "high" },
+    };
+    const model = scriptedModel([{
+      text: "",
+      toolCalls: [{
+        id: "delete_scope",
+        type: "function",
+        function: { name: "test_delete", arguments: '{"query":"x"}' },
+      }],
+    }]);
+    const harness = createRunner(model, [dangerousSkill]);
+    const waiting = await harness.runner.run(
+      { agentInput, context, messageId: "msg_assistant", stream: harness.stream },
+      new AbortController().signal,
+    );
+    if (waiting.type !== "waiting_approval") throw new Error("expected approval");
+
+    await expect(harness.runner.resumeAfterApprovedTools({
+      agentInput,
+      context,
+      checkpoint: waiting.checkpoint,
+      stream: harness.stream,
+      approvedTools: [{
+        toolCallId: "delete_scope",
+        skillId: "test:delete",
+        arguments: { query: "tampered" },
+      }],
+    }, new AbortController().signal)).rejects.toMatchObject({
+      code: "AGENT_APPROVAL_SCOPE_MISMATCH",
+    });
+    expect(harness.executor.execute).not.toHaveBeenCalled();
+  });
+
+  test("does not call the model again after the wall-clock deadline", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    try {
+      const model = scriptedModel([
+        { text: "", toolCalls: [toolCall("deadline_call", { query: "shirt" })] },
+        { text: "must not run", toolCalls: [] },
+      ], () => vi.setSystemTime(2_000));
+      const { runner, stream } = createRunner(model, [searchSkill], {
+        limits: { maxWallClockMs: 1_000 },
+      });
+
+      await expect(runner.run(
+        { agentInput, context, messageId: "msg_assistant", stream },
+        new AbortController().signal,
+      )).rejects.toMatchObject({ code: "AGENT_REACT_DEADLINE_EXCEEDED" });
+      expect(model.run).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
 function createRunner(
@@ -411,9 +748,17 @@ function createRunner(
   options?: {
     limits?: Partial<import("./react-types.js").ReactLoopLimits>;
     execute?: (input: { calls: Array<{ id: string; skillId: string; name: string }> }) => Promise<{
-      summaries: Array<{ id: string; skillId: string; name: string; status: "completed" | "failed"; summary: string; content?: string }>;
+      summaries: Array<{
+        id: string;
+        skillId: string;
+        name: string;
+        status: "completed" | "failed" | "cancelled" | "timeout";
+        summary: string;
+        content?: string;
+      }>;
       artifacts: [];
     }>;
+    retriever?: ToolCatalogRetriever;
   },
 ) {
   const eventBus = new InMemoryAgentEventBus();
@@ -435,7 +780,7 @@ function createRunner(
   const observations = new ObservationBuilder(8_000);
   const runner = new ReactLoopRunner({
     listSkills: async () => skills,
-    retriever: new ToolCatalogRetriever(),
+    retriever: options?.retriever ?? new ToolCatalogRetriever(),
     modelTurn: model as never,
     guard: new ToolCallGuard({
       async evaluate(input) {
@@ -473,7 +818,9 @@ function scriptedModel(
       type: "function";
       function: { name: string; arguments: string };
     }>;
+    protocolError?: string;
   }>,
+  beforeFirstReturn?: () => void,
 ) {
   let index = 0;
   return {
@@ -482,6 +829,7 @@ function scriptedModel(
       textRole: "progress" | "final";
     }) => {
       const turn = turns[index++]!;
+      if (index === 1) beforeFirstReturn?.();
       let textPartId: string | undefined;
       if (turn.text && input.stream) {
         const part = input.stream.startTextPart(input.textRole);
@@ -495,6 +843,7 @@ function scriptedModel(
         textPartId,
         firstTokenMs: 1,
         modelCallId: `model_${index}`,
+        protocolError: turn.protocolError,
       };
     }),
   };

@@ -76,20 +76,19 @@ export class ReactToolExecutor {
       },
       signal,
     );
+    const summariesById = new Map(
+      observation.toolCalls.map((summary) => [summary.id, summary]),
+    );
+    const orderedSummaries = input.calls.flatMap((call) => {
+      const summary = summariesById.get(call.id);
+      return summary ? [summary] : [];
+    });
 
-    for (const summary of observation.toolCalls) {
+    for (const summary of orderedSummaries) {
       const ok = summary.status === "completed";
-      this.eventBus.emit(
-        ok ? "agent.tool.completed" : "agent.tool.failed",
-        {
-          runId: input.runId,
-          toolCallId: summary.id,
-          skillId: summary.skillId,
-          summary: summary.summary,
-          artifacts: observation.artifacts.map((artifact) => artifact.id),
-        },
-        { runId: input.runId, conversationId: input.conversationId },
-      );
+      // ExecutionOrchestrator owns agent.tool.completed/failed. Emitting the
+      // same lifecycle event here would duplicate persisted events and UI
+      // updates; this layer only projects the result into message parts.
       if (input.stream) {
         const statusId = statusIds.get(summary.id);
         if (statusId) {
@@ -105,14 +104,17 @@ export class ReactToolExecutor {
           toolCallId: summary.id,
           skillId: summary.skillId,
           summary: summary.summary,
-          artifactIds: observation.artifacts.map((artifact) => artifact.id),
-          trust: ok ? "trusted" : "untrusted",
+          artifactIds: summary.artifactIds ?? [],
+          trust:
+            ok && summary.metadata?.outputTrust !== "untrusted"
+              ? "trusted"
+              : "untrusted",
         });
       }
     }
 
     return {
-      summaries: observation.toolCalls,
+      summaries: orderedSummaries,
       artifacts: observation.artifacts,
     };
   }

@@ -104,7 +104,7 @@ describe("createAgentLoopService", () => {
         },
       });
 
-      expect(modelRouter.getModelForPurpose("response_composition")).toBe(
+      expect(modelRouter.getModelForPurpose("react_turn")).toBe(
         "fake-model",
       );
     } finally {
@@ -249,7 +249,7 @@ describe("createAgentLoopService", () => {
       expect.arrayContaining([
         expect.objectContaining({
           model: "test",
-          purpose: "response_composition",
+          purpose: "react_turn",
           status: "completed",
           runId: result.runId,
         }),
@@ -455,7 +455,7 @@ describe("createAgentLoopService", () => {
       expect.arrayContaining([
         expect.objectContaining({
           model: "test",
-          purpose: "response_composition",
+          purpose: "react_turn",
           status: "completed",
           runId: result.runId,
         }),
@@ -562,7 +562,6 @@ describe("createAgentLoopService", () => {
     const [approval] = await db.approvals.list();
     await service.reject(approval!.id, "tester", "not now");
     await new Promise((resolve) => setTimeout(resolve, 50));
-    console.log("REJECTION_DEBUG", await db.runs.findById(result.runId), await db.events.listByRunId(result.runId));
     await waitFor(async () =>
       (await db.runs.findById(result.runId))?.status === "completed",
     );

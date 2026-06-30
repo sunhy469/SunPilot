@@ -84,7 +84,7 @@ function getAiStatus(
         icon: (
           <LoadingOutlined className="assistant-status__icon assistant-loading-icon" />
         ),
-        text: "正在准备上下文...",
+        text: "正在思考",
       };
     case "streaming":
       if (toolName) {
@@ -751,9 +751,7 @@ export function AssistantMessage({
               statusText={
                 msg.parts?.some((p) => p.type === "tool_result")
                   ? "正在整理结果..."
-                  : isPending
-                    ? "正在准备上下文..."
-                    : "正在思考"
+                  : "正在思考"
               }
             />
           )}

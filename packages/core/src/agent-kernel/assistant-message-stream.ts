@@ -41,8 +41,8 @@ export class AssistantMessageStream implements IAssistantMessageStream {
        *  These parts are NOT re-emitted — they already exist in persisted state. */
       initialParts?: AssistantMessagePart[];
       /**
-       * When true, skip emitting agent.message.started + agent.response.started
-       * in start(). Use this when the caller has already emitted the events
+       * When true, skip emitting agent.message.started in start(). Use this
+       * when the caller has already emitted the event
        * (e.g. AgentLoopEngine.run() emits them early for immediate message card).
        */
       skipStartedEvents?: boolean;

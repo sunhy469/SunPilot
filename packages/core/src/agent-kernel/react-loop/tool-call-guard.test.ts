@@ -39,7 +39,7 @@ describe("ToolCallGuard", () => {
 
   test("blocks an exact duplicate call", async () => {
     const { guard } = createGuard();
-    const seen = new Set([`test:search:{"query":"shirt"}`]);
+    const seen = new Map([[`test:search:{"query":"shirt"}`, 1]]);
     const result = await check(
       guard,
       [call("duplicate", "test_search", '{"query":"shirt"}')],
@@ -80,11 +80,65 @@ describe("ToolCallGuard", () => {
       toolNameMap: new Map([["test_search", skill.id], ["test_write", second.id]]),
       availableSkills: [skill, second],
       permissionMode: "auto",
-      seenSignatures: new Set(),
+      seenSignatures: new Map(),
+      maxRepeatedToolCalls: 1,
     });
 
     expect(result.executable).toEqual([]);
     expect(result.approvalRequired.map((value) => value.id)).toEqual(["read", "write"]);
+  });
+
+  test("does not count a valid sibling that an invalid atomic batch prevented", async () => {
+    const { guard } = createGuard();
+    const seen = new Map<string, number>();
+    const first = await check(
+      guard,
+      [
+        call("valid_sibling", "test_search", '{"query":"shirt"}'),
+        call("invalid_sibling", "test_search", '{}'),
+      ],
+      seen,
+    );
+    expect(first.executable).toEqual([]);
+    expect(seen.get('test:search:{"query":"shirt"}')).toBeUndefined();
+
+    const retry = await check(
+      guard,
+      [call("valid_retry", "test_search", '{"query":"shirt"}')],
+      seen,
+    );
+    expect(retry.executable).toHaveLength(1);
+  });
+
+  test("honors a configured repeated-call threshold", async () => {
+    const { guard } = createGuard();
+    const seen = new Map([[`test:search:{"query":"shirt"}`, 1]]);
+    const result = await guard.check({
+      runId: "run_1",
+      context,
+      calls: [call("allowed_repeat", "test_search", '{"query":"shirt"}')],
+      toolNameMap: new Map([["test_search", skill.id]]),
+      availableSkills: [skill],
+      permissionMode: "auto",
+      seenSignatures: seen,
+      maxRepeatedToolCalls: 2,
+    });
+
+    expect(result.executable).toHaveLength(1);
+    expect(result.observations).toEqual([]);
+  });
+
+  test("rejects duplicate tool_call ids as an atomic protocol error", async () => {
+    const { guard } = createGuard();
+    const result = await check(guard, [
+      call("same_id", "test_search", '{"query":"one"}'),
+      call("same_id", "test_search", '{"query":"two"}'),
+    ]);
+
+    expect(result.executable).toEqual([]);
+    expect(result.observations.some((observation) =>
+      observation.displaySummary.includes("Duplicate tool_call_id"),
+    )).toBe(true);
   });
 });
 
@@ -104,7 +158,7 @@ function createGuard(overrides?: { allowed?: boolean }) {
 function check(
   guard: ToolCallGuard,
   calls: ReturnType<typeof call>[],
-  seenSignatures = new Set<string>(),
+  seenSignatures = new Map<string, number>(),
 ) {
   return guard.check({
     runId: "run_1",
@@ -114,6 +168,7 @@ function check(
     availableSkills: [skill],
     permissionMode: "auto",
     seenSignatures,
+    maxRepeatedToolCalls: 1,
   });
 }
 
