@@ -177,6 +177,8 @@ export interface ToolCallSummary {
   modelObservation?: string;
   /** Audit metadata propagated from PlannedToolCall (§P0-2). */
   metadata?: Record<string, unknown>;
+  /** Artifacts produced by this specific tool call, preserving batch attribution. */
+  artifactIds?: string[];
 }
 
 // ── Context ───────────────────────────────────────────────────────────

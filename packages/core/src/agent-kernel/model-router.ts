@@ -7,7 +7,7 @@ import type { LlmProvider, ChatCompletionRequest, ChatCompletionDelta } from "..
  * context infrastructure and never chooses an Agent action.
  */
 export type ModelPurpose =
-  | "response_composition"
+  | "react_turn"
   | "summary_compression";
 
 // ── Model Config ─────────────────────────────────────────────────────────
@@ -123,7 +123,7 @@ export interface ModelRouterStats {
 /**
  * ModelRouter — routes LLM calls to the most appropriate model based on purpose.
  *
- * `response_composition` is the sole semantic Agent route. Context summary
+ * `react_turn` is the sole semantic Agent route. Context summary
  * compression may use a cheaper model but cannot select actions or tools.
  *
  * Fallback: if the primary model fails, falls back to the next matching
@@ -418,7 +418,7 @@ export function createSingleModelRouter(
   modelCallRecorder?: ModelCallRecorder,
 ): ModelRouter {
   const allPurposes: ModelPurpose[] = [
-    "response_composition",
+    "react_turn",
     "summary_compression",
   ];
 
@@ -455,7 +455,7 @@ export function createTieredModelRouter(params: {
   ];
 
   routes.push({
-    purposes: ["response_composition"],
+    purposes: ["react_turn"],
     priority: 1,
     config: params.primary,
   });

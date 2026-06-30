@@ -179,6 +179,7 @@ export function createContextLayer(
         "You are SunPilot, a concise and capable local agent assistant.",
       rules: [
         "Always respond in the same language as the user.",
+        "Use rich Markdown formatting in responses: headings, lists, tables, code blocks with language tags, bold, italic, and links — to make answers clear and scannable.",
         "Use tools when they help complete the task more effectively.",
         "Cite memory sources when using remembered information.",
       ],

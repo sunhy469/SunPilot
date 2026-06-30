@@ -19,6 +19,7 @@ import type {
   ApprovedToolScope,
   ToolSafetyBoundary,
 } from "./tool-safety-boundary.js";
+import { validateToolArguments } from "../tools/tool-argument-validator.js";
 
 export interface ExecutionOrchestratorDeps {
   /** Executor that actually runs tools (bridges to skill-runner). */
@@ -168,7 +169,7 @@ export class ExecutionOrchestrator implements ExecutionOrchestratorInterface {
     let currentArgs = call.arguments;
     const currentSchema = call.inputSchema;
     if (currentSchema) {
-      const validationErrors = validateArguments(currentArgs, currentSchema);
+      const validationErrors = validateToolArguments(currentArgs, currentSchema);
       if (validationErrors.length > 0) {
         this.deps.eventBus.emit(
           "agent.tool_argument.validation_failed",
@@ -358,6 +359,7 @@ export class ExecutionOrchestrator implements ExecutionOrchestratorInterface {
             projectionHints: call.projectionHints,
             safety: safetyResult.metadata,
           },
+          artifactIds: result.artifacts.map((artifact) => artifact.id),
         };
 
         // Emit appropriate event
@@ -520,66 +522,4 @@ function normalizeRiskLevel(
     return riskLevel;
   }
   return "low";
-}
-
-/**
- * Validate tool arguments against a JSON Schema.
- * Returns a list of validation error messages, or an empty array if valid.
- *
- * Supports:
- * - required fields check
- * - type checks (string, number, array)
- * - enum constraints
- */
-function validateArguments(
-  args: Record<string, unknown>,
-  schema: Record<string, unknown>,
-): string[] {
-  const errors: string[] = [];
-
-  // Check required fields
-  const required = schema.required;
-  if (Array.isArray(required)) {
-    for (const field of required) {
-      if (typeof field !== "string") continue;
-      const value = args[field];
-      if (value === undefined || value === null || value === "") {
-        errors.push(`Missing required field: ${field}`);
-      }
-    }
-  }
-
-  // Check property types if defined
-  const properties = schema.properties;
-  if (properties && typeof properties === "object") {
-    for (const [key, propSchema] of Object.entries(
-      properties as Record<string, Record<string, unknown>>,
-    )) {
-      const value = args[key];
-      if (value === undefined || value === null) continue;
-
-      const propType = propSchema.type;
-      if (propType === "string" && typeof value !== "string") {
-        errors.push(`Field "${key}" must be a string`);
-      }
-      if (propType === "number" || propType === "integer") {
-        if (typeof value !== "number") {
-          errors.push(`Field "${key}" must be a number`);
-        }
-      }
-      if (propType === "array" && !Array.isArray(value)) {
-        errors.push(`Field "${key}" must be an array`);
-      }
-
-      // Check enum constraint
-      const enumValues = propSchema.enum;
-      if (Array.isArray(enumValues) && !enumValues.includes(value)) {
-        errors.push(
-          `Field "${key}" must be one of: ${enumValues.join(", ")}`,
-        );
-      }
-    }
-  }
-
-  return errors;
 }

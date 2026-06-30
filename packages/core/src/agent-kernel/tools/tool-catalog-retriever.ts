@@ -1,4 +1,5 @@
 import type { EmbeddingService } from "../context/embedding-service.js";
+import type { AgentContext } from "../loop-types.js";
 import type { SkillEmbeddingCache } from "./skill-embedding-cache.js";
 import type { SkillSummary } from "./tool-types.js";
 
@@ -29,6 +30,7 @@ export class ToolCatalogRetriever {
 
   async retrieve(input: {
     query: string;
+    context?: AgentContext;
     availableSkills: SkillSummary[];
     limit: number;
     permissionMode: "ask" | "auto" | "full";
@@ -43,7 +45,7 @@ export class ToolCatalogRetriever {
       };
     }
 
-    const query = input.query.trim();
+    const query = buildRetrievalQuery(input.query, input.context);
     const queryLower = query.toLowerCase();
     const queryTokens = tokenize(queryLower);
     const scored = enabled.map((skill) => {
@@ -92,9 +94,14 @@ export class ToolCatalogRetriever {
     scored.sort((a, b) => b.score - a.score);
 
     const limit = Math.max(1, Math.min(input.limit, enabled.length));
-    const selected = scored.slice(0, limit);
+    let selected = scored.slice(0, limit);
     const fallbackUsed = selected.every((entry) => entry.score < 0.1);
     if (fallbackUsed) {
+      if (input.permissionMode !== "full") {
+        selected = scored
+          .filter((entry) => entry.skill.riskHints.defaultRisk !== "critical")
+          .slice(0, limit);
+      }
       for (const entry of selected) {
         entry.matchReasons.push("broad_fallback");
       }
@@ -154,6 +161,21 @@ export class ToolCatalogRetriever {
       // turn into a semantic no-tool decision.
     }
   }
+}
+
+function buildRetrievalQuery(query: string, context?: AgentContext): string {
+  if (!context) return query.trim();
+  const recentUserContext = context.messages
+    .filter((message) => message.role === "user")
+    .slice(-3)
+    .map((message) => message.content);
+  const attachments = context.currentMessage.attachments.map((attachment) =>
+    `${attachment.name} ${attachment.type}`,
+  );
+  return [query, ...recentUserContext, ...attachments]
+    .filter((value) => value.trim().length > 0)
+    .join("\n")
+    .trim();
 }
 
 function tokenize(text: string): string[] {

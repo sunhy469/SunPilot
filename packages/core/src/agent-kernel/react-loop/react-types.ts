@@ -7,6 +7,9 @@ import type {
   ToolCallSummary,
 } from "../loop-types.js";
 
+export type { ReactLoopLimits } from "./loop-limits.js";
+export { DEFAULT_REACT_LOOP_LIMITS } from "./loop-limits.js";
+
 export type ReactObservationKind =
   | "tool_completed"
   | "tool_failed"
@@ -61,24 +64,6 @@ export interface ReactCheckpoint {
   permissionMode: PermissionMode;
   updatedAt: string;
 }
-
-export interface ReactLoopLimits {
-  maxToolRounds: number;
-  maxModelCalls: number;
-  maxWallClockMs: number;
-  maxRepeatedToolCalls: number;
-  maxObservationChars: number;
-  toolCatalogLimit: number;
-}
-
-export const DEFAULT_REACT_LOOP_LIMITS: ReactLoopLimits = {
-  maxToolRounds: 8,
-  maxModelCalls: 10,
-  maxWallClockMs: 10 * 60_000,
-  maxRepeatedToolCalls: 1,
-  maxObservationChars: 8_000,
-  toolCatalogLimit: 12,
-};
 
 export interface ReactLoopTiming {
   toolRetrievalMs: number;

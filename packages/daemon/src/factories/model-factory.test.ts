@@ -45,7 +45,7 @@ describe("createModelLayer", () => {
         // the injected provider.
       });
 
-      expect(modelRouter.getModelForPurpose("response_composition")).toBe(
+      expect(modelRouter.getModelForPurpose("react_turn")).toBe(
         "fake-model",
       );
     } finally {

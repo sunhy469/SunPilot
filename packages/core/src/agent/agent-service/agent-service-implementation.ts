@@ -92,14 +92,15 @@ export interface AgentLoopServiceConfig {
  * 职责边界：
  * - AgentService 是"门面"，负责：请求校验、会话管理、幂等性、Abort 控制、
  *   EventBus 订阅→推流钩子转发、审批裁决。
- * - AgentLoopEngine 是"引擎"，负责：上下文构建→意图路由→规划→工具决策→
- *   安全→执行→反思→响应→记忆 的完整状态机流转。
+ * - AgentLoopEngine 是"引擎"，负责上下文与候选工具准备，并委托统一
+ *   ReAct Action → Guard → Observation 循环，最后完成持久化和记忆写入。
  *
  * 所有聊天命令通过 handleChatCommand → AgentLoopEngine.run 路由。
  * chat() 方法仅为旧 REST 调用方的兼容适配器，内部仍走 Agent Loop。
  */
 export class AgentServiceImplementation {
   private readonly loopConfig: AgentLoopServiceConfig;
+  private readonly activeResumes = new Set<string>();
 
   constructor(config: AgentLoopServiceConfig) {
     this.loopConfig = config;
@@ -661,6 +662,7 @@ export class AgentServiceImplementation {
   ): Promise<{ cancelled: true; runId: string; stopped: boolean }> {
     const stopped = this.loopConfig.abortRegistry.abort(runId);
     await this.loopConfig.runStateManager.markCancelled(runId, reason);
+    this.loopConfig.loopEngine.disposeRun?.(runId);
     const run = await this.loopConfig.runStateManager.getRun(runId);
     this.loopConfig.eventBus.emit(
       "agent.run.cancelled",
@@ -695,13 +697,23 @@ export class AgentServiceImplementation {
           },
         );
       }
-      const signal = this.loopConfig.abortRegistry.create(runId);
+      const releaseResume = this.acquireResume(runId);
       try {
+        const signal = this.loopConfig.abortRegistry.create(runId);
+        const message = userMessage.trim();
+        const userMessageId = `msg_${crypto.randomUUID()}`;
+        await this.loopConfig.conversations?.createMessage({
+          id: userMessageId,
+          conversationId: run.conversationId,
+          role: "user",
+          content: message,
+        });
         const result = await this.loopConfig.loopEngine.resumeWithUserInput(
           {
             runId,
             conversationId: run.conversationId,
-            message: userMessage.trim(),
+            userMessageId,
+            message,
           },
           signal,
         );
@@ -715,11 +727,13 @@ export class AgentServiceImplementation {
         };
       } finally {
         this.loopConfig.abortRegistry.remove(runId);
+        releaseResume();
       }
     }
     if (run?.status === "interrupted" && run.taskState?.gatheredFacts.reactCheckpoint) {
-      const signal = this.loopConfig.abortRegistry.create(runId);
+      const releaseResume = this.acquireResume(runId);
       try {
+        const signal = this.loopConfig.abortRegistry.create(runId);
         const result = await this.loopConfig.loopEngine.resumeInterrupted(
           { runId },
           signal,
@@ -734,9 +748,23 @@ export class AgentServiceImplementation {
         };
       } finally {
         this.loopConfig.abortRegistry.remove(runId);
+        releaseResume();
       }
     }
     return this.createRunAttempt(runId, "resume");
+  }
+
+  private acquireResume(runId: string): () => void {
+    if (this.activeResumes.has(runId)) {
+      throw Object.assign(
+        new Error(`Run ${runId} is already being resumed`),
+        { code: "AGENT_RUN_STATE_CONFLICT", category: "run_state" },
+      );
+    }
+    this.activeResumes.add(runId);
+    return () => {
+      this.activeResumes.delete(runId);
+    };
   }
 
   /**
@@ -893,6 +921,7 @@ export class AgentServiceImplementation {
           approval.runId,
           reason ?? "approval rejected — cancelled by user",
         );
+        this.loopConfig.loopEngine.disposeRun?.(approval.runId);
         this.loopConfig.abortRegistry.abort(approval.runId);
         // §P0-1: Emit terminal event so frontend can clean up pending state
         this.loopConfig.eventBus.emit(

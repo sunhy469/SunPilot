@@ -63,6 +63,49 @@ describe("ReactModelTurn", () => {
     expect(result.protocolError).toBe("malformed textual function call");
   });
 
+  test("deduplicates malformed native tool_call ids before building the transcript", async () => {
+    const { turn } = createTurn([{
+      delta: "",
+      toolCalls: [
+        {
+          index: 0,
+          id: "duplicate_id",
+          type: "function" as const,
+          function: { name: "search", arguments: '{"query":"a"}' },
+        },
+        {
+          index: 1,
+          id: "duplicate_id",
+          type: "function" as const,
+          function: { name: "search", arguments: '{"query":"b"}' },
+        },
+      ],
+      raw: {},
+    }]);
+
+    const result = await turn.run(baseInput(), new AbortController().signal);
+
+    expect(result.toolCalls).toHaveLength(1);
+    expect(result.protocolError).toBe("duplicate native tool_call_id");
+  });
+
+  test("reserves the configured output budget for a no-tool finalization turn", async () => {
+    const { turn, requests } = createTurn([{ delta: "summary", raw: {} }]);
+
+    await turn.run({
+      ...baseInput(),
+      disableTools: true,
+      maxTokens: 321,
+      textRole: "final",
+    }, new AbortController().signal);
+
+    expect(requests[0]).toEqual(expect.objectContaining({
+      maxTokens: 321,
+      tool_choice: "none",
+      tools: undefined,
+    }));
+  });
+
   test("emits a failed event and preserves abort errors", async () => {
     const eventBus = new InMemoryAgentEventBus();
     const events: string[] = [];
@@ -101,13 +144,16 @@ function createTurn(chunks: Array<Record<string, unknown>>) {
   const eventBus = new InMemoryAgentEventBus();
   const events: Array<{ type: string }> = [];
   eventBus.subscribe((event) => events.push({ type: event.type }));
+  const requests: unknown[] = [];
   const modelRouter = {
-    async *streamChat() {
+    async *streamChat(_purpose: unknown, request: unknown) {
+      requests.push(request);
       for (const chunk of chunks) yield chunk;
     },
   };
   return {
     turn: new ReactModelTurn({ modelRouter: modelRouter as never, eventBus }),
     events,
+    requests,
   };
 }

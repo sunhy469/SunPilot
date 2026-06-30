@@ -48,7 +48,7 @@ CREATE TABLE IF NOT EXISTS agent_trace_spans (
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-COMMENT ON COLUMN agent_trace_spans.kind IS 'Phase kind: context_building|intent_routing|planning|tool_deciding|tool_executing|reflecting|responding|memory_writing|approval_handling';
+COMMENT ON COLUMN agent_trace_spans.kind IS 'Phase kind: context_building|tool_retrieval|react_model_turn|tool_guard|tool_executing|observation_building|checkpoint_persistence|memory_writing|approval_handling';
 COMMENT ON COLUMN agent_trace_spans.metadata IS 'model_call_ids, tool_call_ids, event_sequences, purpose';
 
 CREATE INDEX IF NOT EXISTS idx_agent_trace_spans_trace ON agent_trace_spans(trace_id);

@@ -56,25 +56,11 @@ function normalizeSchemaForLlm(
   }
 
   const normalized = { ...schema };
-  const branches = [
-    ...(Array.isArray(normalized.anyOf) ? normalized.anyOf : []),
-    ...(Array.isArray(normalized.oneOf) ? normalized.oneOf : []),
-  ] as Array<Record<string, unknown>>;
-  delete normalized.anyOf;
-  delete normalized.oneOf;
-  delete normalized.allOf;
 
-  if (branches.length > 0 && !Array.isArray(normalized.required)) {
-    normalized.required = [];
-    const alternatives = branches
-      .map((branch) => Array.isArray(branch.required) ? branch.required.join(" + ") : "")
-      .filter(Boolean);
-    if (alternatives.length > 0) {
-      normalized.description = `${
-        typeof normalized.description === "string" ? normalized.description : ""
-      } [至少提供其一: ${alternatives.join(" 或 ")}]`;
-    }
-  }
+  // Default additionalProperties to false so the LLM won't invent extra fields.
+  // anyOf / oneOf / allOf / required are kept as-is — modern LLMs handle JSON
+  // Schema composition keywords natively, and stripping them causes a mismatch
+  // with the runtime validator (ToolCallGuard) which uses the original schema.
   if (normalized.additionalProperties === undefined) {
     normalized.additionalProperties = false;
   }

@@ -22,6 +22,7 @@ import {
   ObservationBuilder,
   ReactLoopRunner,
   ReactModelTurn,
+  RunStateReactCheckpointRepository,
   ReactToolExecutor,
   ToolCallGuard,
   ToolCatalogRetriever,
@@ -129,6 +130,7 @@ export function createAgentLoopService(deps: {
 
   // ── ReAct Runtime ─────────────────────────────────────────────
   const observationBuilder = new ObservationBuilder(8_000);
+  const reactCheckpoints = new RunStateReactCheckpointRepository(runStateManager);
   const reactLoopRunner = new ReactLoopRunner({
     listSkills: listSkillSummaries,
     retriever: new ToolCatalogRetriever({
@@ -138,21 +140,7 @@ export function createAgentLoopService(deps: {
     modelTurn: new ReactModelTurn({ modelRouter, eventBus: rawEventBus }),
     guard: new ToolCallGuard(permissionPolicy, observationBuilder),
     executor: new ReactToolExecutor(executionOrchestrator, rawEventBus),
-    saveCheckpoint: async (checkpoint) => {
-      await runStateManager.saveTaskState(checkpoint.runId, {
-        goal: "ReAct run checkpoint",
-        completedSteps: [],
-        pendingSteps: checkpoint.pendingToolCalls.map((call) => call.skillId),
-        gatheredFacts: {
-          reactCheckpoint: checkpoint,
-          approvalMessageId: checkpoint.messageId,
-          partsSnapshot: checkpoint.partsSnapshot,
-          pendingToolCalls: checkpoint.pendingToolCalls,
-        },
-        openQuestions: [],
-        iteration: checkpoint.iteration,
-      });
-    },
+    checkpointRepository: reactCheckpoints,
     eventBus: rawEventBus,
   });
 

@@ -20,6 +20,8 @@ export interface SkillSummary {
     | "automation"
     | "custom";
   enabled: boolean;
+  /** Skill package trust; isolated third-party output remains untrusted data. */
+  trust?: "local-trusted" | "isolated";
   permissions: Permission[];
   defaultTimeoutMs: number;
   maxTimeoutMs: number;

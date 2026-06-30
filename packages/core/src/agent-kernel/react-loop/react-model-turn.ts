@@ -36,6 +36,7 @@ export class ReactModelTurn {
     stream?: IAssistantMessageStream;
     textRole: "progress" | "final";
     disableTools?: boolean;
+    maxTokens?: number;
   }, signal: AbortSignal): Promise<ReactModelTurnResult> {
     const modelCallId = `model_${crypto.randomUUID()}`;
     const startedAt = Date.now();
@@ -67,7 +68,7 @@ export class ReactModelTurn {
 
     try {
       for await (const chunk of this.deps.modelRouter.streamChat(
-        "response_composition",
+        "react_turn",
         {
           messages: input.messages,
           tools:
@@ -79,6 +80,7 @@ export class ReactModelTurn {
           runId: input.runId,
           modelCallId,
           modelId: input.modelId,
+          maxTokens: input.maxTokens,
           metadata: { reactTurn: true, toolsDisabled: !!input.disableTools },
         },
         signal,
@@ -129,14 +131,17 @@ export class ReactModelTurn {
       }
 
       deltaThrottle.flush();
-      const nativeCalls = buildToolCalls(accumulators);
+      const completeNativeCalls = buildToolCalls(accumulators);
+      const nativeCalls = deduplicateToolCallIds(completeNativeCalls);
       const textualCalls = input.disableTools
         ? []
         : parseTextualFunctionCalls(textualCallBuffer, input.tools);
       const toolCalls = nativeCalls.length > 0 ? nativeCalls : textualCalls;
       const protocolError =
-        accumulators.size > nativeCalls.length
+        accumulators.size > completeNativeCalls.length
           ? "incomplete native tool-call delta"
+          : completeNativeCalls.length > nativeCalls.length
+            ? "duplicate native tool_call_id"
           : textualCallBuffer && textualCalls.length === 0
             ? "malformed textual function call"
             : undefined;
@@ -177,6 +182,15 @@ export class ReactModelTurn {
       throw error;
     }
   }
+}
+
+function deduplicateToolCallIds(calls: ToolCall[]): ToolCall[] {
+  const ids = new Set<string>();
+  return calls.filter((call) => {
+    if (ids.has(call.id)) return false;
+    ids.add(call.id);
+    return true;
+  });
 }
 
 function buildToolCalls(

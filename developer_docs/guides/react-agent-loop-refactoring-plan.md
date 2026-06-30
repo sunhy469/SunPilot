@@ -1120,3 +1120,37 @@ agent.run
 14. 核心、daemon 构建和相关集成测试全部通过。
 
 满足以上条件后，SunPilot 才可以被称为由单一 LLM Action 决策驱动、具备完整 Action → Observation → Action 闭环的主流 ReAct Agent Loop。
+
+---
+
+## 20. 实施完成度审计（2026-06-30）
+
+本轮按本文逐项检查生产装配、核心运行路径、暂停恢复、消息持久化、事件与测试后，Phase 0～5 均已完成，本文第 19 节的 14 项最终验收标准全部满足。
+
+| 阶段 | 状态 | 当前实现与证据 |
+|---|---|---|
+| Phase 0：行为基线 | 完成 | 覆盖无工具回答、串并行工具、参数修复、工具失败、审批通过/拒绝、用户输入、取消、deadline、恢复、消息 parts、memory 和 WebSocket。 |
+| Phase 1：统一 Runner | 完成 | 所有新 Run 均由 `ReactLoopRunner` 执行正式首轮 `ReactModelTurn`；工具结果统一转为 Observation 后回灌。 |
+| Phase 2：删除前置决策 | 完成 | 生产主路径不再包含 PreliminaryInference、IntentRouter、Planner、ToolSelector、`skipFirstLlmTurn` 或 synthetic tool call。 |
+| Phase 3：错误 Observation 化 | 完成 | 未知工具、JSON/schema 错误、重复调用、权限拒绝、模型协议错误和工具失败均可回到下一轮 LLM；预算耗尽保留一次禁用工具的 finalization turn。 |
+| Phase 4：同 transcript 恢复 | 完成 | `ReactCheckpoint` 持久化 transcript、候选工具、冻结调用、parts、artifacts 和计数；审批通过、拒绝、用户输入及进程中断均从 checkpoint 恢复。 |
+| Phase 5：装配与清理 | 完成 | daemon 只装配统一 ReAct 路径；生命周期状态与 ReAct span/event 已收敛；模型语义路由 purpose 使用 `react_turn`。 |
+
+本轮详细审查额外修复了以下潜在问题：
+
+1. 修复审批拒绝后 continuation 未完成、Run 停留在 `running` 的集成问题。
+2. 批准恢复前严格校验批准 scope 与冻结 ToolCall batch 的 ID、Skill 和参数完全一致。
+3. 修复工具完成/失败生命周期事件重复发射，避免持久化事件与 UI 更新重复。
+4. `waiting_user` 恢复前先持久化用户补充消息，并把真实 messageId 传入恢复上下文；同一 Run 的并发恢复会被拒绝。
+5. 最终结果只返回最后一个无 tool calls 回合的 final 文本，不再混入前序 progress；空 final 的 fallback 同步写回 checkpoint transcript。
+6. 批量工具结果按具体 ToolCall 保存 artifact IDs，不再把整批 artifacts 错配给每个结果。
+7. malformed native tool-call、混合 control-tool batch、deadline 和取消路径均补充或强化了回归测试。
+
+最终验证：
+
+```text
+pnpm build  → 11 个 workspace 全部通过
+pnpm test   → 699 个测试全部通过（含 daemon 审批恢复与 WebSocket 集成）
+pnpm lint   → 11 个 workspace 全部通过
+git diff --check → 通过
+```

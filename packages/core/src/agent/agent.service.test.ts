@@ -487,6 +487,104 @@ describe("AgentService", () => {
     expect(resumed).toEqual(["run_checkpoint"]);
   });
 
+  test("resumeRun persists waiting-user input before continuing the same transcript", async () => {
+    const received: Array<{ userMessageId?: string; message: string }> = [];
+    const { service, conversations } = createService({
+      runStateManager: {
+        getRun: async () => ({
+          runId: "run_waiting_user",
+          conversationId: "conv_waiting_user",
+          status: "waiting_user",
+          mode: "agent",
+          taskState: { gatheredFacts: { reactCheckpoint: { version: 1 } } },
+          createdAt: "2026-06-06T00:00:00.000Z",
+          updatedAt: "2026-06-06T00:00:01.000Z",
+        }),
+      } as any,
+      loopEngine: {
+        resumeWithUserInput: async (input: {
+          runId: string;
+          conversationId: string;
+          userMessageId?: string;
+          message: string;
+        }) => {
+          received.push(input);
+          return {
+            runId: input.runId,
+            conversationId: input.conversationId,
+            assistantMessageId: "msg_existing_assistant",
+            status: "completed" as const,
+            artifacts: [],
+            toolCalls: [],
+          };
+        },
+      } as any,
+    });
+    await conversations.createConversation({ id: "conv_waiting_user" });
+
+    await service.resumeRun("run_waiting_user", "  补充信息  ");
+
+    const messages = await conversations.listMessages("conv_waiting_user");
+    expect(messages).toEqual([
+      expect.objectContaining({ role: "user", content: "补充信息" }),
+    ]);
+    expect(received).toEqual([
+      expect.objectContaining({
+        message: "补充信息",
+        userMessageId: messages[0]!.id,
+      }),
+    ]);
+  });
+
+  test("resumeRun rejects concurrent continuation of the same waiting run", async () => {
+    let releaseContinuation!: () => void;
+    let markEntered!: () => void;
+    const entered = new Promise<void>((resolve) => {
+      markEntered = resolve;
+    });
+    const continuation = new Promise<void>((resolve) => {
+      releaseContinuation = resolve;
+    });
+    const { service, conversations } = createService({
+      runStateManager: {
+        getRun: async () => ({
+          runId: "run_concurrent_resume",
+          conversationId: "conv_concurrent_resume",
+          status: "waiting_user",
+          mode: "agent",
+          taskState: { gatheredFacts: { reactCheckpoint: { version: 1 } } },
+          createdAt: "2026-06-06T00:00:00.000Z",
+          updatedAt: "2026-06-06T00:00:01.000Z",
+        }),
+      } as any,
+      loopEngine: {
+        resumeWithUserInput: async () => {
+          markEntered();
+          await continuation;
+          return {
+            runId: "run_concurrent_resume",
+            conversationId: "conv_concurrent_resume",
+            assistantMessageId: "msg_existing_assistant",
+            status: "completed" as const,
+            artifacts: [],
+            toolCalls: [],
+          };
+        },
+      } as any,
+    });
+    await conversations.createConversation({ id: "conv_concurrent_resume" });
+
+    const first = service.resumeRun("run_concurrent_resume", "first");
+    await entered;
+    await expect(
+      service.resumeRun("run_concurrent_resume", "second"),
+    ).rejects.toMatchObject({ code: "AGENT_RUN_STATE_CONFLICT" });
+    releaseContinuation();
+    await expect(first).resolves.toMatchObject({ status: "completed" });
+    await expect(conversations.listMessages("conv_concurrent_resume"))
+      .resolves.toHaveLength(1);
+  });
+
   test("resumeRun rejects active or completed runs", async () => {
     const db = new InMemoryDatabaseContext();
     const { service, conversations } = createService({
@@ -818,7 +916,7 @@ describe("AgentService", () => {
           createdAt: new Date().toISOString(),
           updatedAt: new Date().toISOString(),
         }),
-        markStatus: async () => ({ status: "responding" }),
+        markStatus: async () => ({ status: "running" }),
       } as any,
       loopEngine: {
         continueAfterRejection: async () => ({
