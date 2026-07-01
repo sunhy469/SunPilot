@@ -402,6 +402,8 @@ export class ReactLoopRunner {
             code: "MODEL_PROTOCOL_ERROR",
             message: summary.summary,
             recoverable: true,
+            scope: "protocol",
+            presentation: "step_detail",
           });
         }
         iteration++;
@@ -528,6 +530,8 @@ export class ReactLoopRunner {
               code: "CONTROL_TOOL_VALIDATION_FAILED",
               message: summary.summary,
               recoverable: true,
+              scope: "protocol",
+              presentation: "step_detail",
             });
           }
           iteration++;
@@ -561,6 +565,12 @@ export class ReactLoopRunner {
           await this.persist(checkpoint);
           continue;
         }
+        // §P0: If the LLM produced substantive text this turn, promote it from
+        // "progress" to "user_prompt" so the frontend shows it in the main area.
+        // Otherwise the user-facing prompt gets hidden inside the thinking collapse.
+        if (turn.textPartId && turn.text.trim().length > 0) {
+          input.stream.updateTextPartRole(turn.textPartId, "user_prompt");
+        }
         this.emitTurn({
           input,
           iteration,
@@ -591,6 +601,11 @@ export class ReactLoopRunner {
           messageId: input.messageId,
           question: requestInput.action.question,
           missingFields: requestInput.action.missingFields,
+          /** §P0: The text part id that was promoted to user_prompt, so the
+           *  engine/continuation can avoid creating a duplicate prompt. */
+          promptTextPartId: turn.textPartId && turn.text.trim().length > 0
+            ? turn.textPartId
+            : undefined,
           checkpoint,
           timing: timing(
             toolRetrievalMs,
@@ -708,12 +723,17 @@ export class ReactLoopRunner {
           toolCallSummaries.push(summary);
         }
         if (summary.status === "failed") {
+          // §P2: Tool failures are step_detail errors — shown inside the
+          // tool step's expandable detail, not as standalone red cards.
           input.stream.addError({
             code: summary.skillId === "agent.runtime"
               ? "REACT_OBSERVATION"
               : "TOOL_ACTION_REJECTED",
             message: summary.summary,
             recoverable: true,
+            scope: "tool",
+            presentation: "step_detail",
+            toolCallId: summary.id,
           });
         }
       }

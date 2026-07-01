@@ -50,6 +50,31 @@ class FakeWebSocket extends EventTarget {
     });
     if (FakeWebSocket.askForInput) {
       this.emit({
+        method: "agent.message.started",
+        params: {
+          runId: "run_1",
+          conversationId: "conv_1",
+          messageId: assistant.id,
+        },
+      });
+      this.emit({
+        method: "agent.message.part.started",
+        params: {
+          runId: "run_1",
+          conversationId: "conv_1",
+          messageId: assistant.id,
+          part: {
+            id: "part_user_prompt",
+            type: "text",
+            content: "请补充路径",
+            status: "completed",
+            source: "model",
+            semanticRole: "user_prompt",
+            createdAt: new Date().toISOString(),
+          },
+        },
+      });
+      this.emit({
         method: "agent.clarification.requested",
         params: {
           runId: "run_1",
@@ -338,7 +363,7 @@ describe("Web ChatPage", () => {
     await userEvent.type(textbox, "start task");
     await userEvent.click(screen.getByRole("button", { name: "发送" }));
 
-    await screen.findByText("等待你补充信息后继续");
+    await screen.findByText("请补充路径");
     const resumeTextbox = screen.getByRole("textbox", { name: "Message" });
     await waitFor(() => expect(resumeTextbox).toBeEnabled());
     await userEvent.type(resumeTextbox, "补充路径 /tmp/report.md");

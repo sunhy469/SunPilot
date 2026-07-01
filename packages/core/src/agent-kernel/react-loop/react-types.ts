@@ -105,6 +105,10 @@ export interface ReactLoopWaitingUser {
   messageId: string;
   question: string;
   missingFields: string[];
+  /** §P0: If the LLM already produced a text part that was promoted to
+   *  "user_prompt", this is its id. The engine/continuation should avoid
+   *  creating a duplicate user_prompt text part when this is set. */
+  promptTextPartId?: string;
   checkpoint: ReactCheckpoint;
   timing: ReactLoopTiming;
 }

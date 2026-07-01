@@ -27,6 +27,12 @@ import type {
   AssistantToolResultPart,
   AssistantErrorPart,
 } from "../../../../features/conversations/types";
+import {
+  buildThinkingSteps,
+  buildUserFacingBlocks,
+  type ThinkingStep,
+  type ToolStep,
+} from "../../utils/buildAssistantPresentation";
 import type { RichCardAction } from "../../../../rich-cards/types";
 import { MarkdownRenderer, RichCardRenderer } from "../../../../rich-cards";
 import type { LocalSendState } from "../../types";
@@ -84,7 +90,7 @@ function getAiStatus(
         icon: (
           <LoadingOutlined className="assistant-status__icon assistant-loading-icon" />
         ),
-        text: "正在思考",
+        text: "准备中...",
       };
     case "streaming":
       if (toolName) {
@@ -92,7 +98,7 @@ function getAiStatus(
       }
       return {
         icon: <ThunderboltOutlined className="thinking-section__active-icon" />,
-        text: "正在思考",
+        text: "正在推理...",
         dots: true,
       };
     case "waiting_approval":
@@ -323,6 +329,19 @@ function ToolResultPartBlock({ part }: { part: AssistantToolResultPart }) {
 }
 
 function ErrorPartBlock({ part }: { part: AssistantErrorPart }) {
+  // §P2: step_detail errors are merged into tool steps via buildThinkingSteps.
+  // Only render fatal errors (scope="run" or presentation="fatal") as standalone cards.
+  // For backward compat: recoverable errors without explicit scope are suppressed
+  // (they belong to tool steps); non-recoverable errors are treated as fatal.
+  const isStepDetail =
+    part.presentation === "step_detail" ||
+    part.scope === "tool" ||
+    part.scope === "protocol";
+  if (isStepDetail) return null;
+
+  // §P2 backward compat: recoverable errors without explicit scope → step_detail
+  if (part.recoverable && !part.scope && !part.presentation) return null;
+
   return (
     <Alert
       type="error"
@@ -411,13 +430,150 @@ function UnifiedThinkingBanner({
   );
 }
 
+// ── Thinking step renderer (single logical step in the collapse bar) ─
+
+function ThinkingStepRenderer({ step }: { step: ThinkingStep }) {
+  const [detailExpanded, setDetailExpanded] = useState(false);
+
+  if (step.kind === "narrative") {
+    return (
+      <div className="thinking-text-block">
+        <MarkdownRenderer content={step.content} isStreaming={false} />
+      </div>
+    );
+  }
+
+  if (step.kind === "phase") {
+    const isRunning = step.status === "running";
+    const isFailed = step.status === "failed";
+    return (
+      <Flex align="center" gap={6} className="assistant-status-block">
+        {isRunning ? (
+          <LoadingOutlined className="assistant-status-block__icon assistant-loading-icon" />
+        ) : isFailed ? (
+          <CloseCircleOutlined className="assistant-status-block__icon" />
+        ) : (
+          <CheckCircleOutlined className="assistant-status-block__icon" />
+        )}
+        <Text type="secondary" className="assistant-status-block__label">
+          {step.label}
+        </Text>
+      </Flex>
+    );
+  }
+
+  // Tool step
+  const stepLabel = getToolStepLabel(step);
+  const isRunning = step.status === "running";
+  const isCompleted = step.status === "completed";
+  const isFailed = step.status === "failed";
+  const hasDetail = !!(
+    step.inputPreview ||
+    step.resultSummary ||
+    step.errorDetail
+  );
+
+  const statusIcon = isRunning ? (
+    <LoadingOutlined className="assistant-tool-use__icon assistant-loading-icon" />
+  ) : isCompleted ? (
+    <CheckCircleOutlined className="assistant-tool-use__icon" />
+  ) : isFailed ? (
+    <CloseCircleOutlined className="assistant-tool-use__icon" />
+  ) : (
+    <ToolOutlined className="assistant-tool-use__icon" />
+  );
+
+  const statusClass = isRunning
+    ? "assistant-tool-use--running"
+    : isCompleted
+      ? "assistant-tool-use--completed"
+      : isFailed
+        ? "assistant-tool-use--failed"
+        : "";
+
+  return (
+    <Flex vertical className={`assistant-tool-use ${statusClass}`}>
+      <Flex
+        align="center"
+        gap={4}
+        className="assistant-tool-use__header"
+        onClick={() => hasDetail && setDetailExpanded(!detailExpanded)}
+        style={{ cursor: hasDetail ? "pointer" : "default" }}
+      >
+        {hasDetail &&
+          (detailExpanded ? <CaretDownOutlined /> : <CaretRightOutlined />)}
+        {statusIcon}
+        <Text type="secondary" className="assistant-tool-use__name">
+          {stepLabel}
+        </Text>
+      </Flex>
+      {detailExpanded && hasDetail && (
+        <Card size="small" className="assistant-tool-use__args">
+          {step.inputPreview &&
+            Object.entries(step.inputPreview).map(([key, value]) => (
+              <Flex key={key} gap={4} className="assistant-tool-use__arg">
+                <Text type="secondary" className="assistant-tool-use__arg-key">
+                  {key}:
+                </Text>{" "}
+                <Text className="assistant-tool-use__arg-value">
+                  {formatArgValue(String(value))}
+                </Text>
+              </Flex>
+            ))}
+          {step.resultSummary && (
+            <Flex gap={4} className="assistant-tool-use__arg">
+              <Text type="secondary" className="assistant-tool-use__arg-key">
+                结果:
+              </Text>{" "}
+              <Text
+                type="secondary"
+                className="assistant-tool-use__arg-value"
+                style={{ whiteSpace: "normal" }}
+              >
+                {step.resultSummary}
+              </Text>
+            </Flex>
+          )}
+          {step.errorDetail && (
+            <Flex gap={4} className="assistant-tool-use__arg">
+              <Text
+                type="danger"
+                className="assistant-tool-use__arg-value"
+                style={{ whiteSpace: "normal" }}
+              >
+                {step.errorDetail}
+              </Text>
+            </Flex>
+          )}
+        </Card>
+      )}
+    </Flex>
+  );
+}
+
+/** Map tool step status to user-facing label following the design spec. */
+function getToolStepLabel(step: ToolStep): string {
+  switch (step.status) {
+    case "running":
+      return `正在${step.name}…`;
+    case "completed":
+      return `已${step.name}`;
+    case "failed":
+      return `${step.name}失败`;
+    case "interrupted":
+      return `${step.name}已中断`;
+    default:
+      return step.name;
+  }
+}
+
 // ── Thinking process section (collapsible) ──────────────────────────
 
 function ThinkingProcessSection({
-  parts,
+  steps,
   isStreaming,
 }: {
-  parts: AssistantMessagePart[];
+  steps: ThinkingStep[];
   isStreaming: boolean;
 }) {
   // §P1-1: Default expanded during streaming so users see progress immediately.
@@ -431,9 +587,9 @@ function ThinkingProcessSection({
     }
   }, [isStreaming]);
 
-  if (parts.length === 0) return null;
+  if (steps.length === 0) return null;
 
-  const stepCount = parts.length;
+  const stepCount = steps.length;
 
   // §Dynamic title: show "闪电 + 正在思考 + ..." during streaming,
   // plain "思考过程" when complete and expanded.
@@ -484,13 +640,8 @@ function ThinkingProcessSection({
         {titleNode}
       </Flex>
       <Flex vertical gap={4} className="thinking-section__content">
-        {parts.map((part) => (
-          <PartRenderer
-            key={part.id}
-            part={part}
-            isStreaming={isStreaming}
-            variant="thinking"
-          />
+        {steps.map((step) => (
+          <ThinkingStepRenderer key={step.key} step={step} />
         ))}
       </Flex>
     </Flex>
@@ -543,56 +694,102 @@ function MessagePartsRenderer({
   // §P0-1: Use explicit semanticRole when available.
   // - "progress" → thinking section (pre-tool reasoning)
   // - "final"   → product section (final answer)
+  // - "user_prompt" → product section (user-facing prompt during waiting_user)
   // When NO text part has semanticRole set, fall back to the legacy
   // last-text-is-final rule for backward compatibility with old data.
   const hasSemanticRoles = normalizedParts.some(
     (p) => p.type === "text" && (p as { semanticRole?: string }).semanticRole,
   );
 
+  if (hasSemanticRoles) {
+    // §P1: New path — use builder functions for clean logical grouping
+    const thinkingSteps = buildThinkingSteps(normalizedParts);
+    const userFacingBlocks = buildUserFacingBlocks(normalizedParts, {
+      includeStreamingProgress: isStreaming,
+    });
+    const userFacingPartIds = new Set(
+      userFacingBlocks.map((block) => block.partId),
+    );
+    const productParts = normalizedParts.filter((part) =>
+      userFacingPartIds.has(part.id),
+    );
+    const hasVisiblePresentation =
+      thinkingSteps.length > 0 || productParts.length > 0;
+
+    return (
+      <Flex vertical gap={8} className="assistant-parts">
+        {hasVisiblePresentation ? (
+          <ThinkingProcessSection steps={thinkingSteps} isStreaming={isStreaming} />
+        ) : (
+          isStreaming && (
+            <UnifiedThinkingBanner isActive={true} statusText="正在分析..." />
+          )
+        )}
+        {productParts.map((part) => (
+          <PartRenderer
+            key={part.id}
+            part={part}
+            isStreaming={
+              isStreaming && part.type === "text" && part.status === "streaming"
+            }
+          />
+        ))}
+      </Flex>
+    );
+  }
+
+  // Legacy fallback for messages without semanticRole
   let lastTextIdx = -1;
-  if (!hasSemanticRoles) {
-    for (let i = normalizedParts.length - 1; i >= 0; i--) {
-      if (normalizedParts[i]!.type === "text") {
-        lastTextIdx = i;
-        break;
-      }
+  for (let i = normalizedParts.length - 1; i >= 0; i--) {
+    if (normalizedParts[i]!.type === "text") {
+      lastTextIdx = i;
+      break;
     }
   }
 
-  // 分组：按 semanticRole 或 fallback 规则
   const thinkingParts: AssistantMessagePart[] = [];
   const productParts: AssistantMessagePart[] = [];
 
   for (let i = 0; i < normalizedParts.length; i++) {
     const part = normalizedParts[i]!;
     if (part.type === "error") {
-      productParts.push(part);
-    } else if (part.type === "text") {
-      const role = (part as { semanticRole?: string }).semanticRole;
-      if (role === "final") {
+      // §P2: For legacy errors, filter by recoverable
+      const errorPart = part as AssistantErrorPart;
+      if (!errorPart.recoverable || errorPart.scope === "run" || errorPart.presentation === "fatal") {
         productParts.push(part);
-      } else if (role === "progress") {
-        thinkingParts.push(part);
+      }
+      // recoverable errors without scope go to thinking (will be merged by builder)
+      // but for legacy path we still show them in thinking section
+      thinkingParts.push(part);
+    } else if (part.type === "text") {
+      if (i === lastTextIdx) {
+        productParts.push(part);
       } else {
-        // Legacy fallback: last text part is final, rest are thinking
-        if (i === lastTextIdx) {
-          productParts.push(part);
-        } else {
-          thinkingParts.push(part);
-        }
+        thinkingParts.push(part);
       }
     } else {
       thinkingParts.push(part);
     }
   }
 
+  // For legacy path, build thinking steps from the thinking parts
+  const legacyThinkingSteps = buildThinkingSteps(thinkingParts);
+  const visibleProductParts = productParts.filter(
+    (part) => part.type !== "text" || part.content.length > 0,
+  );
+  const hasVisiblePresentation =
+    legacyThinkingSteps.length > 0 || visibleProductParts.length > 0;
+
   return (
     <Flex vertical gap={8} className="assistant-parts">
-      {/* 思考过程折叠区（包含思考文本 + status + tool_use + tool_result） */}
-      <ThinkingProcessSection parts={thinkingParts} isStreaming={isStreaming} />
-
-      {/* 产物区（最终文本 + 错误） */}
-      {productParts.map((part) => (
+      {hasVisiblePresentation ? (
+        <ThinkingProcessSection steps={legacyThinkingSteps} isStreaming={isStreaming} />
+      ) : (
+        isStreaming && (
+          <UnifiedThinkingBanner isActive={true} statusText="正在分析..." />
+        )
+      )}
+      {visibleProductParts.map((part) => (
         <PartRenderer
           key={part.id}
           part={part}
@@ -670,19 +867,6 @@ export function AssistantMessage({
   dislikedRef.current = disliked;
   const hasContent = msg.content.length > 0;
   const hasParts = msg.parts && msg.parts.length > 0;
-  // §Dynamic title: When thinking-related parts (status, tool, progress text)
-  // exist, the ThinkingProcessSection already shows "正在思考..." in its
-  // title. Suppress external status bars to avoid duplication.
-  const hasThinkingParts =
-    hasParts &&
-    msg.parts!.some(
-      (p) =>
-        p.type === "status" ||
-        p.type === "tool_use" ||
-        p.type === "tool_result" ||
-        (p.type === "text" &&
-          (p as AssistantTextPart).semanticRole === "progress"),
-    );
   const isPending = msg.status === "pending";
   const isStopped = msg.status === "stopped";
   const aiStatus = getAiStatus(sendState, toolName);
@@ -745,26 +929,6 @@ export function AssistantMessage({
             </div>
           </>
         )}
-
-        {/* ── Pending/streaming with parts but no text / thinking content yet ── */}
-        {/* UnifiedThinkingBanner keeps the same collapsible visual as
-            ThinkingProcessSection so every in-progress state feels consistent. */}
-        {hasParts &&
-          !hasContent &&
-          !hasThinkingParts &&
-          (isPending || isStreaming) &&
-          !msg.parts?.some(
-            (p) => p.type === "text" && (p as AssistantTextPart).content,
-          ) && (
-            <UnifiedThinkingBanner
-              isActive={true}
-              statusText={
-                msg.parts?.some((p) => p.type === "tool_result")
-                  ? "正在整理结果..."
-                  : "正在思考"
-              }
-            />
-          )}
 
         {/* ── Rich cards (video, image, etc.) ─────────────────── */}
         {cards && cards.length > 0 && <RichCardRenderer cards={cards} stateByCardId={cardStateByCardId} onAction={onCardAction} />}

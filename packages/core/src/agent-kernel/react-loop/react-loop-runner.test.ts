@@ -719,6 +719,152 @@ describe("ReactLoopRunner", () => {
     expect(harness.executor.execute).not.toHaveBeenCalled();
   });
 
+  // ── §P0: user_prompt semantic role for waiting_user ──────────────────
+
+  test("promotes LLM text to user_prompt when agent_request_input is called with text", async () => {
+    const model = scriptedModel([
+      {
+        text: "之前的搜索受到权限限制，请告诉我具体品类。",
+        toolCalls: [{
+          id: "ask_1",
+          type: "function",
+          function: {
+            name: "agent_request_input",
+            arguments: '{"question":"请提供品类","missingFields":["category"]}',
+          },
+        }],
+      },
+    ]);
+    const { runner, stream } = createRunner(model);
+    const result = await runner.run(
+      { agentInput, context, messageId: "msg_assistant", stream },
+      new AbortController().signal,
+    );
+
+    expect(result.type).toBe("waiting_user");
+    if (result.type === "waiting_user") {
+      // §P0: When LLM had text, it should be promoted to user_prompt
+      expect(result.promptTextPartId).toBeDefined();
+      // Verify the text part was updated to user_prompt
+      const parts = result.checkpoint.partsSnapshot;
+      const textParts = parts.filter((p) => p.type === "text");
+      expect(textParts).toHaveLength(1);
+      expect(textParts[0]).toEqual(
+        expect.objectContaining({
+          semanticRole: "user_prompt",
+          content: "之前的搜索受到权限限制，请告诉我具体品类。",
+        }),
+      );
+    }
+  });
+
+  test("no promptTextPartId when agent_request_input has no text", async () => {
+    const model = scriptedModel([
+      {
+        text: "",
+        toolCalls: [{
+          id: "ask_no_text",
+          type: "function",
+          function: {
+            name: "agent_request_input",
+            arguments: '{"question":"query?","missingFields":["query"]}',
+          },
+        }],
+      },
+    ]);
+    const { runner, stream } = createRunner(model);
+    const result = await runner.run(
+      { agentInput, context, messageId: "msg_assistant", stream },
+      new AbortController().signal,
+    );
+
+    expect(result.type).toBe("waiting_user");
+    if (result.type === "waiting_user") {
+      // §P0: When LLM has no text, promptTextPartId is undefined so the engine
+      // will create a user_prompt from result.question
+      expect(result.promptTextPartId).toBeUndefined();
+      expect(result.question).toBe("query?");
+    }
+  });
+
+  test("normal final answer still uses semanticRole final", async () => {
+    const model = scriptedModel([
+      { text: "这是最终答案。", toolCalls: [] },
+    ]);
+    const { runner, stream } = createRunner(model);
+    const result = await runner.run(
+      { agentInput, context, messageId: "msg_assistant", stream },
+      new AbortController().signal,
+    );
+
+    expect(result.type).toBe("completed");
+    const parts = result.checkpoint.partsSnapshot;
+    const textParts = parts.filter((p) => p.type === "text");
+    expect(textParts).toHaveLength(1);
+    expect(textParts[0]).toEqual(
+      expect.objectContaining({
+        semanticRole: "final",
+        content: "这是最终答案。",
+      }),
+    );
+  });
+
+  test("previous progress text stays progress after tool failure and agent_request_input", async () => {
+    const model = scriptedModel([
+      {
+        text: "让我搜索一下。",
+        toolCalls: [toolCall("search_failed", { query: "test" })],
+      },
+      {
+        text: "搜索失败，请提供更多信息。",
+        toolCalls: [{
+          id: "ask_recovery",
+          type: "function",
+          function: {
+            name: "agent_request_input",
+            arguments: '{"question":"补充信息","missingFields":["detail"]}',
+          },
+        }],
+      },
+    ]);
+    const harness = createRunner(model, [searchSkill], {
+      execute: async ({ calls }) => ({
+        summaries: calls.map((call) => ({
+          id: call.id,
+          skillId: call.skillId,
+          name: call.name,
+          status: "failed" as const,
+          summary: "搜索服务不可用",
+        })),
+        artifacts: [],
+      }),
+    });
+    const result = await harness.runner.run(
+      { agentInput, context, messageId: "msg_assistant", stream: harness.stream },
+      new AbortController().signal,
+    );
+
+    expect(result.type).toBe("waiting_user");
+    // §P0: The first progress text stays progress (not promoted), only the
+    // second (recovery) text gets promoted to user_prompt
+    const parts = result.checkpoint.partsSnapshot;
+    const textParts = parts.filter((p) => p.type === "text");
+    expect(textParts.length).toBeGreaterThanOrEqual(1);
+    // The recovery text should be user_prompt
+    const recoveryText = textParts.find(
+      (p) => p.content === "搜索失败，请提供更多信息。",
+    );
+    expect(recoveryText).toBeDefined();
+    expect(recoveryText!.semanticRole).toBe("user_prompt");
+    // The initial thinking text should remain progress
+    const thinkingText = textParts.find(
+      (p) => p.content === "让我搜索一下。",
+    );
+    if (thinkingText) {
+      expect(thinkingText.semanticRole).toBe("progress");
+    }
+  });
+
   test("does not call the model again after the wall-clock deadline", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(0);
