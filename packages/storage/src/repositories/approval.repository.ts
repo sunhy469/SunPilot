@@ -3,6 +3,7 @@ import type { ApprovalRecord } from "@sunpilot/protocol";
 export interface ListApprovalsInput {
   status?: ApprovalRecord["status"];
   runId?: string;
+  conversationId?: string;
   limit?: number;
   /** Return only approvals whose expiry timestamp is at or before this instant. */
   expiresBefore?: string;

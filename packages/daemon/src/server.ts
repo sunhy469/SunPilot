@@ -348,10 +348,11 @@ export async function createDaemon(options: DaemonOptions = {}) {
   let _updateMemory: ((id: string, input: { content?: string; title?: string; summary?: string; confidence?: number; importance?: number }) => Promise<{ id: string } | null>) | undefined;
   let _skillEmbeddingCache: { invalidate(skillIds?: string[]): void } | undefined;
   let _embeddingService: { invalidateCache(): void } | undefined;
+  let _stopPersistence: (() => void) | undefined;
   const getChatAgent = async (): Promise<AgentService> => {
     if (chatAgent) return chatAgent as AgentService;
     chatAgentInit ??= (async () => {
-      const { service, modelRouter, updateMemory, skillEmbeddingCache, embeddingService } = createAgentLoopService({
+      const { service, modelRouter, updateMemory, skillEmbeddingCache, embeddingService, stopPersistence } = createAgentLoopService({
         database,
         skillRegistry,
         skillRunner,
@@ -366,6 +367,7 @@ export async function createDaemon(options: DaemonOptions = {}) {
       _updateMemory = updateMemory;
       _skillEmbeddingCache = skillEmbeddingCache;
       _embeddingService = embeddingService;
+      _stopPersistence = stopPersistence;
       return chatAgent as AgentService;
     })();
     return chatAgentInit;
@@ -772,6 +774,8 @@ export async function createDaemon(options: DaemonOptions = {}) {
     async stop() {
       staleDetectionWorker.stop();
       pruningWorker.stop();
+      _stopPersistence?.();
+      _stopPersistence = undefined;
       stopSkillWatcher?.();
       stopSkillWatcher = undefined;
       if (idempotencyCleanupTimer) {

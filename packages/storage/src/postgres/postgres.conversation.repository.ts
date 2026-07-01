@@ -7,6 +7,7 @@ import type {
 } from "../repositories/conversation.repository.js";
 import type { PostgresPool } from "./postgres.client.js";
 import { withPostgresTransaction } from "./postgres.transaction.js";
+import type { PoolClient } from "pg";
 
 export class PostgresConversationRepository implements ConversationRepository {
   constructor(private readonly pool: PostgresPool) {}
@@ -32,27 +33,52 @@ export class PostgresConversationRepository implements ConversationRepository {
     return result.rows[0] ? mapConversation(result.rows[0]) : null;
   }
 
+  async findByIdForUpdate(id: string): Promise<ConversationRecord | null> {
+    const result = await this.pool.query(
+      `SELECT id, title, status, kind, pinned, created_at, updated_at
+       FROM conversations WHERE id = $1 FOR UPDATE`,
+      [id],
+    );
+    return result.rows[0] ? mapConversation(result.rows[0]) : null;
+  }
+
   async list(
     input: ListConversationsInput = {},
   ): Promise<ConversationRecord[]> {
     const limit = Math.max(1, Math.min(Number(input.limit ?? 50), 200));
     const cursor = decodeConversationCursor(input.cursor);
-    const result = cursor
-      ? await this.pool.query(
+    if (cursor) {
+      if (cursor.pinned !== undefined) {
+        // Tuple comparison correctly pages across the pinned/unpinned
+        // boundary under ORDER BY pinned DESC, updated_at DESC, id DESC.
+        const result = await this.pool.query(
           `SELECT id, title, status, kind, pinned, created_at, updated_at
            FROM conversations
-           WHERE updated_at < $1 OR (updated_at = $1 AND id < $2)
+           WHERE (pinned, updated_at, id) < ($1, $2, $3)
            ORDER BY pinned DESC, updated_at DESC, id DESC
-           LIMIT $3`,
-          [cursor.updatedAt, cursor.id, limit],
-        )
-      : await this.pool.query(
-          `SELECT id, title, status, kind, pinned, created_at, updated_at
-           FROM conversations
-           ORDER BY pinned DESC, updated_at DESC, id DESC
-           LIMIT $1`,
-          [limit],
+           LIMIT $4`,
+          [cursor.pinned, cursor.updatedAt, cursor.id, limit],
         );
+        return result.rows.map(mapConversation);
+      }
+      // Backward compat: old cursor without pinned field.
+      const result = await this.pool.query(
+        `SELECT id, title, status, kind, pinned, created_at, updated_at
+         FROM conversations
+         WHERE updated_at < $1 OR (updated_at = $1 AND id < $2)
+         ORDER BY pinned DESC, updated_at DESC, id DESC
+         LIMIT $3`,
+        [cursor.updatedAt, cursor.id, limit],
+      );
+      return result.rows.map(mapConversation);
+    }
+    const result = await this.pool.query(
+      `SELECT id, title, status, kind, pinned, created_at, updated_at
+       FROM conversations
+       ORDER BY pinned DESC, updated_at DESC, id DESC
+       LIMIT $1`,
+      [limit],
+    );
     return result.rows.map(mapConversation);
   }
 
@@ -96,7 +122,7 @@ export class PostgresConversationRepository implements ConversationRepository {
   }
 
   async delete(id: string): Promise<boolean> {
-    return withPostgresTransaction(this.pool, async (client) => {
+    const remove = async (client: Pick<PoolClient, "query">): Promise<boolean> => {
       // Detach digital beings pointing at this conversation (no ON DELETE cascade).
       await client.query(
         "UPDATE digital_beings SET conversation_id = NULL WHERE conversation_id = $1",
@@ -117,16 +143,24 @@ export class PostgresConversationRepository implements ConversationRepository {
         [id],
       );
       return (result.rowCount ?? 0) > 0;
-    });
+    };
+
+    // Repository methods are also used through a transaction-scoped
+    // PostgresDatabaseContext whose query target is already a PoolClient.
+    // Avoid calling connect()/BEGIN again in that case.
+    return typeof (this.pool as { connect?: unknown }).connect === "function"
+      ? withPostgresTransaction(this.pool, remove)
+      : remove(this.pool as unknown as Pick<PoolClient, "query">);
   }
 }
 
 function decodeConversationCursor(
   cursor?: string,
-): { updatedAt: string; id: string } | undefined {
+): { pinned?: boolean; updatedAt: string; id: string } | undefined {
   if (!cursor) return undefined;
   try {
     const decoded = JSON.parse(Buffer.from(cursor, "base64url").toString()) as {
+      pinned?: unknown;
       updatedAt?: unknown;
       id?: unknown;
     };
@@ -136,7 +170,11 @@ function decodeConversationCursor(
     ) {
       return undefined;
     }
-    return { updatedAt: decoded.updatedAt, id: decoded.id };
+    return {
+      pinned: typeof decoded.pinned === "boolean" ? decoded.pinned : undefined,
+      updatedAt: decoded.updatedAt,
+      id: decoded.id,
+    };
   } catch {
     return undefined;
   }

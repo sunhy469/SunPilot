@@ -159,6 +159,30 @@ export class PostgresRunRepository implements RunRepository {
     return result.rows.length === 1;
   }
 
+  async updateStatusIfInSet(
+    id: string,
+    expectedStatuses: RunStatus[],
+    input: {
+      status: RunStatus;
+      updatedAt?: string;
+    },
+  ): Promise<boolean> {
+    if (expectedStatuses.length === 0) return false;
+    const values: unknown[] = [
+      input.status,
+      input.updatedAt ?? null,
+      id,
+      expectedStatuses,
+    ];
+    const result = await this.pool.query(
+      `UPDATE runs SET status = $1, updated_at = COALESCE($2, NOW())
+       WHERE id = $3 AND status = ANY($4::text[])
+       RETURNING id`,
+      values,
+    );
+    return result.rows.length === 1;
+  }
+
   async updateContext(
     id: string,
     context: Record<string, unknown>,
@@ -174,6 +198,32 @@ export class PostgresRunRepository implements RunRepository {
       "UPDATE runs SET context = context || $1::jsonb, updated_at = NOW() WHERE id = $2",
       [JSON.stringify(patch), id],
     );
+  }
+
+  async countActiveRunsByConversation(
+    conversationId: string,
+  ): Promise<number> {
+    const result = await this.pool.query(
+      `SELECT COUNT(*)::int AS count FROM runs
+       WHERE conversation_id = $1
+         AND status IN ('created','running','waiting_approval','waiting_user','interrupted')`,
+      [conversationId],
+    );
+    return result.rows[0]?.count ?? 0;
+  }
+
+  async findLatestActiveByConversation(
+    conversationId: string,
+  ): Promise<RunRecord | null> {
+    const result = await this.pool.query(
+      `SELECT * FROM runs
+       WHERE conversation_id = $1
+         AND status IN ('created','running','waiting_approval','waiting_user','interrupted')
+       ORDER BY created_at DESC
+       LIMIT 1`,
+      [conversationId],
+    );
+    return result.rows[0] ? mapRun(result.rows[0]) : null;
   }
 }
 

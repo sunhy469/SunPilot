@@ -151,6 +151,15 @@ export class ToolCallGuard {
         // re-deriving the decision here would contradict that policy.
         requiresApproval: permission.requiresApproval,
         timeoutMs: Math.min(skill.defaultTimeoutMs, skill.maxTimeoutMs),
+        idempotent: skill.idempotent,
+        sideEffects: skill.sideEffects,
+        timeoutPolicy: skill.timeoutPolicy
+          ? {
+              retryable: skill.timeoutPolicy.retryable,
+              maxRetries: skill.timeoutPolicy.maxRetries,
+              backoffMs: skill.timeoutPolicy.backoffMs,
+            }
+          : undefined,
         riskHints: skill.riskHints,
         inputSchema: skill.inputSchema,
         outputSchema: skill.outputSchema,

@@ -154,6 +154,67 @@ describe("daemon Agent runtime REST routes", () => {
     expect(readiness.json()).not.toHaveProperty("config");
   });
 
+  test("restores the latest active conversation run and blocks deletion", async () => {
+    const db = new InMemoryDatabaseContext();
+    await db.conversations.create({
+      id: "conv_waiting",
+      title: "Waiting",
+      kind: "chat",
+    });
+    await db.runs.create({
+      id: "run_waiting",
+      title: "Waiting for user",
+      status: "waiting_user",
+      mode: "agent",
+      conversationId: "conv_waiting",
+      goal: "need an image",
+      input: { message: "need an image" },
+      context: {
+        taskState: {
+          gatheredFacts: {
+            reactCheckpoint: {
+              version: 1,
+              runId: "run_waiting",
+              conversationId: "conv_waiting",
+              messageId: "msg_waiting",
+              iteration: 0,
+              modelCalls: 1,
+              transcript: [],
+              candidateToolIds: [],
+              pendingToolCalls: [],
+              artifacts: [],
+              toolCallSummaries: [],
+              partsSnapshot: [],
+              permissionMode: "auto",
+              updatedAt: "2026-07-01T00:00:01.000Z",
+            },
+          },
+        },
+      },
+      createdAt: "2026-07-01T00:00:00.000Z",
+      updatedAt: "2026-07-01T00:00:01.000Z",
+    });
+    daemon = await createDaemon({ database: db, port: 3737 });
+
+    const active = await daemon.app.inject({
+      method: "GET",
+      url: "/v1/conversations/conv_waiting/active-run",
+    });
+    expect(active.statusCode).toBe(200);
+    expect(active.json()).toEqual({
+      runId: "run_waiting",
+      status: "waiting_user",
+      continuationKind: "user_input",
+    });
+
+    const deletion = await daemon.app.inject({
+      method: "DELETE",
+      url: "/v1/conversations/conv_waiting",
+    });
+    expect(deletion.statusCode).toBe(409);
+    await expect(db.conversations.findById("conv_waiting")).resolves.toBeTruthy();
+  });
+
   test("lists filtered runs, pending approvals, replayable events, and call logs", async () => {
     const db = new InMemoryDatabaseContext();
     const run: RunRecord = {

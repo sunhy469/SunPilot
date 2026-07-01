@@ -21,6 +21,25 @@ const attachmentSchema = z.object({
 
 // ── Zod schemas ──────────────────────────────────────────────────────
 
+/**
+ * Shared validator: a request must have either non-empty text or at least
+ * one attachment. Used by chatSendSchema and runResumeSchema so WebSocket,
+ * REST and Service share one rule (§P1-02).
+ */
+function validateTextOrAttachments<
+  T extends { message?: string; attachments?: unknown[] },
+>(val: T, ctx: z.RefinementCtx): void {
+  const hasText = typeof val.message === "string" && val.message.trim().length > 0;
+  const hasAttachments = Array.isArray(val.attachments) && val.attachments.length > 0;
+  if (!hasText && !hasAttachments) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["message"],
+      message: "either message or attachments must be provided",
+    });
+  }
+}
+
 export const chatSendSchema = z.object({
   clientRequestId: z.string().max(256).optional(),
   conversationId: z.string().min(1).max(256).optional(),
@@ -32,18 +51,7 @@ export const chatSendSchema = z.object({
     .array(attachmentSchema)
     .max(20)
     .default([]),
-}).superRefine((val, ctx) => {
-  // Allow attachment-only messages: message may be empty IF at least one
-  // attachment is present. A completely empty request (no text, no
-  // attachments) is still rejected.
-  if (val.message.trim().length === 0 && val.attachments.length === 0) {
-    ctx.addIssue({
-      code: z.ZodIssueCode.custom,
-      path: ['message'],
-      message: 'message is required when no attachments are provided',
-    });
-  }
-});
+}).superRefine(validateTextOrAttachments);
 
 export const chatStopSchema = z.object({
   runId: z.string().min(1, 'runId is required'),
@@ -74,9 +82,9 @@ export const runCancelSchema = z.object({
 
 export const runResumeSchema = z.object({
   runId: z.string().min(1),
-  message: z.string().trim().min(1).optional(),
+  message: z.string().trim().max(MAX_MESSAGE_CHARS).optional(),
   attachments: z.array(attachmentSchema).max(20).optional(),
-});
+}).superRefine(validateTextOrAttachments);
 
 export const runRetrySchema = z.object({
   runId: z.string().min(1),

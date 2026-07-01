@@ -1,6 +1,7 @@
-import type { createRequest } from "../../shared/api/client";
+import type { createRequest, createRawRequest } from "../../shared/api/client";
 
 type Request = ReturnType<typeof createRequest>;
+type RawRequest = ReturnType<typeof createRawRequest>;
 
 export interface AgentApproval {
   id: string;
@@ -41,8 +42,11 @@ export interface AgentArtifact {
   createdAt: string;
 }
 
-export function listPendingApprovals(request: Request) {
-  return request<{ items: AgentApproval[] }>("/v1/approvals?status=pending");
+export function listPendingApprovals(request: Request, conversationId?: string) {
+  const query = conversationId
+    ? `?status=pending&conversationId=${encodeURIComponent(conversationId)}`
+    : "?status=pending";
+  return request<{ items: AgentApproval[] }>(`/v1/approvals${query}`);
 }
 
 export function approveAgentApproval(request: Request, approvalId: string) {
@@ -52,10 +56,14 @@ export function approveAgentApproval(request: Request, approvalId: string) {
   });
 }
 
-export function rejectAgentApproval(request: Request, approvalId: string) {
+export function rejectAgentApproval(
+  request: Request,
+  approvalId: string,
+  strategy?: "cancel" | "interrupt" | "continue_without_tool",
+) {
   return request<{ rejected: boolean }>(`/v1/approvals/${approvalId}/reject`, {
     method: "POST",
-    body: JSON.stringify({ actor: "web" }),
+    body: JSON.stringify({ actor: "web", strategy: strategy ?? "interrupt" }),
   });
 }
 
@@ -73,8 +81,9 @@ export function getAgentArtifact(request: Request, artifactId: string) {
   return request<AgentArtifact>(`/v1/artifacts/${artifactId}`);
 }
 
-export async function getAgentArtifactContent(artifactId: string) {
-  const response = await fetch(`/v1/artifacts/${artifactId}/content`);
-  if (!response.ok) throw new Error(await response.text());
-  return response.text();
+export async function getAgentArtifactContent(
+  request: RawRequest,
+  artifactId: string,
+) {
+  return request(`/v1/artifacts/${artifactId}/content`);
 }

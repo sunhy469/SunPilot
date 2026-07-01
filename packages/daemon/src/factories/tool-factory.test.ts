@@ -36,6 +36,15 @@ const installedSkill: InstalledSkillRecord = {
         outputSchema: {},
         risk: "low",
         permissions: [],
+        idempotent: true,
+        sideEffects: "readonly",
+        timeoutPolicy: {
+          defaultMs: 5_000,
+          maxMs: 10_000,
+          retryable: true,
+          maxRetries: 2,
+          backoffMs: 25,
+        },
       },
       {
         name: "shell.execute",
@@ -99,7 +108,10 @@ describe("createToolLayer", () => {
 
     const readFile = summaries.find((s) => s.id === "test.files:filesystem.read");
     expect(readFile?.permissions).toEqual([]);
-    expect(readFile?.sideEffects).toBe("none"); // No permissions → none
+    expect(readFile?.sideEffects).toBe("readonly");
+    expect(readFile?.idempotent).toBe(true);
+    expect(readFile?.defaultTimeoutMs).toBe(5_000);
+    expect(readFile?.timeoutPolicy?.maxRetries).toBe(2);
     expect(readFile?.riskHints.defaultRisk).toBe("low");
 
     const shell = summaries.find((s) => s.id === "test.files:shell.execute");

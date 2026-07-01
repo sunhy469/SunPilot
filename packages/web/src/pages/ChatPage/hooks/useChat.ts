@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { Dispatch, SetStateAction } from "react";
-import { createRequest } from "../../../shared/api/client";
+import { createRequest, createRawRequest } from "../../../shared/api/client";
 import {
   approveAgentApproval,
   getAgentArtifact,
@@ -25,6 +25,7 @@ import {
   sendConversationUnsubscribe,
 } from "../../../features/chat/ws";
 import { validateAttachmentRefsForSend } from "../../../features/chat/attachment-utils";
+import { getActiveRun } from "../../../features/conversations/api";
 import type {
   AgentActivity,
   ChatMessage,
@@ -77,12 +78,14 @@ export function useChat(
   const onConversationCreatedRef = useRef(onConversationCreated);
   onConversationCreatedRef.current = onConversationCreated;
   const activeRunIdRef = useRef<string | null>(null);
+  const activeRunConversationIdRef = useRef<string | null>(null);
   const [activeRunId, setActiveRunId] = useState<string | null>(null);
   const waitingUserRunIdRef = useRef<string | null>(null);
   const [runStatus, setRunStatus] = useState<
     import("@sunpilot/protocol").RunStatus | null
   >(null);
   const requestRef = useRef(createRequest());
+  const rawRequestRef = useRef(createRawRequest());
   const [approvals, setApprovals] = useState<AgentApproval[]>([]);
   const [artifacts, setArtifacts] = useState<AgentArtifactPreview[]>([]);
   const [selectedArtifact, setSelectedArtifact] =
@@ -91,6 +94,7 @@ export function useChat(
   const conversationIdRef = useRef(conversationId);
   conversationIdRef.current = conversationId;
   const subscribedConversationRef = useRef<string | null>(null);
+  const uiConversationRef = useRef(conversationId);
   /** Maps JSON-RPC request id → clientRequestId for chat.send ack binding */
   const pendingAcksRef = useRef(new Map<string, string>());
 
@@ -129,6 +133,7 @@ export function useChat(
       setToolName(null);
       toolCallCountRef.current = 0;
       activeRunIdRef.current = null;
+      activeRunConversationIdRef.current = null;
       setActiveRunId(null);
       waitingUserRunIdRef.current = null;
       setRunStatus(null);
@@ -268,7 +273,13 @@ export function useChat(
         method === "agent.approval.rejected" ||
         method === "agent.approval.expired"
       ) {
-        const payload = params as { approvalId: string; decidedBy?: string; strategy?: string; runId?: string };
+        const payload = params as {
+          approvalId: string;
+          decidedBy?: string;
+          strategy?: string;
+          runId?: string;
+          runCancelled?: boolean;
+        };
         const status =
           method === "agent.approval.approved"
             ? "approved"
@@ -312,7 +323,7 @@ export function useChat(
 
         // §P0-2: Approval expired — backend should emit agent.run.cancelled,
         // but we also clean up here as defense-in-depth.
-        if (method === "agent.approval.expired") {
+        if (method === "agent.approval.expired" && payload.runCancelled) {
           if (activeRunIdRef.current === payload.runId) {
             finishActiveRun({ sendState: "failed" });
             setMessages((items) =>
@@ -440,7 +451,10 @@ export function useChat(
 
   const refreshApprovals = useCallback(async () => {
     try {
-      const response = await listPendingApprovals(requestRef.current);
+      const response = await listPendingApprovals(
+        requestRef.current,
+        conversationIdRef.current || undefined,
+      );
       setApprovals(Array.isArray(response.items) ? response.items : []);
     } catch {
       // Best effort; chat remains usable without the approval strip.
@@ -667,6 +681,25 @@ export function useChat(
         return;
       }
 
+      // A single socket can still receive events from a run started in the
+      // previously selected conversation. Never let those events hijack the
+      // current page after a conversation switch.
+      const currentConversationId = conversationIdRef.current;
+      if (
+        currentConversationId &&
+        event.conversationId &&
+        event.conversationId !== currentConversationId
+      ) {
+        return;
+      }
+      if (
+        activeRunIdRef.current &&
+        event.runId &&
+        event.runId !== activeRunIdRef.current
+      ) {
+        return;
+      }
+
       applyAgentEvent(event);
       const activity = activityFromAgentEvent(event);
       if (activity) {
@@ -675,6 +708,7 @@ export function useChat(
 
       if (event.method === "agent.run.created") {
         activeRunIdRef.current = event.params.runId ?? null;
+        activeRunConversationIdRef.current = event.params.conversationId;
         setActiveRunId(event.params.runId);
         setConversationId(event.params.conversationId);
         setSendState("running");
@@ -693,6 +727,9 @@ export function useChat(
       // For live events, this signals the run is actively running.
       // For resume/retry, this is the primary "run is active again" signal.
       if (event.method === "agent.run.started") {
+        if (event.params.conversationId) {
+          activeRunConversationIdRef.current = event.params.conversationId;
+        }
         markRunActive(event.params.runId, { sendState: "running", status: "thinking" });
         if (event.params.conversationId) {
           setConversationId(event.params.conversationId);
@@ -793,7 +830,34 @@ export function useChat(
 
   useEffect(() => {
     void refreshApprovals();
-  }, [refreshApprovals]);
+  }, [refreshApprovals, conversationId]);
+
+  // Run/UI state belongs to the selected conversation. Clear the previous
+  // binding before subscribing/restoring the next conversation; otherwise a
+  // waiting run from conversation A prevents conversation B from restoring.
+  useEffect(() => {
+    if (uiConversationRef.current === conversationId) return;
+    uiConversationRef.current = conversationId;
+    // A newly-created chat starts with no conversation id. agent.run.created
+    // binds that same in-flight run to its server conversation; this is not a
+    // user navigation and must preserve the active/waiting state.
+    if (
+      conversationId &&
+      activeRunConversationIdRef.current === conversationId
+    ) {
+      return;
+    }
+    clearResponseTimer();
+    activeRunIdRef.current = null;
+    activeRunConversationIdRef.current = null;
+    waitingUserRunIdRef.current = null;
+    setActiveRunId(null);
+    setRunStatus(null);
+    setPendingState(false);
+    setSendState("editing");
+    setToolName(null);
+    toolCallCountRef.current = 0;
+  }, [conversationId, clearResponseTimer, setPendingState]);
 
   // §P1-4: Subscribe to conversation events via WebSocket for real-time
   // multi-window support. When conversationId changes, unsubscribe from
@@ -830,6 +894,62 @@ export function useChat(
       }
     };
   }, [conversationId]);
+
+  // §P1-01: Restore waiting_user/waiting_approval/interrupted state after
+  // page refresh or conversation switch. The active-run endpoint returns
+  // the latest non-terminal run for the conversation, allowing the Web
+  // client to rebind waitingUserRunIdRef/activeRunIdRef without relying on
+  // real-time events that were missed while the page was unloaded.
+  // This effect only SETS refs/state — live events own clearing them via
+  // finishActiveRun/markRunActive. This prevents interference with
+  // real-time event handling.
+  useEffect(() => {
+    if (!conversationId) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const activeRun = await getActiveRun(
+          requestRef.current,
+          conversationId,
+        );
+        if (cancelled || !activeRun) return;
+        // Only restore if no run is already active — live events take
+        // precedence over the historical active-run snapshot.
+        if (activeRunIdRef.current && activeRunIdRef.current !== activeRun.runId) {
+          return;
+        }
+        activeRunIdRef.current = activeRun.runId;
+        activeRunConversationIdRef.current = conversationId;
+        // The active-run response is authoritative for this conversation.
+        setActiveRunId(activeRun.runId);
+        setRunStatus(activeRun.status);
+        if (
+          activeRun.continuationKind === "user_input" ||
+          activeRun.continuationKind === "interrupted"
+        ) {
+          waitingUserRunIdRef.current = activeRun.runId;
+          setPendingState(false);
+          setSendState("waiting_user");
+          setStatus("online");
+        } else if (activeRun.continuationKind === "approval") {
+          waitingUserRunIdRef.current = null;
+          setPendingState(true);
+          setSendState("waiting_approval");
+          setStatus("online");
+        } else {
+          waitingUserRunIdRef.current = null;
+          setPendingState(true);
+          setSendState("running");
+          setStatus("thinking");
+        }
+      } catch {
+        // Silently ignore — the subscription effect handles live events.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [conversationId, setPendingState]);
 
   const send = useCallback(
     (
@@ -945,6 +1065,7 @@ export function useChat(
     const socket = socketRef.current;
     const runId = activeRunIdRef.current;
     activeRunIdRef.current = null;
+    activeRunConversationIdRef.current = null;
     if (socket?.readyState === WebSocket.OPEN && runId) {
       sendChatStop(socket, { runId });
     } else {
@@ -993,7 +1114,7 @@ export function useChat(
   const openArtifact = useCallback(async (artifactId: string) => {
     try {
       const artifact = await getAgentArtifact(requestRef.current, artifactId);
-      const content = await getAgentArtifactContent(artifactId);
+      const content = await getAgentArtifactContent(rawRequestRef.current, artifactId);
       setSelectedArtifact({ artifact, content });
     } catch {
       setError("Artifact content is not available.");

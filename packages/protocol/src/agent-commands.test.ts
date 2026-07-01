@@ -24,7 +24,7 @@ describe("chatSendSchema", () => {
     expect(result.success).toBe(false);
     if (!result.success) {
       expect(result.error.issues[0]?.message).toContain(
-        "message is required when no attachments are provided",
+        "either message or attachments must be provided",
       );
     }
   });
@@ -174,6 +174,24 @@ describe("runResumeSchema", () => {
       }],
     }).success).toBe(false);
   });
+
+  test("allows attachment-only resume without a message", () => {
+    const result = runResumeSchema.parse({
+      runId: "run_1",
+      attachments: [{
+        id: "image_1",
+        name: "sample.png",
+        type: "image/png",
+        url: "https://example.com/sample.png",
+      }],
+    });
+    expect(result.message).toBeUndefined();
+    expect(result.attachments).toHaveLength(1);
+  });
+
+  test("rejects resume with neither message nor attachments", () => {
+    expect(runResumeSchema.safeParse({ runId: "run_1" }).success).toBe(false);
+  });
 });
 
 describe("skillManifestSchema", () => {
@@ -223,5 +241,17 @@ describe("skillManifestSchema", () => {
     expect(
       skillManifestSchema.safeParse(validManifest({ trust: "untrusted" })).success,
     ).toBe(false);
+  });
+
+  test("rejects a timeout policy whose default exceeds its maximum", () => {
+    const manifest = validManifest();
+    Object.assign(manifest.capabilities[0]!, { timeoutPolicy: {
+      defaultMs: 10_000,
+      maxMs: 5_000,
+      retryable: true,
+      maxRetries: 1,
+      backoffMs: 100,
+    } });
+    expect(skillManifestSchema.safeParse(manifest).success).toBe(false);
   });
 });

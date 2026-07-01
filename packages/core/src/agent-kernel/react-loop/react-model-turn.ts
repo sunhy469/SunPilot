@@ -9,6 +9,7 @@ import type { IAssistantMessageStream } from "../loop-types.js";
 import type { ModelRouter } from "../model-router.js";
 import { parseTextualFunctionCalls } from "../tools/textual-function-call-parser.js";
 import type { ReactModelTurnResult } from "./react-types.js";
+import { estimateTokens } from "../context/context-types.js";
 
 const MAX_MODEL_TEXT_CHARS = 1_000_000;
 const MAX_TOOL_CALLS_PER_TURN = 32;
@@ -194,7 +195,7 @@ export class ReactModelTurn {
         {
           runId: input.runId,
           modelCallId,
-          outputTokens: text.length,
+          outputTokens: estimateTokens(text),
           finishReason: providerFinishReason ?? (toolCalls.length > 0 ? "tool_calls" : "stop"),
         },
         { runId: input.runId, conversationId: input.conversationId },

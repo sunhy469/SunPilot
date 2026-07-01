@@ -74,25 +74,30 @@ export class PostgresApprovalRepository implements ApprovalRepository {
     const limit = Math.max(1, Math.min(Number(input.limit ?? 50), 200));
     const conditions: string[] = [];
     const values: unknown[] = [];
+    const needsJoin = !!input.conversationId;
     if (input.status) {
       values.push(input.status);
-      conditions.push(`status = $${values.length}`);
+      conditions.push(`a.status = $${values.length}`);
     }
     if (input.runId) {
       values.push(input.runId);
-      conditions.push(`run_id = $${values.length}`);
+      conditions.push(`a.run_id = $${values.length}`);
+    }
+    if (input.conversationId) {
+      values.push(input.conversationId);
+      conditions.push(`r.conversation_id = $${values.length}`);
     }
     if (input.expiresBefore) {
       values.push(input.expiresBefore);
-      conditions.push(`expires_at IS NOT NULL AND expires_at <= $${values.length}`);
+      conditions.push(`a.expires_at IS NOT NULL AND a.expires_at <= $${values.length}`);
     }
     values.push(limit);
     const result = await this.pool.query(
-      `SELECT id, run_id, step_id, status, risk, title, reason, requested_action,
-         decision, created_at, expires_at, decided_by, decided_at
-       FROM approvals
+      `SELECT a.id, a.run_id, a.step_id, a.status, a.risk, a.title, a.reason, a.requested_action,
+         a.decision, a.created_at, a.expires_at, a.decided_by, a.decided_at
+       FROM approvals a${needsJoin ? " JOIN runs r ON a.run_id = r.id" : ""}
        ${conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : ""}
-       ORDER BY created_at DESC LIMIT $${values.length}`,
+       ORDER BY a.created_at DESC LIMIT $${values.length}`,
       values
     );
     return result.rows.map(mapApproval);

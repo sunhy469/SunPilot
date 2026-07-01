@@ -15,6 +15,7 @@ import {
   LoadingOutlined,
 } from "@ant-design/icons";
 import type { AttachmentRef } from "../../../../features/chat/types";
+import type { UploadFile } from "antd/es/upload";
 import { validateAttachmentsForSend } from "../../../../features/chat/attachment-utils";
 import { useFileAttachments } from "../../hooks/useFileAttachments";
 import { useModels } from "../../hooks/useModels";
@@ -133,7 +134,19 @@ export function ChatComposer({
   const [queuedSend, setQueuedSend] = useState(false);
   const [uploadFailed, setUploadFailed] = useState(false);
   // Preserve the last sent text and attachments for retry on failure
-  const lastSentRef = useRef<{ text: string; hasFiles: boolean }>({ text: "", hasFiles: false });
+  const lastSentRef = useRef<{
+    text: string;
+    attachments: AttachmentRef[];
+    files: UploadFile[];
+    permission: "ask" | "auto" | "full";
+    model: "dp" | "seed";
+  }>({
+    text: "",
+    attachments: [],
+    files: [],
+    permission: "auto",
+    model: "dp",
+  });
 
   const {
     files,
@@ -145,6 +158,7 @@ export function ChatComposer({
     addFilesFromPaste,
     removeFile,
     clearFiles,
+    restoreFiles,
     toAttachmentRefs,
   } = useFileAttachments();
 
@@ -171,15 +185,31 @@ export function ChatComposer({
       sendState === "failed" &&
       prev &&
       prev !== "failed" &&
-      prev !== "editing" &&
-      lastSentRef.current.text
+      prev !== "editing"
     ) {
+      const { text, files: sentFiles } = lastSentRef.current;
+      if (!text && sentFiles.length === 0) return;
       // Restore text if it was cleared by the send handler
-      if (!currentValueRef.current.trim()) {
-        setCurrentValue(lastSentRef.current.text);
+      if (text && !currentValueRef.current.trim()) {
+        setCurrentValue(text);
+      }
+      // Restore attachments if they were cleared
+      if (sentFiles.length > 0) {
+        restoreFiles(sentFiles);
       }
     }
-  }, [sendState, setCurrentValue]);
+  }, [sendState, setCurrentValue, restoreFiles]);
+
+  useEffect(() => {
+    if (sendState !== "completed") return;
+    lastSentRef.current = {
+      text: "",
+      attachments: [],
+      files: [],
+      permission: "auto",
+      model: "dp",
+    };
+  }, [sendState]);
 
   // ── Sync upload state to global sendState ─────────────────────────
   // Report state changes so useChat.sendState reflects upload progress,
@@ -227,8 +257,10 @@ export function ChatComposer({
       return;
     }
 
-    const text = currentValue.trim();
-    onSend(text, toAttachmentRefs(), permission as "ask" | "auto" | "full", model as "dp" | "seed");
+    const snapshot = lastSentRef.current;
+    const text = snapshot.text;
+    snapshot.attachments = toAttachmentRefs();
+    onSend(text, snapshot.attachments, snapshot.permission, snapshot.model);
     clearFiles();
     setCurrentValue("");
     onSendStateChange?.("sending");
@@ -242,7 +274,13 @@ export function ChatComposer({
     if (!hasContent || disabled) return;
 
     // Remember what was sent for retry-on-failure preservation
-    lastSentRef.current = { text, hasFiles: files.length > 0 };
+    lastSentRef.current = {
+      text,
+      attachments: toAttachmentRefs(),
+      files: [...files],
+      permission: permission as "ask" | "auto" | "full",
+      model: model as "dp" | "seed",
+    };
 
     // If uploads are still in progress, queue the send instead of
     // blocking. The user gets immediate feedback: "附件上传完成后将自动发送".

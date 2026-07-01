@@ -71,13 +71,15 @@ export function createToolLayer(deps: ToolFactoryDeps): ToolFactoryResult {
           enabled: s.enabled,
           trust: s.manifest.trust,
           permissions,
-          defaultTimeoutMs: 60_000,
-          maxTimeoutMs: 300_000,
+          defaultTimeoutMs: capability.timeoutPolicy?.defaultMs ?? 60_000,
+          maxTimeoutMs: capability.timeoutPolicy?.maxMs ?? 300_000,
           supportsAbort: true,
-          idempotent: false,
+          idempotent: capability.idempotent ?? false,
           inputSchema: loadSchema(capability.inputSchema, s.path),
           outputSchema: loadSchema(capability.outputSchema, s.path),
-          sideEffects: classifySideEffects(permissions),
+          sideEffects:
+            capability.sideEffects ?? classifySideEffects(permissions),
+          timeoutPolicy: capability.timeoutPolicy,
           riskHints: {
             defaultRisk: capability.risk as
               | "low"
@@ -123,6 +125,8 @@ export function createToolLayer(deps: ToolFactoryDeps): ToolFactoryResult {
     eventBus: rawEventBus,
     toolCalls: database.toolCalls,
     safetyBoundary: toolSafetyBoundary,
+    canExecuteRun: async (runId) =>
+      (await database.runs.findById(runId))?.status === "running",
   });
 
   return {

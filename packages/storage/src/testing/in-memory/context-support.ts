@@ -139,6 +139,7 @@ export type InMemorySnapshot = {
   runRecords: Map<string, RunRecord>;
   runStatusHistoryRecords: RunStatusHistoryRecord[];
   eventRecords: SunPilotEvent[];
+  eventOutboxRecords: Map<string, SunPilotEvent>;
   stepRecords: Map<string, StepRecord>;
   toolCallRecords: Map<string, ToolCallRecord>;
   approvalRecords: Map<string, ApprovalRecord>;
@@ -281,16 +282,24 @@ export function stringifyMemoryValue(value: unknown): string {
 }
 
 export function isAfterDescendingCursor(
-  record: { updatedAt: string; id: string },
+  record: { pinned?: boolean; updatedAt: string; id: string },
   cursor?: string,
 ): boolean {
   if (!cursor) return true;
   try {
     const decoded = JSON.parse(Buffer.from(cursor, "base64url").toString()) as {
+      pinned?: boolean;
       updatedAt?: string;
       id?: string;
     };
     if (!decoded.updatedAt || !decoded.id) return true;
+    // Pinned sorts DESC (true before false). When the cursor carries pinned,
+    // compare it first so paging across the pinned/unpinned boundary is correct.
+    if (decoded.pinned !== undefined) {
+      const recordPinned = record.pinned ? 1 : 0;
+      const cursorPinned = decoded.pinned ? 1 : 0;
+      if (recordPinned !== cursorPinned) return recordPinned < cursorPinned;
+    }
     if (record.updatedAt < decoded.updatedAt) return true;
     return record.updatedAt === decoded.updatedAt && record.id < decoded.id;
   } catch {

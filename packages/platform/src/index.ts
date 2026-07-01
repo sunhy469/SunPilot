@@ -6,6 +6,7 @@ export { LOCAL_CONTEXT } from "./context.js";
 export {
   ConversationService,
   ConversationNotFoundError,
+  ConversationHasActiveRunsError,
 } from "./conversations/conversation.service.js";
 export type * from "./conversations/conversation.types.js";
 

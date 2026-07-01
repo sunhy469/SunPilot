@@ -4,6 +4,7 @@ import type { FastifyInstance } from "fastify";
 import { ZodError } from "zod";
 import {
   approvalDecisionSchema,
+  approvalRejectSchema,
   AuditActor,
   type ArtifactRecord,
 } from "@sunpilot/protocol";
@@ -15,6 +16,7 @@ import {
 import {
   LOCAL_CONTEXT,
   ConversationNotFoundError,
+  ConversationHasActiveRunsError,
 } from "@sunpilot/platform";
 import type { SunPilotApiDeps } from "../composition/api-deps.js";
 import {
@@ -175,7 +177,7 @@ export function registerSunPilotApiRoutes(
             id: result.messageId,
             conversationId: result.conversationId,
             role: "assistant",
-            content: assistantContent,
+            content: result.assistantContent ?? assistantContent,
             createdAt: new Date().toISOString(),
           },
         };
@@ -279,6 +281,22 @@ export function registerSunPilotApiRoutes(
       };
     },
   );
+  app.get<{ Params: { id: string } }>(
+    "/v1/conversations/:id/active-run",
+    async (request, reply) => {
+      try {
+        return await conversations.getActiveRun(
+          LOCAL_CONTEXT,
+          request.params.id,
+        );
+      } catch (error) {
+        if (error instanceof ConversationNotFoundError) {
+          return reply.code(404).send({ error: "not_found" });
+        }
+        throw error;
+      }
+    },
+  );
   app.patch<{ Params: { id: string } }>(
     "/v1/conversations/:id",
     async (request, reply) => {
@@ -324,6 +342,15 @@ export function registerSunPilotApiRoutes(
       } catch (error) {
         if (error instanceof ConversationNotFoundError) {
           return reply.code(404).send({ error: "not_found" });
+        }
+        if (error instanceof ConversationHasActiveRunsError) {
+          return reply.code(409).send({
+            error: {
+              code: "CONVERSATION_HAS_ACTIVE_RUNS",
+              message: error.message,
+              activeRunCount: error.activeRunCount,
+            },
+          });
         }
         throw error;
       }
@@ -663,6 +690,7 @@ export function registerSunPilotApiRoutes(
       items: await database.approvals.list({
         status: query.status,
         runId: query.runId,
+        conversationId: query.conversationId,
         limit: query.limit,
       }),
     };
@@ -690,12 +718,16 @@ export function registerSunPilotApiRoutes(
   app.post<{ Params: { id: string } }>(
     "/v1/approvals/:id/reject",
     async (request) => {
-      const decision = approvalDecisionSchema.parse(request.body ?? {});
+      const decision = approvalRejectSchema.parse({
+        ...(request.body ?? {}),
+        approvalId: request.params.id,
+      });
       const agent = await getChatAgent();
       return agent.reject(
         request.params.id,
         decision.actor,
         decision.reason,
+        decision.strategy,
       );
     },
   );

@@ -99,6 +99,7 @@ export class InMemoryDatabaseContextImplementation implements DatabaseContext {
   private runRecords = new Map<string, RunRecord>();
   private runStatusHistoryRecords: RunStatusHistoryRecord[] = [];
   private eventRecords: SunPilotEvent[] = [];
+  private eventOutboxRecords = new Map<string, SunPilotEvent>();
   private stepRecords = new Map<string, StepRecord>();
   private toolCallRecords = new Map<string, ToolCallRecord>();
   private approvalRecords = new Map<string, ApprovalRecord>();
@@ -137,6 +138,8 @@ export class InMemoryDatabaseContextImplementation implements DatabaseContext {
     },
     findById: async (id: string): Promise<ConversationRecord | null> =>
       this.conversationRecords.get(id) ?? null,
+    findByIdForUpdate: async (id: string): Promise<ConversationRecord | null> =>
+      this.conversationRecords.get(id) ?? null,
     list: async (
       input: ListConversationsInput = {},
     ): Promise<ConversationRecord[]> =>
@@ -144,7 +147,11 @@ export class InMemoryDatabaseContextImplementation implements DatabaseContext {
         .sort(byPinnedAndUpdatedAtDesc)
         .filter((conversation) =>
           isAfterDescendingCursor(
-            { updatedAt: conversation.updatedAt, id: conversation.id },
+            {
+              pinned: conversation.pinned,
+              updatedAt: conversation.updatedAt,
+              id: conversation.id,
+            },
             input.cursor,
           ),
         )
@@ -375,6 +382,24 @@ export class InMemoryDatabaseContextImplementation implements DatabaseContext {
       });
       return true;
     },
+    updateStatusIfInSet: async (
+      id: string,
+      expectedStatuses: RunStatus[],
+      input: {
+        status: RunStatus;
+        updatedAt?: string;
+      },
+    ): Promise<boolean> => {
+      const run = this.runRecords.get(id);
+      if (!run || !expectedStatuses.includes(run.status)) return false;
+      const now = new Date().toISOString();
+      this.runRecords.set(id, {
+        ...run,
+        status: input.status,
+        updatedAt: input.updatedAt ?? now,
+      });
+      return true;
+    },
     updateContext: async (
       id: string,
       context: Record<string, unknown>,
@@ -398,6 +423,41 @@ export class InMemoryDatabaseContextImplementation implements DatabaseContext {
         context: { ...run.context, ...patch },
         updatedAt: new Date().toISOString(),
       });
+    },
+    countActiveRunsByConversation: async (
+      conversationId: string,
+    ): Promise<number> => {
+      const activeStatuses: ReadonlySet<RunStatus> = new Set([
+        "created",
+        "running",
+        "waiting_approval",
+        "waiting_user",
+        "interrupted",
+      ]);
+      return [...this.runRecords.values()].filter(
+        (run) =>
+          run.conversationId === conversationId &&
+          activeStatuses.has(run.status),
+      ).length;
+    },
+    findLatestActiveByConversation: async (
+      conversationId: string,
+    ): Promise<RunRecord | null> => {
+      const activeStatuses: ReadonlySet<RunStatus> = new Set([
+        "created",
+        "running",
+        "waiting_approval",
+        "waiting_user",
+        "interrupted",
+      ]);
+      const candidates = [...this.runRecords.values()]
+        .filter(
+          (run) =>
+            run.conversationId === conversationId &&
+            activeStatuses.has(run.status),
+        )
+        .sort(byCreatedAtDesc);
+      return candidates[0] ?? null;
     },
   };
 
@@ -451,6 +511,16 @@ export class InMemoryDatabaseContextImplementation implements DatabaseContext {
             (left.sequence ?? 0) - (right.sequence ?? 0) ||
             byCreatedAt(left, right),
         ),
+    enqueueOutbox: async (event: SunPilotEvent): Promise<void> => {
+      if (!this.eventOutboxRecords.has(event.id)) {
+        this.eventOutboxRecords.set(event.id, structuredClone(event));
+      }
+    },
+    listOutbox: async (limit = 200): Promise<SunPilotEvent[]> =>
+      [...this.eventOutboxRecords.values()].slice(0, limit),
+    deleteOutbox: async (eventId: string): Promise<void> => {
+      this.eventOutboxRecords.delete(eventId);
+    },
   };
 
   readonly steps = {
@@ -592,6 +662,7 @@ export class InMemoryDatabaseContextImplementation implements DatabaseContext {
       input: {
         status?: ApprovalRecord["status"];
         runId?: string;
+        conversationId?: string;
         limit?: number;
         expiresBefore?: string;
       } = {},
@@ -599,6 +670,11 @@ export class InMemoryDatabaseContextImplementation implements DatabaseContext {
       [...this.approvalRecords.values()]
         .filter((approval) => !input.status || approval.status === input.status)
         .filter((approval) => !input.runId || approval.runId === input.runId)
+        .filter((approval) => {
+          if (!input.conversationId) return true;
+          const run = this.runRecords.get(approval.runId);
+          return run?.conversationId === input.conversationId;
+        })
         .filter((approval) =>
           !input.expiresBefore ||
           (!!approval.expiresAt && approval.expiresAt <= input.expiresBefore)
@@ -657,11 +733,22 @@ export class InMemoryDatabaseContextImplementation implements DatabaseContext {
         types?: MemoryRecord["type"][];
         includeDeleted?: boolean;
         limit?: number;
+        afterCursor?: { createdAt: string; id: string };
       } = {},
-    ): Promise<MemoryRecord[]> =>
-      filterMemories(this.memoryRecords, input)
-        .sort(byCreatedAt)
-        .slice(0, input.limit ?? 100),
+    ): Promise<MemoryRecord[]> => {
+      let items = filterMemories(this.memoryRecords, input);
+      if (input.afterCursor) {
+        items = items.filter(
+          (m) =>
+            m.createdAt < input.afterCursor!.createdAt ||
+            (m.createdAt === input.afterCursor!.createdAt &&
+              m.id < input.afterCursor!.id),
+        );
+      }
+      return items
+        .sort((a, b) => b.createdAt.localeCompare(a.createdAt) || b.id.localeCompare(a.id))
+        .slice(0, input.limit ?? 100);
+    },
     search: async (
       input: {
         query?: string;
@@ -1195,6 +1282,7 @@ export class InMemoryDatabaseContextImplementation implements DatabaseContext {
     this.runRecords.clear();
     this.runStatusHistoryRecords.length = 0;
     this.eventRecords.length = 0;
+    this.eventOutboxRecords.clear();
     this.stepRecords.clear();
     this.toolCallRecords.clear();
     this.approvalRecords.clear();
@@ -1241,6 +1329,7 @@ export class InMemoryDatabaseContextImplementation implements DatabaseContext {
       runRecords: new Map(this.runRecords),
       runStatusHistoryRecords: this.runStatusHistoryRecords.slice(),
       eventRecords: this.eventRecords.slice(),
+      eventOutboxRecords: new Map(this.eventOutboxRecords),
       stepRecords: new Map(this.stepRecords),
       toolCallRecords: new Map(this.toolCallRecords),
       approvalRecords: new Map(this.approvalRecords),
@@ -1273,6 +1362,7 @@ export class InMemoryDatabaseContextImplementation implements DatabaseContext {
     this.runRecords = snapshot.runRecords;
     this.runStatusHistoryRecords = snapshot.runStatusHistoryRecords;
     this.eventRecords = snapshot.eventRecords;
+    this.eventOutboxRecords = snapshot.eventOutboxRecords;
     this.stepRecords = snapshot.stepRecords;
     this.toolCallRecords = snapshot.toolCallRecords;
     this.approvalRecords = snapshot.approvalRecords;

@@ -69,4 +69,31 @@ describe("paginationCursor", () => {
     const b = paginationCursor({ updatedAt: "2026-06-29T00:00:00.000Z", id: "b" });
     expect(a).not.toBe(b);
   });
+
+  test("includes pinned when provided", () => {
+    const cursor = paginationCursor({
+      pinned: true,
+      updatedAt: "2026-06-29T00:00:00.000Z",
+      id: "conv_1",
+    });
+    const decoded = JSON.parse(
+      Buffer.from(cursor, "base64url").toString("utf8"),
+    );
+    expect(decoded).toEqual({
+      pinned: true,
+      updatedAt: "2026-06-29T00:00:00.000Z",
+      id: "conv_1",
+    });
+  });
+
+  test("omits pinned when not provided (runs cursor)", () => {
+    const cursor = paginationCursor({
+      updatedAt: "2026-06-29T00:00:00.000Z",
+      id: "run_1",
+    });
+    const decoded = JSON.parse(
+      Buffer.from(cursor, "base64url").toString("utf8"),
+    );
+    expect(decoded).not.toHaveProperty("pinned");
+  });
 });

@@ -77,6 +77,7 @@ export const conversationEventsQuerySchema = z.object({
 export const listApprovalsQuerySchema = z.object({
   status: z.enum(["pending", "approved", "rejected", "expired"]).optional(),
   runId: z.string().optional(),
+  conversationId: z.string().optional(),
   limit: z.coerce.number().int().positive().max(200).optional(),
 });
 

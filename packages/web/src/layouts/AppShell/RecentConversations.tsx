@@ -150,7 +150,24 @@ export function RecentConversations({
       okType: "danger",
       cancelText: "取消",
       onOk: async () => {
-        await onDelete(conv.id);
+        try {
+          await onDelete(conv.id);
+        } catch (error) {
+          const isConflict =
+            (error as { code?: string; status?: number })?.code ===
+              "CONVERSATION_HAS_ACTIVE_RUNS" ||
+            (error as { status?: number })?.status === 409;
+          if (isConflict) {
+            modal.error({
+              title: "无法删除会话",
+              content:
+                "该会话中有进行中的任务，请先停止任务再删除会话。",
+              okText: "知道了",
+            });
+            return;
+          }
+          throw error;
+        }
       },
     });
   };

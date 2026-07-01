@@ -5,6 +5,7 @@ import type {
   ListConversationsResult,
   ListMessagesResult,
   UpdateConversationInput,
+  ActiveRunResult,
 } from "./conversation.types.js";
 import { toHistoryMessageDto } from "./conversation.mapper.js";
 
@@ -16,9 +17,17 @@ export class ConversationService {
   constructor(private readonly deps: { database: DatabaseContext }) {}
 
   /** 分页游标编码（与 API 共享层保持一致）。 */
-  private paginationCursor(input: { updatedAt: string; id: string }): string {
+  private paginationCursor(input: {
+    pinned: boolean;
+    updatedAt: string;
+    id: string;
+  }): string {
     return Buffer.from(
-      JSON.stringify({ updatedAt: input.updatedAt, id: input.id }),
+      JSON.stringify({
+        pinned: input.pinned,
+        updatedAt: input.updatedAt,
+        id: input.id,
+      }),
     ).toString("base64url");
   }
 
@@ -40,7 +49,11 @@ export class ConversationService {
     return {
       items,
       nextCursor: next
-        ? this.paginationCursor({ updatedAt: next.updatedAt, id: next.id })
+        ? this.paginationCursor({
+            pinned: next.pinned,
+            updatedAt: next.updatedAt,
+            id: next.id,
+          })
         : undefined,
     };
   }
@@ -117,17 +130,58 @@ export class ConversationService {
     return updated;
   }
 
+  // ── 活跃 Run（页面刷新恢复） ─────────────────────────────────────────
+
+  async getActiveRun(
+    _context: PlatformRequestContext,
+    conversationId: string,
+  ): Promise<ActiveRunResult | null> {
+    const conversation = await this.deps.database.conversations.findById(
+      conversationId,
+    );
+    if (!conversation) throw new ConversationNotFoundError(conversationId);
+    const run = await this.deps.database.runs.findLatestActiveByConversation(
+      conversationId,
+    );
+    if (!run) return null;
+    const continuationKind: ActiveRunResult["continuationKind"] =
+      run.status === "waiting_approval"
+        ? "approval"
+        : run.status === "waiting_user"
+          ? "user_input"
+          : run.status === "interrupted"
+            ? "interrupted"
+            : null;
+    return {
+      runId: run.id,
+      status: run.status,
+      continuationKind,
+    };
+  }
+
   // ── 删除 ──────────────────────────────────────────────────────────
 
   async deleteConversation(
     _context: PlatformRequestContext,
     id: string,
   ): Promise<{ ok: boolean }> {
-    const deleted = await this.deps.database.conversations.delete(id);
-    if (!deleted) {
-      throw new ConversationNotFoundError(id);
-    }
-    return { ok: true };
+    const remove = async (database: DatabaseContext): Promise<{ ok: boolean }> => {
+      // FOR UPDATE prevents a concurrent run insert (which needs a foreign-key
+      // key-share lock) from slipping between the active-run check and delete.
+      const conversation = await database.conversations.findByIdForUpdate(id);
+      if (!conversation) throw new ConversationNotFoundError(id);
+      const activeRunCount =
+        await database.runs.countActiveRunsByConversation(id);
+      if (activeRunCount > 0) {
+        throw new ConversationHasActiveRunsError(id, activeRunCount);
+      }
+      const deleted = await database.conversations.delete(id);
+      if (!deleted) throw new ConversationNotFoundError(id);
+      return { ok: true };
+    };
+    return this.deps.database.transaction
+      ? this.deps.database.transaction(remove)
+      : remove(this.deps.database);
   }
 }
 
@@ -138,5 +192,20 @@ export class ConversationNotFoundError extends Error {
   constructor(public readonly conversationId: string) {
     super(`Conversation not found: ${conversationId}`);
     this.name = "ConversationNotFoundError";
+  }
+}
+
+/** 会话仍有进行中的 run，不能删除。调用方应映射为 HTTP 409。 */
+export class ConversationHasActiveRunsError extends Error {
+  public readonly code = "CONVERSATION_HAS_ACTIVE_RUNS";
+
+  constructor(
+    public readonly conversationId: string,
+    public readonly activeRunCount: number,
+  ) {
+    super(
+      `Conversation ${conversationId} has ${activeRunCount} active run(s); stop them before deleting`,
+    );
+    this.name = "ConversationHasActiveRunsError";
   }
 }

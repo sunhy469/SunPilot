@@ -16,6 +16,7 @@ import { parseReactCheckpoint } from "../persistence/react-checkpoint-repository
 import { RUN_PHASE_LABELS } from "./constants.js";
 import { ApprovalFlowCoordinator } from "./approval-flow.js";
 import { RunOutcomeCoordinator } from "./run-outcomes.js";
+import type { RunState } from "../run-state-manager.js";
 
 /** Re-enters the exact persisted ReAct transcript after a human decision. */
 export class ApprovalContinuationCoordinator {
@@ -55,6 +56,13 @@ export class ApprovalContinuationCoordinator {
     });
     let stream: AssistantMessageStream | undefined;
     try {
+      const execution = await this.deps.runStateManager.acquireExecution(
+        input.runId,
+        ["waiting_approval"],
+      );
+      if (!execution.acquired) {
+        return notAcquiredResult(execution.state);
+      }
       stream = this.hydrate(checkpoint);
       const context = await this.deps.contextBuilder.build(agentInput, signal);
       for (const call of checkpoint.pendingToolCalls) {
@@ -67,7 +75,6 @@ export class ApprovalContinuationCoordinator {
         });
       }
       completeWaitingStatuses(stream, checkpoint.partsSnapshot, "已拒绝，正在重新规划");
-      await this.deps.runStateManager.markStatus(input.runId, "running");
       this.emitRunStarted(input.runId, input.conversationId, "approval_rejected");
       this.deps.traceManager?.startTrace(input.runId, input.conversationId);
       const result = await this.deps.reactLoopRunner.resumeAfterRejection(
@@ -110,10 +117,14 @@ export class ApprovalContinuationCoordinator {
     });
     let stream: AssistantMessageStream | undefined;
     try {
+      const execution = await this.deps.runStateManager.acquireExecution(
+        run.runId,
+        ["waiting_approval"],
+      );
+      if (!execution.acquired) return notAcquiredResult(execution.state);
       stream = this.hydrate(checkpoint);
       const context = await this.deps.contextBuilder.build(agentInput, signal);
       completeWaitingStatuses(stream, checkpoint.partsSnapshot, "已确认，正在执行");
-      await this.deps.runStateManager.markStatus(run.runId, "running");
       this.emitRunStarted(run.runId, conversationId, "approval_approved");
       this.deps.traceManager?.startTrace(run.runId, conversationId);
       const approvedScopes = extractApprovedToolScopes(approval).map((scope) => ({
@@ -181,6 +192,13 @@ export class ApprovalContinuationCoordinator {
 
     let stream: AssistantMessageStream | undefined;
     try {
+      const execution = await this.deps.runStateManager.acquireExecution(
+        run.runId,
+        ["waiting_user"],
+      );
+      if (!execution.acquired) {
+        return notAcquiredResult(execution.state);
+      }
       if (!this.deps.saveMessage) {
         throw new Error("ReAct continuation requires saveMessage");
       }
@@ -221,7 +239,6 @@ export class ApprovalContinuationCoordinator {
       });
       stream.start();
       const context = await this.deps.contextBuilder.build(agentInput, signal);
-      await this.deps.runStateManager.markStatus(run.runId, "running");
       this.emitRunStarted(run.runId, agentInput.conversationId, "user_input");
       this.deps.traceManager?.startTrace(run.runId, agentInput.conversationId);
       const result = await this.deps.reactLoopRunner.resumeWithUserInput(
@@ -264,9 +281,13 @@ export class ApprovalContinuationCoordinator {
     });
     let stream: AssistantMessageStream | undefined;
     try {
+      const execution = await this.deps.runStateManager.acquireExecution(
+        run.runId,
+        ["interrupted"],
+      );
+      if (!execution.acquired) return notAcquiredResult(execution.state);
       stream = this.hydrate(checkpoint);
       const context = await this.deps.contextBuilder.build(agentInput, signal);
-      await this.deps.runStateManager.markStatus(run.runId, "running");
       this.emitRunStarted(run.runId, run.conversationId, "interrupted_resume");
       this.deps.traceManager?.startTrace(run.runId, run.conversationId);
       const result = await this.deps.reactLoopRunner.resumeInterrupted(
@@ -367,10 +388,12 @@ export class ApprovalContinuationCoordinator {
       },
       { runId: input.runId, conversationId: input.conversationId },
     );
+    await this.deps.eventBus.flush();
     return {
       runId: input.runId,
       conversationId: input.conversationId,
       assistantMessageId: completed.messageId,
+      assistantContent: completed.content,
       status: "completed",
       artifacts: result.artifacts,
       toolCalls: result.toolCalls,
@@ -558,6 +581,18 @@ function completeWaitingStatuses(
       stream.updateStatus(part.id, { status: "completed", label });
     }
   }
+}
+
+function notAcquiredResult(
+  state: RunState,
+): AgentLoopResult {
+  return {
+    runId: state.runId,
+    conversationId: state.conversationId,
+    status: state.status,
+    artifacts: [],
+    toolCalls: [],
+  };
 }
 
 async function saveCheckpoint(

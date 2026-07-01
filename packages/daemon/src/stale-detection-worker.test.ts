@@ -28,13 +28,13 @@ function makeMemoryRecord(overrides: Partial<RetrievedMemoryRecord> = {}): Retri
 }
 
 function makeMockDb(overrides: {
-  searchResult?: RetrievedMemoryRecord[];
+  listResult?: RetrievedMemoryRecord[];
   messages?: Array<{ role: string; content: string; createdAt: string }>;
   updateFn?: ReturnType<typeof vi.fn>;
 } = {}) {
   return {
     memory: {
-      search: vi.fn().mockResolvedValue(overrides.searchResult ?? []),
+      list: vi.fn().mockResolvedValue(overrides.listResult ?? []),
       update: overrides.updateFn ?? vi.fn().mockResolvedValue({ id: "mem_1" }),
     },
     messages: {
@@ -101,7 +101,7 @@ describe("StaleDetectionWorker", () => {
       });
       const updateFn = vi.fn().mockResolvedValue({ id: "mem_1" });
       const db = makeMockDb({
-        searchResult: [mem],
+        listResult: [mem],
         messages: [
           { role: "user", content: "Actually, let's use Docker Compose instead.", createdAt: "2026-06-25T01:00:00.000Z" },
         ],
@@ -116,9 +116,10 @@ describe("StaleDetectionWorker", () => {
 
       await (worker as any).scan();
 
-      expect(db.memory.search).toHaveBeenCalledWith({
+      expect(db.memory.list).toHaveBeenCalledWith({
         types: ["conversation_summary"],
         limit: 50,
+        afterCursor: undefined,
       });
       expect(updateFn).toHaveBeenCalledWith(
         "mem_1",
@@ -137,7 +138,7 @@ describe("StaleDetectionWorker", () => {
       });
       const updateFn = vi.fn();
       const db = makeMockDb({
-        searchResult: [mem],
+        listResult: [mem],
         messages: [
           { role: "user", content: "New message.", createdAt: "2026-06-25T01:00:00.000Z" },
         ],
@@ -164,7 +165,7 @@ describe("StaleDetectionWorker", () => {
       });
       const updateFn = vi.fn();
       const db = makeMockDb({
-        searchResult: [mem],
+        listResult: [mem],
         updateFn,
       });
       const detector = new SummaryStaleDetector();
@@ -186,7 +187,7 @@ describe("StaleDetectionWorker", () => {
       });
       const updateFn = vi.fn();
       const db = makeMockDb({
-        searchResult: [mem],
+        listResult: [mem],
         messages: [
           // All messages are older than the summary
           { role: "user", content: "Old message.", createdAt: "2026-06-25T01:00:00.000Z" },
@@ -212,7 +213,7 @@ describe("StaleDetectionWorker", () => {
       });
       const updateFn = vi.fn();
       const db = makeMockDb({
-        searchResult: [mem],
+        listResult: [mem],
         messages: [
           // No goal change, correction, or preference conflict signal
           { role: "user", content: "Can you explain more about the CI/CD setup?", createdAt: "2026-06-25T01:00:00.000Z" },
@@ -253,7 +254,7 @@ describe("StaleDetectionWorker", () => {
         .mockRejectedValueOnce(new Error("Cannot fetch messages"));
       const db = {
         memory: {
-          search: vi.fn().mockResolvedValue([goodMem, badMem]),
+          list: vi.fn().mockResolvedValue([goodMem, badMem]),
           update: updateFn,
         },
         messages: {
@@ -292,14 +293,14 @@ describe("StaleDetectionWorker", () => {
 
       await (worker as any).scan();
 
-      // Should have returned without calling search
-      expect(db.memory.search).not.toHaveBeenCalled();
+      // Should have returned without calling list
+      expect(db.memory.list).not.toHaveBeenCalled();
     });
 
     test("handles top-level scan error gracefully", async () => {
       const db = {
         memory: {
-          search: vi.fn().mockRejectedValue(new Error("Database is down")),
+          list: vi.fn().mockRejectedValue(new Error("Database is down")),
           update: vi.fn(),
         },
         messages: {
@@ -321,7 +322,7 @@ describe("StaleDetectionWorker", () => {
     });
 
     test("resets running flag after scan", async () => {
-      const db = makeMockDb({ searchResult: [] });
+      const db = makeMockDb({ listResult: [] });
       const detector = new SummaryStaleDetector();
       worker = new StaleDetectionWorker({
         database: db,
@@ -336,7 +337,7 @@ describe("StaleDetectionWorker", () => {
 
     test("handles empty search results", async () => {
       const updateFn = vi.fn();
-      const db = makeMockDb({ searchResult: [], updateFn });
+      const db = makeMockDb({ listResult: [], updateFn });
       const detector = new SummaryStaleDetector();
       worker = new StaleDetectionWorker({
         database: db,

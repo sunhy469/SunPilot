@@ -1,4 +1,5 @@
 import type { createRequest } from "../../shared/api/client";
+import type { RunStatus } from "@sunpilot/protocol";
 import { endpoints } from "../../shared/api/endpoints";
 import type { ListResponse } from "../../shared/types/api";
 import type { ChatMessage, Conversation } from "./types";
@@ -41,4 +42,14 @@ export function touchConversation(request: Request, id: string) {
   return request<Conversation>(`${endpoints.conversationById(id)}/touch`, {
     method: "POST",
   });
+}
+
+export interface ActiveRun {
+  runId: string;
+  status: RunStatus;
+  continuationKind: "approval" | "user_input" | "interrupted" | null;
+}
+
+export function getActiveRun(request: Request, conversationId: string) {
+  return request<ActiveRun | null>(endpoints.conversationActiveRun(conversationId));
 }
