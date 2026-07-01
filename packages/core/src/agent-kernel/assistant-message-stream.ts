@@ -92,8 +92,9 @@ export class AssistantMessageStream implements IAssistantMessageStream {
 
   /** Start a new text part. Returns the created part.
    *  @param semanticRole "progress" for pre-tool thinking text,
-   *                      "final" for post-tool final answer (§P0-1). */
-  startTextPart(semanticRole?: "progress" | "final"): AssistantTextPart {
+   *                      "final" for post-tool final answer,
+   *                      "user_prompt" for user-facing prompts during waiting_user (§P0-1). */
+  startTextPart(semanticRole?: "progress" | "final" | "user_prompt"): AssistantTextPart {
     this.ensureStarted();
     const part: AssistantTextPart = {
       id: `part_text_${crypto.randomUUID()}`,
@@ -188,8 +189,9 @@ export class AssistantMessageStream implements IAssistantMessageStream {
 
   /** §P0-1/P1-3: Update a text part's semanticRole after creation.
    *  Used when the LLM round was initially "progress" but the model
-   *  decided not to call tools (making it the final answer). */
-  updateTextPartRole(partId: string, semanticRole: "progress" | "final"): void {
+   *  decided not to call tools (making it the final answer), or when
+   *  a "progress" text should become a "user_prompt" for waiting_user. */
+  updateTextPartRole(partId: string, semanticRole: "progress" | "final" | "user_prompt"): void {
     const part = this.findPart<AssistantTextPart>(partId, "text");
     if (!part) return;
 
@@ -458,6 +460,9 @@ export class AssistantMessageStream implements IAssistantMessageStream {
     message: string;
     code?: string;
     recoverable?: boolean;
+    scope?: "tool" | "protocol" | "run";
+    presentation?: "step_detail" | "fatal";
+    toolCallId?: string;
   }): AssistantErrorPart {
     this.ensureStarted();
     const part: AssistantErrorPart = {
@@ -466,6 +471,9 @@ export class AssistantMessageStream implements IAssistantMessageStream {
       message: input.message,
       code: input.code,
       recoverable: input.recoverable,
+      scope: input.scope,
+      presentation: input.presentation,
+      toolCallId: input.toolCallId,
       createdAt: new Date().toISOString(),
     };
     this.parts.push(part);
@@ -482,6 +490,9 @@ export class AssistantMessageStream implements IAssistantMessageStream {
           message: part.message,
           code: part.code,
           recoverable: part.recoverable,
+          scope: part.scope,
+          presentation: part.presentation,
+          toolCallId: part.toolCallId,
           createdAt: part.createdAt,
         },
       },
@@ -646,8 +657,8 @@ export class AssistantMessageStream implements IAssistantMessageStream {
   }
 
   /** Merge text parts into a single content string.
-   *  §P0-1: When any text part has semanticRole, only "final" text parts
-   *  contribute to the merged content. Falls back to all text parts for
+   *  §P0-1: When any text part has semanticRole, only "final" and "user_prompt"
+   *  text parts contribute to the merged content. Falls back to all text parts for
    *  backward compatibility with legacy messages. */
   private mergeContent(): string {
     const textParts = this.parts.filter(
@@ -655,11 +666,11 @@ export class AssistantMessageStream implements IAssistantMessageStream {
     );
     if (textParts.length === 0) return "";
 
-    // When semanticRole is present, only include "final" text
+    // When semanticRole is present, only include "final" and "user_prompt" text
     const hasSemanticRoles = textParts.some((p) => p.semanticRole);
     if (hasSemanticRoles) {
       return textParts
-        .filter((p) => p.semanticRole === "final")
+        .filter((p) => p.semanticRole === "final" || p.semanticRole === "user_prompt")
         .map((p) => p.content)
         .join("\n");
     }

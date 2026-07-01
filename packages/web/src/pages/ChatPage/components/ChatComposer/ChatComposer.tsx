@@ -331,7 +331,7 @@ export function ChatComposer({
       case "uploading": return undefined;
       case "sending": return "发送中...";
       case "waiting_approval": return "等待你确认工具调用";
-      case "waiting_user": return "等待你补充信息后继续";
+      case "waiting_user": return undefined;
       case "failed": return "发送失败，请重试";
       default: return undefined;
     }

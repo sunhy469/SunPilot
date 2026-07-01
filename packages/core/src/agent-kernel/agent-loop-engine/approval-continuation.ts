@@ -173,22 +173,54 @@ export class ApprovalContinuationCoordinator {
       checkpoint,
       attachments: input.attachments ?? [],
     });
+
+    // §Create a NEW message for the post-supplement response so it
+    // renders in a fresh assistant bubble, keeping the conversation
+    // order clean: User → AI(pre) → User(supplement) → AI(post).
+    const newMessageId = `msg_${crypto.randomUUID()}`;
+
     let stream: AssistantMessageStream | undefined;
     try {
-      stream = this.hydrate(checkpoint);
-      const context = await this.deps.contextBuilder.build(agentInput, signal);
+      if (!this.deps.saveMessage) {
+        throw new Error("ReAct continuation requires saveMessage");
+      }
+
+      // Finalize and persist the old waiting message without re-emitting
+      // agent.message.started. Re-emitting the old message start could bind
+      // the new optimistic placeholder to the wrong assistant message.
+      const previousStream = new AssistantMessageStream({
+        runId: checkpoint.runId,
+        conversationId: checkpoint.conversationId,
+        messageId: checkpoint.messageId,
+        eventBus: this.deps.eventBus,
+        saveMessage: this.deps.saveMessage,
+        initialParts: checkpoint.partsSnapshot,
+        skipStartedEvents: true,
+      });
+      previousStream.start();
       for (const part of checkpoint.partsSnapshot) {
         if (
           part.type === "status" &&
           part.status === "running" &&
           part.label === "等待你补充信息"
         ) {
-          stream.updateStatus(part.id, {
+          previousStream.updateStatus(part.id, {
             status: "completed",
             label: "已收到补充信息",
           });
         }
       }
+      await previousStream.persistSnapshot();
+
+      stream = new AssistantMessageStream({
+        runId: checkpoint.runId,
+        conversationId: checkpoint.conversationId,
+        messageId: newMessageId,
+        eventBus: this.deps.eventBus,
+        saveMessage: this.deps.saveMessage,
+      });
+      stream.start();
+      const context = await this.deps.contextBuilder.build(agentInput, signal);
       await this.deps.runStateManager.markStatus(run.runId, "running");
       this.emitRunStarted(run.runId, agentInput.conversationId, "user_input");
       this.deps.traceManager?.startTrace(run.runId, agentInput.conversationId);
@@ -196,7 +228,7 @@ export class ApprovalContinuationCoordinator {
         {
           agentInput,
           context,
-          checkpoint,
+          checkpoint: { ...checkpoint, messageId: newMessageId },
           stream,
           userMessage: input.message,
         },
@@ -266,9 +298,13 @@ export class ApprovalContinuationCoordinator {
       );
     }
     if (result.type === "waiting_user") {
-      const part = stream.startTextPart("progress");
-      stream.appendText(part.id, result.question);
-      stream.completeTextPart(part.id);
+      // §P0: Only create a user_prompt text part if the LLM didn't already
+      // produce one. This prevents duplicate user-facing messages.
+      if (!result.promptTextPartId) {
+        const part = stream.startTextPart("user_prompt");
+        stream.appendText(part.id, result.question);
+        stream.completeTextPart(part.id);
+      }
       stream.startStatus({
         label: "等待你补充信息",
         metadata: { phase: "queued" },
@@ -370,6 +406,8 @@ export class ApprovalContinuationCoordinator {
         code: "REACT_CONTINUATION_FAILED",
         message: error instanceof Error ? error.message : String(error),
         recoverable: false,
+        scope: "run",
+        presentation: "fatal",
       });
       await stream.complete("failed").catch(() => undefined);
     }

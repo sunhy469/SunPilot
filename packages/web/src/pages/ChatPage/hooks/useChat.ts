@@ -896,17 +896,15 @@ export function useChat(
             checksum: a.checksum,
           })),
         },
-        ...(resumeRunId
-          ? []
-          : [{
-              id: placeholderId,
-              conversationId: conversationId || "pending",
-              role: "assistant" as const,
-              content: "",
-              createdAt: new Date().toISOString(),
-              status: "pending" as const,
-              clientRequestId,
-            }]),
+        {
+          id: placeholderId,
+          conversationId: conversationId || "pending",
+          role: "assistant" as const,
+          content: "",
+          createdAt: new Date().toISOString(),
+          status: "pending" as const,
+          clientRequestId,
+        },
       ]);
 
       const socket = ensureSocket();

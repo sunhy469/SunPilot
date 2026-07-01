@@ -132,6 +132,16 @@ describe("AgentLoopEngine ReAct integration", () => {
   test("writes memory after a waiting_user continuation completes", async () => {
     const runState = new InMemoryRunStateManager();
     const existing = checkpoint("msg_existing");
+    existing.partsSnapshot = [
+      {
+        id: "waiting_status",
+        type: "status",
+        label: "等待你补充信息",
+        status: "running",
+        runId: input.runId,
+        createdAt: "2026-07-01T00:00:00.000Z",
+      },
+    ];
     await runState.createRun(input);
     await runState.markStatus(input.runId, "running");
     await runState.saveTaskState(input.runId, {
@@ -172,7 +182,12 @@ describe("AgentLoopEngine ReAct integration", () => {
       rejected: [],
       superseded: [],
     }));
-    const engine = createEngine(runState, reactLoopRunner, [], [], {
+    const saved: Array<{
+      id: string;
+      content: string;
+      metadata?: Record<string, unknown>;
+    }> = [];
+    const engine = createEngine(runState, reactLoopRunner, saved, [], {
       memoryWriter: { writeFromTurn },
     });
 
@@ -182,10 +197,25 @@ describe("AgentLoopEngine ReAct integration", () => {
     );
 
     expect(result.status).toBe("completed");
+    // §New message creation: the continuation creates a fresh message for
+    // the post-supplement response, so responseMessageId is the new message id.
     expect(writeFromTurn).toHaveBeenCalledWith(expect.objectContaining({
-      responseMessageId: existing.messageId,
+      responseMessageId: expect.stringMatching(/^msg_/),
       turnCompleted: true,
     }));
+    expect(saved[0]).toEqual(expect.objectContaining({
+      id: "msg_existing",
+      metadata: expect.objectContaining({
+        parts: expect.arrayContaining([
+          expect.objectContaining({
+            id: "waiting_status",
+            status: "completed",
+            label: "已收到补充信息",
+          }),
+        ]),
+      }),
+    }));
+    expect(saved.some((message) => message.id !== "msg_existing")).toBe(true);
   });
 
   test("keeps task-scoped safety state when a continuation suspends again", async () => {

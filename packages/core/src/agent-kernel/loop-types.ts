@@ -40,13 +40,13 @@ export interface IAssistantMessageStream {
   readonly conversationId: string;
   readonly messageId: string;
   start(): void;
-  startTextPart(semanticRole?: "progress" | "final"): AssistantTextPart;
+  startTextPart(semanticRole?: "progress" | "final" | "user_prompt"): AssistantTextPart;
   appendText(partId: string, delta: string): void;
   completeTextPart(partId: string): void;
   /** §P0-1/P1-3: Update a text part's semanticRole after creation.
    *  Used when a "progress" text part turns out to be the final answer
    *  (LLM decided not to call tools on a post-tool iteration). */
-  updateTextPartRole(partId: string, semanticRole: "progress" | "final"): void;
+  updateTextPartRole(partId: string, semanticRole: "progress" | "final" | "user_prompt"): void;
   startStatus(input: {
     label: string;
     toolCallId?: string;
@@ -82,6 +82,9 @@ export interface IAssistantMessageStream {
     message: string;
     code?: string;
     recoverable?: boolean;
+    scope?: "tool" | "protocol" | "run";
+    presentation?: "step_detail" | "fatal";
+    toolCallId?: string;
   }): AssistantErrorPart;
   /** §Step 1b: Snapshot current parts without completing. */
   getPartsSnapshot(): AssistantMessagePart[];

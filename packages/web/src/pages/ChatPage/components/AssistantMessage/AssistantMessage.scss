@@ -17,9 +17,10 @@
 /* ── AI status indicator ─────────────────────────────────── */
 
 .assistant-status {
-  border-radius: 8px;
-  padding: 6px 12px;
-  background: rgba(37, 99, 235, 0.04);
+  padding: 4px 0 4px 10px;
+  background: transparent;
+  border: none;
+  border-left: 2px solid rgba(148, 163, 184, 0.15);
   transition: all 0.2s ease;
 }
 
@@ -73,11 +74,8 @@
   flex-direction: column;
   gap: 6px;
   margin-top: 12px;
-  padding-top: 10px;
-  border-top: 1px solid var(--sp-border-soft);
-  border-radius: 8px;
-  padding: 8px 12px;
-  background: rgba(0, 0, 0, 0.015);
+  padding: 0;
+  background: transparent;
 }
 
 .assistant-activity {
@@ -185,10 +183,12 @@
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 4px 8px;
+  padding: 2px 8px;
+  background: transparent;
   font-size: 13px;
   line-height: 1.5;
-  border-radius: 6px;
+  border-radius: 0;
+  border-left: 2px solid transparent;
   transition: background 0.15s ease;
 }
 
@@ -198,7 +198,7 @@
 }
 
 .assistant-status-block--running {
-  background: rgba(37, 99, 235, 0.04);
+  border-left: 2px solid rgba(37, 99, 235, 0.3);
 }
 
 .assistant-status-block--running .assistant-status-block__icon {
@@ -208,7 +208,7 @@
 }
 
 .assistant-status-block--completed {
-  background: rgba(22, 163, 74, 0.04);
+  border-left: 2px solid rgba(22, 163, 74, 0.3);
 }
 
 .assistant-status-block--completed .assistant-status-block__icon {
@@ -216,7 +216,7 @@
 }
 
 .assistant-status-block--failed {
-  background: rgba(220, 38, 38, 0.04);
+  border-left: 2px solid rgba(220, 38, 38, 0.3);
 }
 
 .assistant-status-block--failed .assistant-status-block__icon {
@@ -245,21 +245,22 @@
 /* Tool use (with status-aware styles) */
 
 .assistant-tool-use {
-  padding: 4px 8px;
-  border-radius: 6px;
+  padding: 2px 8px;
+  border-radius: 0;
+  background: transparent;
+  border-left: 2px solid transparent;
   transition: background 0.15s ease;
 }
 
 .assistant-tool-use__header {
   font-size: 13px;
   user-select: none;
-  border-radius: 4px;
-  padding: 2px 4px;
-  transition: background 0.15s ease;
+  padding: 0;
+  transition: opacity 0.15s ease;
 }
 
 .assistant-tool-use__header:hover {
-  background: rgba(0, 0, 0, 0.03);
+  opacity: 0.8;
 }
 
 .assistant-tool-use__icon {
@@ -301,7 +302,7 @@
 /* Tool use status variants */
 
 .assistant-tool-use--running {
-  background: rgba(37, 99, 235, 0.04);
+  border-left: 2px solid rgba(37, 99, 235, 0.3);
 }
 
 .assistant-tool-use--running .assistant-tool-use__icon {
@@ -311,7 +312,7 @@
 }
 
 .assistant-tool-use--completed {
-  background: rgba(22, 163, 74, 0.04);
+  border-left: 2px solid rgba(22, 163, 74, 0.3);
 }
 
 .assistant-tool-use--completed .assistant-tool-use__icon {
@@ -319,7 +320,7 @@
 }
 
 .assistant-tool-use--failed {
-  background: rgba(220, 38, 38, 0.04);
+  border-left: 2px solid rgba(220, 38, 38, 0.3);
 }
 
 .assistant-tool-use--failed .assistant-tool-use__icon {
@@ -329,21 +330,22 @@
 /* Tool result (collapsed by default) */
 
 .assistant-tool-result {
-  padding: 4px 8px;
-  border-radius: 6px;
+  padding: 2px 8px;
+  border-radius: 0;
+  background: transparent;
+  border-left: 2px solid transparent;
   transition: background 0.15s ease;
 }
 
 .assistant-tool-result__header {
   font-size: 13px;
   user-select: none;
-  border-radius: 4px;
-  padding: 2px 4px;
-  transition: background 0.15s ease;
+  padding: 0;
+  transition: opacity 0.15s ease;
 }
 
 .assistant-tool-result__header:hover {
-  background: rgba(0, 0, 0, 0.03);
+  opacity: 0.8;
 }
 
 .assistant-tool-result__icon {
@@ -391,10 +393,11 @@
 /* ── Thinking process section (collapsible) ─────────────────── */
 
 .thinking-section {
-  border-radius: 8px;
-  padding: 6px 8px;
-  background: rgba(0, 0, 0, 0.015);
-  border: 1px solid rgba(148, 163, 184, 0.12);
+  padding: 4px 0 4px 10px;
+  margin: 4px 0;
+  background: transparent;
+  border: none;
+  border-left: 2px solid rgba(148, 163, 184, 0.15);
   transition: all 0.2s ease;
 }
 
@@ -402,12 +405,13 @@
   cursor: pointer;
   background: transparent;
   border-color: transparent;
-  padding: 2px 8px;
-  border-radius: 4px;
+  border-left: 2px solid transparent;
+  padding: 2px 0 2px 10px;
+  border-radius: 0;
 }
 
 .thinking-section--collapsed:hover {
-  background: rgba(0, 0, 0, 0.02);
+  border-left-color: rgba(148, 163, 184, 0.1);
 }
 
 .thinking-section__arrow {
@@ -430,13 +434,12 @@
 .thinking-section__header {
   cursor: pointer;
   user-select: none;
-  border-radius: 4px;
-  padding: 2px 4px;
-  transition: background 0.15s ease;
+  padding: 0;
+  transition: opacity 0.15s ease;
 }
 
 .thinking-section__header:hover {
-  background: rgba(0, 0, 0, 0.03);
+  opacity: 0.8;
 }
 
 .thinking-section__title {
@@ -457,9 +460,9 @@
 }
 
 .thinking-section__content {
-  margin-top: 4px;
-  padding-top: 4px;
-  border-top: 1px solid rgba(148, 163, 184, 0.1);
+  margin-top: 6px;
+  padding: 0;
+  border-top: none;
 }
 
 /* ── Thinking text block (lightweight style inside ThinkingProcessSection) ── */

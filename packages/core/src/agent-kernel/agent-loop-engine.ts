@@ -97,7 +97,7 @@ export class AgentLoopEngine {
     );
     stream.start();
     const preparingStatus = stream.startStatus({
-      label: "正在思考…",
+      label: "正在分析需求…",
       metadata: { phase: "running" },
     });
 
@@ -135,7 +135,7 @@ export class AgentLoopEngine {
       });
       stream.updateStatus(preparingStatus.id, {
         status: "completed",
-        label: "正在思考…",
+        label: "正在分析需求…",
       });
 
       const result = await this.deps.reactLoopRunner.run(
@@ -153,9 +153,14 @@ export class AgentLoopEngine {
         );
       }
       if (result.type === "waiting_user") {
-        const question = stream.startTextPart("progress");
-        stream.appendText(question.id, result.question);
-        stream.completeTextPart(question.id);
+        // §P0: Only create a user_prompt text part if the LLM didn't already
+        // produce one. This prevents duplicate user-facing messages and keeps
+        // the LLM's own recovery/explanation text as the primary user prompt.
+        if (!result.promptTextPartId) {
+          const question = stream.startTextPart("user_prompt");
+          stream.appendText(question.id, result.question);
+          stream.completeTextPart(question.id);
+        }
         stream.startStatus({
           label: "等待你补充信息",
           metadata: { phase: "queued" },
@@ -222,6 +227,8 @@ export class AgentLoopEngine {
           code: "REACT_LOOP_FAILED",
           message: error instanceof Error ? error.message : String(error),
           recoverable: false,
+          scope: "run",
+          presentation: "fatal",
         });
         await stream.complete("failed").catch(() => undefined);
       }
