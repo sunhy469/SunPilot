@@ -189,6 +189,7 @@ export type AgentUiEvent = AgentSocketEnvelopeMetadata &
           conversationId?: string;
           code?: string;
           message?: string;
+          fatal?: boolean;
           error?: { message: string; code?: string };
         };
       }
@@ -350,6 +351,12 @@ export type ChatSocketEvent =
 export type ChatStopParams = {
   runId: string;
 };
+
+export interface RunResumeParams {
+  runId: string;
+  message: string;
+  attachments?: AttachmentRef[];
+}
 
 export interface ChatSocketErrorResponse {
   error: { message: string };

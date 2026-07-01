@@ -8,6 +8,7 @@ class FakeWebSocket extends EventTarget {
   static CONNECTING = 0;
   static instances: FakeWebSocket[] = [];
   static holdCompletion = false;
+  static askForInput = false;
   static closeBeforeOpen = false;
   readyState = FakeWebSocket.CONNECTING;
   sent: Array<{ method: string; params?: unknown }> = [];
@@ -47,6 +48,18 @@ class FakeWebSocket extends EventTarget {
         mode: "agent",
       },
     });
+    if (FakeWebSocket.askForInput) {
+      this.emit({
+        method: "agent.clarification.requested",
+        params: {
+          runId: "run_1",
+          conversationId: "conv_1",
+          messageId: "msg_assistant",
+          question: "请补充路径",
+        },
+      });
+      return;
+    }
     this.emit({
       method: "agent.context.completed",
       params: {
@@ -145,6 +158,17 @@ class FakeWebSocket extends EventTarget {
         delta: assistant.content,
       },
     });
+    this.emit({
+      method: "agent.error",
+      params: {
+        runId: "run_1",
+        code: "AGENT_MEMORY_WRITE_FAILED",
+        message: "memory unavailable",
+        category: "memory",
+        retryable: true,
+        fatal: false,
+      },
+    });
     if (FakeWebSocket.holdCompletion) return;
     this.emit({
       method: "agent.message.completed",
@@ -211,6 +235,7 @@ describe("Web ChatPage", () => {
   beforeEach(() => {
     FakeWebSocket.instances = [];
     FakeWebSocket.holdCompletion = false;
+    FakeWebSocket.askForInput = false;
     FakeWebSocket.closeBeforeOpen = false;
     vi.stubGlobal("WebSocket", FakeWebSocket);
     vi.stubGlobal(
@@ -258,6 +283,7 @@ describe("Web ChatPage", () => {
       expect(screen.getByText("assistant reply")).toBeInTheDocument(),
     );
     expect(screen.getByText("hello")).toBeInTheDocument();
+    expect(screen.queryByText("memory unavailable")).not.toBeInTheDocument();
   });
 
   test("renders a clean welcome state without opening a socket", async () => {
@@ -302,6 +328,33 @@ describe("Web ChatPage", () => {
         (message) => message.method === "chat.stop",
       ),
     ).toBe(true);
+  });
+
+  test("resumes the same run after the agent requests user input", async () => {
+    FakeWebSocket.askForInput = true;
+    render(<App />);
+
+    const textbox = await screen.findByRole("textbox", { name: "Message" });
+    await userEvent.type(textbox, "start task");
+    await userEvent.click(screen.getByRole("button", { name: "发送" }));
+
+    await screen.findByText("等待你补充信息后继续");
+    const resumeTextbox = screen.getByRole("textbox", { name: "Message" });
+    await waitFor(() => expect(resumeTextbox).toBeEnabled());
+    await userEvent.type(resumeTextbox, "补充路径 /tmp/report.md");
+    await userEvent.click(screen.getByRole("button", { name: "发送" }));
+
+    expect(FakeWebSocket.instances[0]?.sent).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          method: "run.resume",
+          params: expect.objectContaining({
+            runId: "run_1",
+            message: "补充路径 /tmp/report.md",
+          }),
+        }),
+      ]),
+    );
   });
 
   test("shows an error when WebSocket closes before streaming starts", async () => {

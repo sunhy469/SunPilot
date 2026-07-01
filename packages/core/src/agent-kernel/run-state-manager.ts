@@ -199,7 +199,11 @@ export class InMemoryRunStateManager implements RunStateManager {
     taskState: NonNullable<RunState["taskState"]>,
   ): Promise<void> {
     const current = this.runs.get(runId);
-    if (!current) return; // run may have completed/cleaned up
+    if (!current) {
+      throw Object.assign(new Error(`Unknown run: ${runId}`), {
+        code: "AGENT_RUN_NOT_FOUND",
+      });
+    }
     current.taskState = taskState;
     this.runs.set(runId, current);
   }

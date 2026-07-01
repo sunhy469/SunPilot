@@ -196,10 +196,27 @@ export class InMemoryDatabaseContextImplementation implements DatabaseContext {
         metadata,
         createdAt: now,
       };
-      this.messageRecords.set(input.conversationId, [
-        ...(this.messageRecords.get(input.conversationId) ?? []),
-        message,
-      ]);
+      for (const [storedConversationId, storedMessages] of this.messageRecords) {
+        if (
+          storedConversationId !== input.conversationId &&
+          storedMessages.some((item) => item.id === message.id)
+        ) {
+          throw new Error(`Message ${message.id} belongs to a different conversation`);
+        }
+      }
+      const existingMessages = this.messageRecords.get(input.conversationId) ?? [];
+      const existingIndex = existingMessages.findIndex((item) => item.id === message.id);
+      if (existingIndex >= 0) {
+        const existing = existingMessages[existingIndex]!;
+        if (existing.role !== message.role) {
+          throw new Error(`Message ${message.id} belongs to a different role`);
+        }
+        const updated = [...existingMessages];
+        updated[existingIndex] = { ...message, createdAt: existing.createdAt };
+        this.messageRecords.set(input.conversationId, updated);
+      } else {
+        this.messageRecords.set(input.conversationId, [...existingMessages, message]);
+      }
       const conversation = this.conversationRecords.get(input.conversationId);
       if (conversation)
         this.conversationRecords.set(conversation.id, {
@@ -334,6 +351,30 @@ export class InMemoryDatabaseContextImplementation implements DatabaseContext {
         error: input.error === undefined ? run.error : input.error,
       });
     },
+    updateStatusIfCurrent: async (
+      id: string,
+      expectedStatus: RunStatus,
+      input: {
+        status: RunStatus;
+        updatedAt?: string;
+        completedAt?: string;
+        cancelledAt?: string;
+        error?: unknown;
+      },
+    ): Promise<boolean> => {
+      const run = this.runRecords.get(id);
+      if (!run || run.status !== expectedStatus) return false;
+      const now = new Date().toISOString();
+      this.runRecords.set(id, {
+        ...run,
+        status: input.status,
+        updatedAt: input.updatedAt ?? now,
+        completedAt: input.completedAt ?? run.completedAt,
+        cancelledAt: input.cancelledAt ?? run.cancelledAt,
+        error: input.error === undefined ? run.error : input.error,
+      });
+      return true;
+    },
     updateContext: async (
       id: string,
       context: Record<string, unknown>,
@@ -343,6 +384,18 @@ export class InMemoryDatabaseContextImplementation implements DatabaseContext {
       this.runRecords.set(id, {
         ...run,
         context,
+        updatedAt: new Date().toISOString(),
+      });
+    },
+    patchContext: async (
+      id: string,
+      patch: Record<string, unknown>,
+    ): Promise<void> => {
+      const run = this.runRecords.get(id);
+      if (!run) return;
+      this.runRecords.set(id, {
+        ...run,
+        context: { ...run.context, ...patch },
         updatedAt: new Date().toISOString(),
       });
     },
@@ -540,11 +593,16 @@ export class InMemoryDatabaseContextImplementation implements DatabaseContext {
         status?: ApprovalRecord["status"];
         runId?: string;
         limit?: number;
+        expiresBefore?: string;
       } = {},
     ): Promise<ApprovalRecord[]> =>
       [...this.approvalRecords.values()]
         .filter((approval) => !input.status || approval.status === input.status)
         .filter((approval) => !input.runId || approval.runId === input.runId)
+        .filter((approval) =>
+          !input.expiresBefore ||
+          (!!approval.expiresAt && approval.expiresAt <= input.expiresBefore)
+        )
         .sort(byCreatedAtDesc)
         .slice(0, input.limit ?? 100),
   };

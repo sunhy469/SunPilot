@@ -4,6 +4,8 @@ export interface ListApprovalsInput {
   status?: ApprovalRecord["status"];
   runId?: string;
   limit?: number;
+  /** Return only approvals whose expiry timestamp is at or before this instant. */
+  expiresBefore?: string;
 }
 
 export interface ApprovalRepository {

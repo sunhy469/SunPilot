@@ -2,6 +2,10 @@ import type { ArtifactRecord, InstalledSkillRecord, StepRecord } from "@sunpilot
 import type { ToolExecutor } from "./execution-types.js";
 import type { ArtifactRef } from "../loop-types.js";
 
+const MAX_TOOL_CONTENT_CHARS = 64 * 1024;
+const MAX_TOOL_SUMMARY_CHARS = 2 * 1024;
+const MAX_STRUCTURED_RESULT_CHARS = 32 * 1024;
+
 /**
  * SkillToolExecutor 依赖 — 由 composition-root 提供具体实现。
  */
@@ -91,7 +95,13 @@ export class SkillToolExecutor implements ToolExecutor {
       const output = await this.deps.runSkill(step, input.signal);
       await this.deps.updateStepStatus(step.id, "completed", output);
       const artifacts = (await this.deps.listArtifacts(input.runId))
-        .filter((a) => !beforeArtifacts.has(a.id))
+        // Parallel tools share a run. Attribute step-scoped artifacts only to
+        // their creating tool; the run-level diff fallback is for legacy
+        // artifacts that do not carry stepId.
+        .filter((a) =>
+          a.stepId === input.toolCallId ||
+          (!a.stepId && !beforeArtifacts.has(a.id))
+        )
         .map(toArtifactRef);
       return {
         status: "completed",
@@ -100,6 +110,7 @@ export class SkillToolExecutor implements ToolExecutor {
         // receives the actual tool output, not just a terse summary.
         content: captureContent(output),
         structured: extractStructured(output),
+        rawOutput: output,
         artifacts,
       };
     } catch (error) {
@@ -171,17 +182,17 @@ function resolveCapability(
  * (e.g., a generated script, search results, or structured data).
  */
 function captureContent(output: unknown): string | undefined {
-  if (typeof output === "string") return output;
+  if (typeof output === "string") return truncateText(output, MAX_TOOL_CONTENT_CHARS);
   if (output === undefined || output === null) return undefined;
   if (typeof output === "object") {
     const record = output as Record<string, unknown>;
     // For objects with a content/script/markdown field, use that as the main content
-    if (typeof record.script === "string") return record.script;
-    if (typeof record.markdown === "string") return record.markdown;
-    if (typeof record.content === "string") return record.content;
-    if (typeof record.finalText === "string") return record.finalText;
-    if (typeof record.text === "string") return record.text;
-    if (typeof record.message === "string") return record.message;
+    if (typeof record.script === "string") return truncateText(record.script, MAX_TOOL_CONTENT_CHARS);
+    if (typeof record.markdown === "string") return truncateText(record.markdown, MAX_TOOL_CONTENT_CHARS);
+    if (typeof record.content === "string") return truncateText(record.content, MAX_TOOL_CONTENT_CHARS);
+    if (typeof record.finalText === "string") return truncateText(record.finalText, MAX_TOOL_CONTENT_CHARS);
+    if (typeof record.text === "string") return truncateText(record.text, MAX_TOOL_CONTENT_CHARS);
+    if (typeof record.message === "string") return truncateText(record.message, MAX_TOOL_CONTENT_CHARS);
     // For small objects, stringify the whole thing
     try {
       const str = JSON.stringify(output);
@@ -194,18 +205,18 @@ function captureContent(output: unknown): string | undefined {
 }
 
 function summarizeOutput(output: unknown): string {
-  if (typeof output === "string") return output;
+  if (typeof output === "string") return truncateText(output, MAX_TOOL_SUMMARY_CHARS);
   if (output === undefined) return "Tool completed.";
   if (typeof output === "object" && output !== null) {
     const record = output as Record<string, unknown>;
     // Extract a human-readable summary from structured tool output
-    if (typeof record.summary === "string") return record.summary;
+    if (typeof record.summary === "string") return truncateText(record.summary, MAX_TOOL_SUMMARY_CHARS);
     if (typeof record.totalResults === "number") {
       return `Found ${record.totalResults} results.`;
     }
     // Common tool result patterns: content field, message field
-    if (typeof record.content === "string") return record.content;
-    if (typeof record.message === "string") return record.message;
+    if (typeof record.content === "string") return truncateText(record.content, MAX_TOOL_SUMMARY_CHARS);
+    if (typeof record.message === "string") return truncateText(record.message, MAX_TOOL_SUMMARY_CHARS);
     // Avoid dumping large JSON — provide a short summary
     const keys = Object.keys(record);
     if (keys.length <= 3) {
@@ -241,7 +252,22 @@ function extractStructured(output: unknown): Record<string, unknown> | undefined
   if (record.provenance && typeof record.provenance === "object") {
     extracted.provenance = record.provenance;
   }
-  return Object.keys(extracted).length > 0 ? extracted : undefined;
+  if (Object.keys(extracted).length === 0) return undefined;
+  try {
+    const serialized = JSON.stringify(extracted);
+    if (serialized.length <= MAX_STRUCTURED_RESULT_CHARS) return extracted;
+    return {
+      truncated: true,
+      preview: truncateText(serialized, MAX_STRUCTURED_RESULT_CHARS),
+    };
+  } catch {
+    return { truncated: true, preview: "[unserializable structured tool output]" };
+  }
+}
+
+function truncateText(value: string, maxChars: number): string {
+  if (value.length <= maxChars) return value;
+  return `${value.slice(0, maxChars)}…[truncated ${value.length - maxChars} chars]`;
 }
 
 function toArtifactRef(artifact: ArtifactRecord): ArtifactRef {

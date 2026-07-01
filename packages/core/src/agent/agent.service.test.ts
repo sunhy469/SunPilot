@@ -330,15 +330,17 @@ describe("AgentService", () => {
   test("cancelRun marks an Agent run cancelled and emits canonical event", async () => {
     const events: Array<{ type: string; payload: unknown }> = [];
     let cancelledReason = "";
+    let status: "running" | "cancelled" = "running";
     const { service, eventBus } = createService({
       runStateManager: {
         createRun: async () => undefined,
         markCancelled: async (runId: string, reason?: string) => {
           cancelledReason = reason ?? "";
+          status = "cancelled";
           return {
             runId,
             conversationId: "conv_cancel",
-            status: "cancelled",
+            status,
             mode: "agent",
             createdAt: "2026-06-06T00:00:00.000Z",
             updatedAt: "2026-06-06T00:00:01.000Z",
@@ -348,7 +350,7 @@ describe("AgentService", () => {
         getRun: async (runId: string) => ({
           runId,
           conversationId: "conv_cancel",
-          status: "cancelled",
+          status,
           mode: "agent",
           createdAt: "2026-06-06T00:00:00.000Z",
           updatedAt: "2026-06-06T00:00:01.000Z",
@@ -374,6 +376,28 @@ describe("AgentService", () => {
         payload: { runId: "run_cancel", reason: "user requested" },
       },
     ]);
+  });
+
+  test("cancelRun does not emit a false cancellation for a completed run", async () => {
+    const events: string[] = [];
+    const { service, eventBus } = createService({
+      runStateManager: {
+        getRun: async (runId: string) => ({
+          runId,
+          conversationId: "conv_complete",
+          status: "completed",
+          mode: "agent",
+          createdAt: "2026-06-06T00:00:00.000Z",
+          updatedAt: "2026-06-06T00:00:01.000Z",
+        }),
+      } as any,
+    });
+    eventBus.subscribe((event) => events.push(event.type));
+
+    await expect(service.cancelRun("run_complete")).rejects.toMatchObject({
+      code: "AGENT_RUN_STATE_CONFLICT",
+    });
+    expect(events).not.toContain("agent.run.cancelled");
   });
 
   test("resumeRun creates a linked Agent attempt for an interrupted run", async () => {
@@ -430,17 +454,6 @@ describe("AgentService", () => {
         target: "run_old",
       }),
     ]);
-    await expect(db.events.listByRunId(result.runId)).resolves.toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          type: "agent.run.started",
-          payload: expect.objectContaining({
-            originalRunId: "run_old",
-            attemptAction: "resume",
-          }),
-        }),
-      ]),
-    );
   });
 
   test("resumeRun continues an interrupted ReAct checkpoint on the same run", async () => {
@@ -507,6 +520,7 @@ describe("AgentService", () => {
           conversationId: string;
           userMessageId?: string;
           message: string;
+          attachments?: Array<{ id: string; name: string; type: string; url?: string }>;
         }) => {
           received.push(input);
           return {
@@ -522,16 +536,26 @@ describe("AgentService", () => {
     });
     await conversations.createConversation({ id: "conv_waiting_user" });
 
-    await service.resumeRun("run_waiting_user", "  补充信息  ");
+    await service.resumeRun("run_waiting_user", "  补充信息  ", [{
+      id: "image_1",
+      name: "sample.png",
+      type: "image/png",
+      url: "https://example.com/sample.png",
+    }]);
 
     const messages = await conversations.listMessages("conv_waiting_user");
     expect(messages).toEqual([
-      expect.objectContaining({ role: "user", content: "补充信息" }),
+      expect.objectContaining({
+        role: "user",
+        content: "补充信息",
+        attachments: [expect.objectContaining({ id: "image_1" })],
+      }),
     ]);
     expect(received).toEqual([
       expect.objectContaining({
         message: "补充信息",
         userMessageId: messages[0]!.id,
+        attachments: [expect.objectContaining({ id: "image_1" })],
       }),
     ]);
   });

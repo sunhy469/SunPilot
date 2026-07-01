@@ -19,7 +19,10 @@ import type {
   ApprovedToolScope,
   ToolSafetyBoundary,
 } from "./tool-safety-boundary.js";
-import { validateToolArguments } from "../tools/tool-argument-validator.js";
+import {
+  validateJsonSchemaValue,
+  validateToolArguments,
+} from "../tools/tool-argument-validator.js";
 
 export interface ExecutionOrchestratorDeps {
   /** Executor that actually runs tools (bridges to skill-runner). */
@@ -322,12 +325,12 @@ export class ExecutionOrchestrator implements ExecutionOrchestratorInterface {
 
         // Apply backoff delay for retries
         if (attempt > 0) {
-          const delay = RETRY_BACKOFF[attempt] ?? RETRY_BACKOFF[MAX_RETRIES];
-          await new Promise((resolve) => setTimeout(resolve, delay));
+          const delay = RETRY_BACKOFF[attempt] ?? RETRY_BACKOFF[MAX_RETRIES] ?? 0;
+          await abortableDelay(delay, signal);
         }
 
         // Execute via tool executor
-        const rawResult = await this.deps.toolExecutor.execute({
+        let rawResult = await this.deps.toolExecutor.execute({
           runId,
           toolCallId: call.id,
           skillId: call.skillId,
@@ -336,6 +339,35 @@ export class ExecutionOrchestrator implements ExecutionOrchestratorInterface {
           timeoutMs: call.timeoutMs,
           signal,
         });
+        if (rawResult.status === "completed" && call.outputSchema) {
+          const outputErrors = validateJsonSchemaValue(
+            rawResult.rawOutput,
+            call.outputSchema,
+          );
+          if (outputErrors.length > 0) {
+            const message = `Tool output validation failed: ${outputErrors.join("; ")}`;
+            this.deps.eventBus.emit(
+              "agent.tool_output.validation_failed",
+              {
+                runId,
+                toolCallId: call.id,
+                skillId: call.skillId,
+                name: call.name,
+                validationErrors: outputErrors,
+              },
+              { runId, conversationId },
+            );
+            rawResult = {
+              ...rawResult,
+              status: "failed",
+              summary: message,
+              error: {
+                code: "TOOL_OUTPUT_VALIDATION_FAILED",
+                message,
+              },
+            };
+          }
+        }
         const safetyResult = this.deps.safetyBoundary.checkAfterExecution({
           runId,
           conversationId,
@@ -508,6 +540,25 @@ export class ExecutionOrchestrator implements ExecutionOrchestratorInterface {
     }
     return chunks;
   }
+}
+
+function abortableDelay(ms: number, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) {
+    return Promise.reject(Object.assign(new Error("Tool retry aborted"), {
+      name: "AbortError",
+    }));
+  }
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(Object.assign(new Error("Tool retry aborted"), { name: "AbortError" }));
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
 }
 
 function normalizeRiskLevel(

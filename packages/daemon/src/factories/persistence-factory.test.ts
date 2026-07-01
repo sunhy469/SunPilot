@@ -9,7 +9,7 @@ function makeEvent(partial: Partial<AgentEvent> & { type: AgentEvent["type"] }):
     id: `evt_${Math.random().toString(36).slice(2)}`,
     runId: "run_test",
     sequence: undefined,
-    timestamp: new Date().toISOString(),
+    createdAt: new Date().toISOString(),
     type: partial.type,
     payload: partial.payload ?? {},
     ...partial,
@@ -59,7 +59,7 @@ describe("createPersistenceLayer", () => {
     expect(seen[0]?.sequence).toBe(42);
   });
 
-  test("forwards lifecycle and delta events synchronously to liveEventBus without persist", () => {
+  test("forwards streaming events synchronously and persists replayable lifecycle starts", async () => {
     const db = new InMemoryDatabaseContext();
     const { rawEventBus, liveEventBus } = createPersistenceLayer({ database: db });
 
@@ -80,11 +80,17 @@ describe("createPersistenceLayer", () => {
       makeEvent({ type: "agent.message.part.delta", payload: { delta: "hello" } }),
     );
 
-    // All three are forwarded synchronously (no DB persist)
+    // All three are forwarded synchronously.
     expect(seen.length).toBe(3);
     expect(seen[0]!.type).toBe("agent.message.started");
     expect(seen[1]!.type).toBe("agent.message.part.started");
     expect(seen[2]!.type).toBe("agent.message.part.delta");
+    await rawEventBus.flush();
+    const persisted = await db.events.listByRunId("run_test");
+    expect(persisted.map((event) => event.type)).toEqual([
+      "agent.message.started",
+      "agent.message.part.started",
+    ]);
   });
 
   test("returns AbortRegistry, RunStateManager, EventSink, and RunInitializer bound to the same DB", () => {

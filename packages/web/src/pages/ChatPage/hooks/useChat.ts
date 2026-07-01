@@ -20,6 +20,7 @@ import {
   createChatSocket,
   sendChatMessage,
   sendChatStop,
+  sendRunResume,
   sendConversationSubscribe,
   sendConversationUnsubscribe,
 } from "../../../features/chat/ws";
@@ -77,6 +78,10 @@ export function useChat(
   onConversationCreatedRef.current = onConversationCreated;
   const activeRunIdRef = useRef<string | null>(null);
   const [activeRunId, setActiveRunId] = useState<string | null>(null);
+  const waitingUserRunIdRef = useRef<string | null>(null);
+  const [runStatus, setRunStatus] = useState<
+    import("@sunpilot/protocol").RunStatus | null
+  >(null);
   const requestRef = useRef(createRequest());
   const [approvals, setApprovals] = useState<AgentApproval[]>([]);
   const [artifacts, setArtifacts] = useState<AgentArtifactPreview[]>([]);
@@ -125,6 +130,8 @@ export function useChat(
       toolCallCountRef.current = 0;
       activeRunIdRef.current = null;
       setActiveRunId(null);
+      waitingUserRunIdRef.current = null;
+      setRunStatus(null);
     },
     [clearResponseTimer, setPendingState],
   );
@@ -135,6 +142,8 @@ export function useChat(
     (runId: string, uiState?: { sendState?: LocalSendState; status?: "online" | "offline" | "thinking" }) => {
       activeRunIdRef.current = runId;
       setActiveRunId(runId);
+      waitingUserRunIdRef.current = null;
+      setRunStatus("running");
       if (uiState?.sendState) setSendState(uiState.sendState);
       if (uiState?.status) setStatus(uiState.status);
       startResponseTimer();
@@ -196,6 +205,31 @@ export function useChat(
             },
           ];
         });
+        if (
+          activeRunIdRef.current === null ||
+          activeRunIdRef.current === payload.runId
+        ) {
+          activeRunIdRef.current = payload.runId;
+          setActiveRunId(payload.runId);
+          setRunStatus("waiting_approval");
+          setSendState("waiting_approval");
+          setPendingState(true);
+          clearResponseTimer();
+          setStatus("online");
+        }
+        return;
+      }
+
+      if (method === "agent.clarification.requested") {
+        const payload = params as { runId: string };
+        if (activeRunIdRef.current === payload.runId) {
+          waitingUserRunIdRef.current = payload.runId;
+          setRunStatus("waiting_user");
+          setSendState("waiting_user");
+          setPendingState(false);
+          clearResponseTimer();
+          setStatus("online");
+        }
         return;
       }
 
@@ -265,7 +299,9 @@ export function useChat(
               finishActiveRun({ sendState: "failed" });
               setMessages((items) =>
                 items.map((item) =>
-                  item.role === "assistant" && item.status === "streaming"
+                  item.role === "assistant" &&
+                  item.status === "streaming" &&
+                  (!item.runId || item.runId === payload.runId)
                     ? { ...item, status: "stopped" as const }
                     : item,
                 ),
@@ -281,7 +317,9 @@ export function useChat(
             finishActiveRun({ sendState: "failed" });
             setMessages((items) =>
               items.map((item) =>
-                item.role === "assistant" && item.status === "streaming"
+                item.role === "assistant" &&
+                item.status === "streaming" &&
+                (!item.runId || item.runId === payload.runId)
                   ? { ...item, status: "stopped" as const }
                   : item,
               ),
@@ -296,6 +334,8 @@ export function useChat(
         const payload = params as { runId: string; conversationId?: string };
         activeRunIdRef.current = payload.runId;
         setActiveRunId(payload.runId);
+        waitingUserRunIdRef.current = null;
+        setRunStatus("created");
         // If backend auto-created a conversation, update local state
         if (payload.conversationId && !conversationId) {
           setConversationId(payload.conversationId);
@@ -308,27 +348,37 @@ export function useChat(
         const payload = params as { runId: string; conversationId?: string; originalRunId?: string; attemptAction?: string };
         activeRunIdRef.current = payload.runId;
         setActiveRunId(payload.runId);
+        waitingUserRunIdRef.current = null;
+        setRunStatus("running");
         // For resume/retry, sync conversationId if present
         if (payload.conversationId) {
           setConversationId(payload.conversationId);
         }
       }
-      if (
-        method === "agent.run.completed"
+      const eventRunId = (params as { runId?: string }).runId;
+      const isCurrentRun = !!eventRunId && eventRunId === activeRunIdRef.current;
+      if (method === "agent.run.completed" && isCurrentRun) {
+        setError("");
+        finishActiveRun({ sendState: "completed" });
+      } else if (method === "agent.run.failed" && isCurrentRun) {
+        finishActiveRun({
+          sendState: "failed",
+          error: (params as { error?: { message?: string } }).error?.message,
+        });
+      } else if (
+        (method === "agent.run.cancelled" || method === "agent.run.interrupted") &&
+        isCurrentRun
       ) {
-        activeRunIdRef.current = null;
-        setActiveRunId(null);
-        // §P0: Clear stale errors when a run completes successfully.
-        // Prevents "result is correct but page still shows error" mismatch.
-        setError?.("");
-      }
-      if (
-        method === "agent.run.failed" ||
-        method === "agent.run.cancelled" ||
-        method === "agent.run.interrupted"
-      ) {
-        activeRunIdRef.current = null;
-        setActiveRunId(null);
+        finishActiveRun({ sendState: "failed" });
+        setMessages((items) =>
+          items.map((item) =>
+            item.role === "assistant" &&
+            item.status === "streaming" &&
+            (!item.runId || item.runId === eventRunId)
+              ? { ...item, status: "stopped" as const }
+              : item,
+          ),
+        );
       }
 
       // ── Message content-block events (§P0: unified reducer) ──
@@ -353,7 +403,14 @@ export function useChat(
         return;
       }
     },
-    [conversationId, setConversationId, setMessages, setError, finishActiveRun],
+    [
+      clearResponseTimer,
+      conversationId,
+      finishActiveRun,
+      setConversationId,
+      setMessages,
+      setPendingState,
+    ],
   );
 
   const appendAssistantActivity = useCallback(
@@ -533,7 +590,8 @@ export function useChat(
           pendingAcksRef.current.delete(rpcId);
         }
 
-        if (ack.accepted && ack.messageId) {
+        const acknowledgedUserMessageId = ack.userMessageId ?? ack.messageId;
+        if ((ack.accepted || ack.resumed) && acknowledgedUserMessageId) {
           const matchClientRequestId = clientRequestId;
           setMessages((items) =>
             items.map((item) => {
@@ -547,7 +605,7 @@ export function useChat(
               ) {
                 return {
                   ...item,
-                  id: ack.messageId,
+                  id: acknowledgedUserMessageId,
                   conversationId: ack.conversationId || item.conversationId,
                   clientRequestId: item.clientRequestId,
                 };
@@ -578,13 +636,19 @@ export function useChat(
       const event = payload as ChatSocketEvent;
       // ── Agent error events ────────────────────────────────────
       if (event.method === "agent.error") {
-        finishActiveRun({
-          sendState: "failed",
-          error:
-            event.params.error?.message ??
-            event.params.message ??
-            "Agent request failed.",
-        });
+        const errorRunId = event.params.runId;
+        if (
+          event.params.fatal !== false &&
+          (!errorRunId || errorRunId === activeRunIdRef.current)
+        ) {
+          finishActiveRun({
+            sendState: "failed",
+            error:
+              event.params.error?.message ??
+              event.params.message ??
+              "Agent request failed.",
+          });
+        }
         applyAgentEvent(event);
         const activity = activityFromAgentEvent(event);
         if (activity) {
@@ -713,56 +777,6 @@ export function useChat(
         setSendState("streaming");
       }
 
-      // §Guard: Only process terminal events for the currently active run.
-      // Stale events from previous runs (e.g. a late agent.run.failed) must
-      // not overwrite sendState after the active run has already completed.
-      const eventRunId = (event.params as { runId?: string }).runId;
-      const isActiveRunEvent = eventRunId && eventRunId === activeRunIdRef.current;
-
-      if (event.method === "agent.message.completed") {
-        if (isActiveRunEvent) finishActiveRun({ sendState: "completed" });
-      }
-
-      // ── Agent message completed via content-block event ──────────
-      if (event.method === "agent.run.completed") {
-        if (isActiveRunEvent) finishActiveRun({ sendState: "completed" });
-      }
-
-      // ── Agent run failed ──────────────────────────────────────
-      if (event.method === "agent.run.failed") {
-        if (isActiveRunEvent) finishActiveRun({
-          sendState: "failed",
-          error: (event.params as { error?: { message?: string } }).error?.message,
-        });
-      }
-
-      // ── Agent run cancelled ───────────────────────────────────
-      if (event.method === "agent.run.cancelled") {
-        if (isActiveRunEvent) finishActiveRun({ sendState: "failed" });
-        // §Frontend gap: Mark the active assistant message as stopped
-        setMessages((items) =>
-          items.map((item) =>
-            item.role === "assistant" && item.status === "streaming"
-              ? { ...item, status: "stopped" as const }
-              : item,
-          ),
-        );
-      }
-
-      // ── Agent run interrupted ─────────────────────────────────
-      if (event.method === "agent.run.interrupted") {
-        if (isActiveRunEvent) {
-          finishActiveRun({ sendState: "failed" });
-          // Mark the active assistant message as stopped
-          setMessages((items) =>
-            items.map((item) =>
-              item.role === "assistant" && item.status === "streaming"
-                ? { ...item, status: "stopped" as const }
-                : item,
-            ),
-          );
-        }
-      }
     });
     return socket;
   }, [
@@ -849,6 +863,7 @@ export function useChat(
       const clientRequestId = `chat_${crypto.randomUUID()}`;
       const localUserMessageId = `local_user_${clientRequestId}`;
       const placeholderId = `local_assistant_${clientRequestId}`;
+      const resumeRunId = waitingUserRunIdRef.current;
 
       setPendingState(true);
       setSendState("sending");
@@ -881,29 +896,37 @@ export function useChat(
             checksum: a.checksum,
           })),
         },
-        {
-          id: placeholderId,
-          conversationId: conversationId || "pending",
-          role: "assistant" as const,
-          content: "",
-          createdAt: new Date().toISOString(),
-          status: "pending" as const,
-          clientRequestId,
-        },
+        ...(resumeRunId
+          ? []
+          : [{
+              id: placeholderId,
+              conversationId: conversationId || "pending",
+              role: "assistant" as const,
+              content: "",
+              createdAt: new Date().toISOString(),
+              status: "pending" as const,
+              clientRequestId,
+            }]),
       ]);
 
       const socket = ensureSocket();
       const transmit = () => {
         setSendState("accepted");
-        const requestId = sendChatMessage(socket, {
-          ...(conversationId ? { conversationId } : {}),
-          message: text,
-          mode: "agent",
-          permissionMode: permissionMode ?? "auto",
-          modelId,
-          clientRequestId,
-          attachments,
-        });
+        const requestId = resumeRunId
+          ? sendRunResume(socket, {
+              runId: resumeRunId,
+              message: text,
+              attachments,
+            })
+          : sendChatMessage(socket, {
+              ...(conversationId ? { conversationId } : {}),
+              message: text,
+              mode: "agent",
+              permissionMode: permissionMode ?? "auto",
+              modelId,
+              clientRequestId,
+              attachments,
+            });
         // Track the request so we can match the ack response
         pendingAcksRef.current.set(requestId, clientRequestId);
       };
@@ -1059,6 +1082,8 @@ export function useChat(
   const chatViewState: ChatViewState = (() => {
     if (error) return "error";
     if (status === "offline" && pending) return "offline";
+    if (runStatus === "waiting_approval") return "waitingApproval";
+    if (runStatus === "waiting_user") return "waitingUser";
     if (pending && status === "thinking") return "streaming";
     if (pending) return "loadingConversation";
     return "ready";
@@ -1083,6 +1108,7 @@ export function useChat(
     error,
     setError,
     chatViewState,
+    runStatus,
     activeRunId,
     toolName,
     approvals,

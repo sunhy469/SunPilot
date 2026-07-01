@@ -44,6 +44,8 @@ export interface ToolExecutor {
     artifacts: ArtifactRef[];
     stdout?: string;
     stderr?: string;
+    /** Original skill return value, retained only for output-schema validation. */
+    rawOutput?: unknown;
     error?: { code: string; message: string };
   }>;
 }

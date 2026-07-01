@@ -57,6 +57,7 @@ export class ApprovalFlowCoordinator {
       partsSnapshot: stream.getPartsSnapshot(),
       updatedAt: new Date().toISOString(),
     };
+    await stream.persistSnapshot();
     await this.deps.runStateManager.saveTaskState(input.runId, {
       goal: "Awaiting approval for ReAct tool action",
       completedSteps: [],
@@ -70,6 +71,9 @@ export class ApprovalFlowCoordinator {
       openQuestions: [],
       iteration: checkpoint.iteration,
     });
+    // Persist message/part lifecycle before the durable approval event so a
+    // reconnect can always rebuild the suspended assistant message in order.
+    await this.deps.eventBus.flush();
 
     const first = calls[0]!;
     const batchRisk = calls.reduce<RiskLevel>(

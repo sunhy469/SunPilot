@@ -2,7 +2,10 @@ import { describe, expect, test } from "vitest";
 import type { AgentLoopInput } from "../loop-types.js";
 import type { ReactCheckpoint } from "../react-loop/react-types.js";
 import { InMemoryRunStateManager } from "../run-state-manager.js";
-import { RunStateReactCheckpointRepository } from "./react-checkpoint-repository.js";
+import {
+  parseReactCheckpoint,
+  RunStateReactCheckpointRepository,
+} from "./react-checkpoint-repository.js";
 
 describe("RunStateReactCheckpointRepository", () => {
   test("round-trips the complete checkpoint through run task state", async () => {
@@ -37,5 +40,24 @@ describe("RunStateReactCheckpointRepository", () => {
     await repository.save(checkpoint);
 
     await expect(repository.findByRunId(input.runId)).resolves.toEqual(checkpoint);
+  });
+
+  test("rejects structurally corrupt nested checkpoint data", () => {
+    expect(parseReactCheckpoint({
+      version: 1,
+      runId: "run_bad",
+      conversationId: "conv_bad",
+      messageId: "msg_bad",
+      iteration: 0,
+      modelCalls: 1,
+      transcript: [{ role: "assistant", content: "", tool_calls: [{ id: 42 }] }],
+      candidateToolIds: [],
+      pendingToolCalls: [],
+      artifacts: [],
+      toolCallSummaries: [],
+      partsSnapshot: [],
+      permissionMode: "auto",
+      updatedAt: new Date().toISOString(),
+    })).toBeUndefined();
   });
 });

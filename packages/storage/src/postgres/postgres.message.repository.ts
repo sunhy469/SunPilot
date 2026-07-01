@@ -20,10 +20,19 @@ export class PostgresMessageRepository implements MessageRepository {
       const result = await client.query(
         `INSERT INTO messages (id, conversation_id, role, content, metadata, embedding)
          VALUES ($1, $2, $3, $4, $5::jsonb, $6::vector)
+         ON CONFLICT (id) DO UPDATE SET
+           content = EXCLUDED.content,
+           metadata = EXCLUDED.metadata,
+           embedding = COALESCE(EXCLUDED.embedding, messages.embedding)
+         WHERE messages.conversation_id = EXCLUDED.conversation_id
+           AND messages.role = EXCLUDED.role
          RETURNING id, conversation_id, role, content, metadata, created_at`,
         [id, input.conversationId, input.role, input.content, JSON.stringify(metadata), embeddingValue],
       );
       await client.query("UPDATE conversations SET updated_at = NOW() WHERE id = $1", [input.conversationId]);
+      if (!result.rows[0]) {
+        throw new Error(`Message ${id} belongs to a different conversation or role`);
+      }
       return mapMessage(result.rows[0]);
     });
   }

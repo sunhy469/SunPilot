@@ -76,11 +76,7 @@ export function createToolLayer(deps: ToolFactoryDeps): ToolFactoryResult {
           supportsAbort: true,
           idempotent: false,
           inputSchema: loadSchema(capability.inputSchema, s.path),
-          outputSchema:
-            typeof capability.outputSchema === "object" &&
-            capability.outputSchema !== null
-              ? (capability.outputSchema as Record<string, unknown>)
-              : undefined,
+          outputSchema: loadSchema(capability.outputSchema, s.path),
           sideEffects: classifySideEffects(permissions),
           riskHints: {
             defaultRisk: capability.risk as

@@ -95,6 +95,16 @@ function getAiStatus(
         text: "正在思考",
         dots: true,
       };
+    case "waiting_approval":
+      return {
+        icon: <ToolOutlined />,
+        text: "等待你确认工具调用",
+      };
+    case "waiting_user":
+      return {
+        icon: <ThunderboltOutlined />,
+        text: "等待你补充信息",
+      };
     default:
       return null;
   }

@@ -175,6 +175,7 @@ export class AssistantMessageStream implements IAssistantMessageStream {
         partId,
         patch: {
           status: "completed",
+          content: part.content,
           completedAt: part.completedAt,
         },
       },
@@ -495,11 +496,18 @@ export class AssistantMessageStream implements IAssistantMessageStream {
 
   // ── Completion ─────────────────────────────────────────────────────
 
+  async persistSnapshot(): Promise<void> {
+    this.ensureStarted();
+    await this.saveCurrentMessage();
+  }
+
   /**
    * Complete the stream: merge text parts → content, save message,
    * emit agent.message.completed.
    */
-  async complete(): Promise<{
+  async complete(
+    outcome: "completed" | "failed" | "cancelled" = "completed",
+  ): Promise<{
     messageId: string;
     content: string;
     parts: AssistantMessagePart[];
@@ -512,9 +520,9 @@ export class AssistantMessageStream implements IAssistantMessageStream {
         parts: [...this.parts],
       };
     }
-    this.completed = true;
     this.ensureStarted();
-    this.completeOpenParts();
+    const beforeFinalization = structuredClone(this.parts);
+    this.completeOpenParts(outcome);
 
     const content = this.mergeContent();
     const toolCallIds = this.collectIds("tool_use", "toolCallId");
@@ -523,26 +531,17 @@ export class AssistantMessageStream implements IAssistantMessageStream {
     // Persistence is part of successful completion. If it fails, do not emit
     // agent.message.completed; the caller must transition the run to failed.
     try {
-      await this.params.saveMessage({
-        id: this.params.messageId,
-        conversationId: this.params.conversationId,
-        role: "assistant",
-        content,
-        runId: this.params.runId,
-        metadata: {
-          parts: this.parts.map((p) => ({ ...p })),
-          toolCallIds,
-          artifactIds,
-          richCards: this.richCards.length > 0 ? this.richCards : undefined,
-        },
-      });
+      await this.saveCurrentMessage(content, toolCallIds, artifactIds);
     } catch (err) {
+      this.parts.splice(0, this.parts.length, ...beforeFinalization);
       console.error(
         "[AssistantMessageStream] Failed to save message:",
         (err as Error).message,
       );
       throw err;
     }
+
+    this.completed = true;
 
     // Emit completion with rich cards for frontend inline rendering
     this.params.eventBus.emit(
@@ -578,6 +577,26 @@ export class AssistantMessageStream implements IAssistantMessageStream {
     }
   }
 
+  private saveCurrentMessage(
+    content = this.mergeContent(),
+    toolCallIds = this.collectIds("tool_use", "toolCallId"),
+    artifactIds = this.collectIds("tool_result", "artifactIds"),
+  ): Promise<void> {
+    return this.params.saveMessage({
+      id: this.params.messageId,
+      conversationId: this.params.conversationId,
+      role: "assistant",
+      content,
+      runId: this.params.runId,
+      metadata: {
+        parts: this.parts.map((p) => ({ ...p })),
+        toolCallIds,
+        artifactIds,
+        richCards: this.richCards.length > 0 ? this.richCards : undefined,
+      },
+    });
+  }
+
   private findPart<T extends AssistantMessagePart>(
     partId: string,
     type: AssistantMessagePart["type"],
@@ -598,16 +617,19 @@ export class AssistantMessageStream implements IAssistantMessageStream {
    * Final completion is authoritative. Any transient UI part left open by a
    * timeout/status branch must be closed before the message is persisted.
    */
-  private completeOpenParts(): void {
+  private completeOpenParts(
+    outcome: "completed" | "failed" | "cancelled",
+  ): void {
     const completedAt = new Date().toISOString();
     for (const part of this.parts) {
       if (part.type === "status" && part.status === "running") {
-        part.status = "completed";
+        part.status = outcome === "completed" ? "completed" : "failed";
         part.completedAt = part.completedAt ?? completedAt;
-        part.metadata = {
-          ...part.metadata,
-          phase: "completed",
-        };
+        const metadata = { ...part.metadata };
+        delete metadata.phase;
+        part.metadata = outcome === "completed"
+          ? { ...metadata, phase: "completed" }
+          : metadata;
       } else if (
         part.type === "tool_use" &&
         (part.status === "pending" || part.status === "running")

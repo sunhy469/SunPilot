@@ -179,7 +179,13 @@ export class ReactLoopRunner {
         content: "The user supplied the requested information in the following message.",
       });
     }
-    transcript.push({ role: "user", content: input.userMessage });
+    transcript.push({
+      role: "user",
+      content: userMessageWithAttachments(
+        input.userMessage,
+        input.context.currentMessage.attachments,
+      ),
+    });
     return this.run(
       {
         agentInput: input.agentInput,
@@ -311,8 +317,14 @@ export class ReactLoopRunner {
         ];
       }
 
-      const turn = await this.deps.modelTurn.run(
-        {
+      const modelDeadline = operationDeadline(
+        signal,
+        this.limits.maxWallClockMs - (Date.now() - startedAt),
+      );
+      let turn: Awaited<ReturnType<ReactModelTurn["run"]>>;
+      try {
+        turn = await this.deps.modelTurn.run(
+          {
           runId: input.agentInput.runId,
           conversationId: input.agentInput.conversationId,
           messages: transcript,
@@ -324,9 +336,15 @@ export class ReactLoopRunner {
           maxTokens: forceFinalization
             ? this.limits.finalizationReserveTokens
             : undefined,
-        },
-        signal,
-      );
+          },
+          modelDeadline.signal,
+        );
+      } catch (error) {
+        if (modelDeadline.timedOut() && !signal.aborted) {
+          throw deadlineError(this.limits.maxWallClockMs);
+        }
+        throw error;
+      }
       modelCalls++;
       if (modelCalls === 1) firstRoundFirstTokenMs = turn.firstTokenMs;
       if (turn.textPartId) input.stream.completeTextPart(turn.textPartId);
@@ -350,6 +368,17 @@ export class ReactLoopRunner {
         pendingToolCalls: [],
       });
       await this.persist(checkpoint);
+
+      if (turn.protocolError && forceFinalization) {
+        throw Object.assign(
+          new Error(`Final model response was invalid: ${turn.protocolError}`),
+          {
+            code: "AGENT_MODEL_OUTPUT_INVALID",
+            category: "model_protocol",
+            retryable: true,
+          },
+        );
+      }
 
       if (turn.protocolError && !forceFinalization) {
         const protocolObservation = observations.modelProtocolError(
@@ -630,17 +659,29 @@ export class ReactLoopRunner {
       let roundExecutionMs = 0;
       if (guarded.executable.length > 0) {
         const toolStartedAt = Date.now();
-        const execution = await this.deps.executor.execute(
-          {
+        const executionDeadline = operationDeadline(
+          signal,
+          this.limits.maxWallClockMs - (Date.now() - startedAt),
+        );
+        let execution: Awaited<ReturnType<ReactToolExecutor["execute"]>>;
+        try {
+          execution = await this.deps.executor.execute(
+            {
             runId: input.agentInput.runId,
             conversationId: input.agentInput.conversationId,
             context: input.context,
             calls: guarded.executable,
             permissionMode,
             stream: input.stream,
-          },
-          signal,
-        );
+            },
+            executionDeadline.signal,
+          );
+        } catch (error) {
+          if (executionDeadline.timedOut() && !signal.aborted) {
+            throw deadlineError(this.limits.maxWallClockMs);
+          }
+          throw error;
+        }
         roundExecutionMs = Date.now() - toolStartedAt;
         totalToolExecutionMs += roundExecutionMs;
         artifacts = observations.mergeArtifacts(artifacts, execution.artifacts);
@@ -743,6 +784,14 @@ export class ReactLoopRunner {
       partsSnapshot: input.input.stream.getPartsSnapshot(),
       modelId: input.input.agentInput.modelId,
       permissionMode: input.input.agentInput.permissionMode ?? "auto",
+      inputSnapshot: {
+        userMessageId: input.input.agentInput.userMessageId,
+        userId: input.input.agentInput.userId,
+        message: input.input.agentInput.message,
+        mode: input.input.agentInput.mode,
+        attachments: structuredClone(input.input.agentInput.attachments ?? []),
+        client: structuredClone(input.input.agentInput.client),
+      },
       updatedAt: new Date().toISOString(),
     };
   }
@@ -864,19 +913,31 @@ Use the same language as the user.`,
     });
   }
 
-  const attachmentText = (context.currentMessage.attachments ?? [])
-    .map((attachment) => {
-      const reference = attachment.url ?? attachment.dataUrl ?? "unavailable";
-      return `- ${attachment.name} (${attachment.type}): ${reference}`;
-    })
-    .join("\n");
   messages.push({
     role: "user",
-    content:
-      context.currentMessage.content +
-      (attachmentText ? `\n\nAttachments:\n${attachmentText}` : ""),
+    content: userMessageWithAttachments(
+      context.currentMessage.content,
+      context.currentMessage.attachments,
+    ),
   });
   return messages;
+}
+
+function userMessageWithAttachments(
+  content: string,
+  attachments: AgentContext["currentMessage"]["attachments"],
+): string {
+  const attachmentText = (attachments ?? [])
+    .map((attachment) => {
+      // Never inline base64 payloads into the text transcript. The structured
+      // attachment remains available to tool argument construction, while the
+      // model receives only bounded metadata and a public URL when present.
+      const reference = attachment.url?.slice(0, 4_096) ??
+        (attachment.dataUrl ? "[inline data available to tools]" : "unavailable");
+      return `- ${attachment.name} (${attachment.type}, id=${attachment.id}): ${reference}`;
+    })
+    .join("\n");
+  return content + (attachmentText ? `\n\nAttachments:\n${attachmentText}` : "");
 }
 
 function injectObservations(
@@ -977,6 +1038,17 @@ function deadlineError(maxWallClockMs: number): Error {
       retryable: true,
     },
   );
+}
+
+function operationDeadline(
+  parent: AbortSignal,
+  remainingMs: number,
+): { signal: AbortSignal; timedOut: () => boolean } {
+  const timeout = AbortSignal.timeout(Math.max(1, remainingMs));
+  return {
+    signal: AbortSignal.any([parent, timeout]),
+    timedOut: () => timeout.aborted,
+  };
 }
 
 function assertApprovedBatchMatchesCheckpoint(

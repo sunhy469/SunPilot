@@ -87,7 +87,9 @@ export interface IAssistantMessageStream {
   getPartsSnapshot(): AssistantMessagePart[];
   /** Set rich cards for inline rendering (image/video artifacts). */
   setRichCards(cards: Array<import("@sunpilot/protocol").RichCardOutput>): void;
-  complete(): Promise<{
+  /** Persist the current resumable message without closing its open parts. */
+  persistSnapshot(): Promise<void>;
+  complete(outcome?: "completed" | "failed" | "cancelled"): Promise<{
     messageId: string;
     content: string;
     parts: AssistantMessagePart[];
@@ -312,6 +314,8 @@ export interface PlannedToolCall {
   };
   /** Capability input JSON Schema for argument validation. */
   inputSchema?: Record<string, unknown>;
+  /** Capability output JSON Schema for execution-boundary validation. */
+  outputSchema?: Record<string, unknown>;
   /** Structured observation projection hints from the skill manifest. */
   projectionHints?: {
     summaryFields?: string[];

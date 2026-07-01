@@ -103,6 +103,11 @@ export class AgentLoopEngine {
 
     try {
       await this.deps.runStateManager.markStatus(input.runId, "running");
+      this.deps.eventBus.emit(
+        "agent.run.started",
+        { runId: input.runId, conversationId: input.conversationId },
+        { runId: input.runId, conversationId: input.conversationId },
+      );
       const contextSpan = this.startSpan(input.runId, "context_building");
       this.deps.eventBus.emit(
         "agent.context.started",
@@ -156,7 +161,9 @@ export class AgentLoopEngine {
           metadata: { phase: "queued" },
         });
         const checkpoint = this.withCurrentParts(result.checkpoint, stream);
+        await stream.persistSnapshot();
         await this.saveReactCheckpoint(checkpoint);
+        await this.deps.eventBus.flush();
         await this.deps.runStateManager.markStatus(input.runId, "waiting_user");
         this.deps.eventBus.emit(
           "agent.clarification.requested",
@@ -206,7 +213,7 @@ export class AgentLoopEngine {
           const stopped = stream.startTextPart("final");
           stream.appendText(stopped.id, "已停止。");
           stream.completeTextPart(stopped.id);
-          await stream.complete();
+          await stream.complete("cancelled");
         } catch {
           // The stream may already be closed.
         }
@@ -216,7 +223,7 @@ export class AgentLoopEngine {
           message: error instanceof Error ? error.message : String(error),
           recoverable: false,
         });
-        await stream.complete().catch(() => undefined);
+        await stream.complete("failed").catch(() => undefined);
       }
       return this.runOutcomes.handleLoopError(input, error, signal);
     } finally {
@@ -257,6 +264,7 @@ export class AgentLoopEngine {
       userId?: string;
       userMessageId?: string;
       message: string;
+      attachments?: AgentLoopInput["attachments"];
     },
     signal: AbortSignal,
   ): Promise<AgentLoopResult> {

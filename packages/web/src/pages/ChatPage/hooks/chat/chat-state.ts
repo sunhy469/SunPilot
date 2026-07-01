@@ -13,10 +13,12 @@ export type ChatSocketPayload = ChatSocketEvent | ChatSocketErrorResponse;
 
 /** JSON-RPC response result from chat.send ack */
 export interface ChatSendAckResult {
-  accepted: boolean;
+  accepted?: boolean;
+  resumed?: boolean;
   conversationId: string;
   runId: string;
   messageId: string;
+  userMessageId?: string;
 }
 
 export interface JsonRpcResponse {
@@ -186,6 +188,7 @@ export function assistantMessageReducer(
         m.id === msgParams.messageId
           ? {
               ...m,
+              runId: msgParams.runId,
               status: "streaming" as const,
               // Insert local pending status part if no parts yet
               parts:
@@ -215,6 +218,7 @@ export function assistantMessageReducer(
           ? {
               ...m,
               id: msgParams.messageId,
+              runId: msgParams.runId,
               conversationId: msgParams.conversationId ?? conversationId,
               status: "streaming" as const,
               parts: [LOCAL_PENDING_STATUS_PART],
@@ -228,6 +232,7 @@ export function assistantMessageReducer(
       ...items,
       {
         id: msgParams.messageId,
+        runId: msgParams.runId,
         conversationId: msgParams.conversationId ?? conversationId,
         role: "assistant" as const,
         content: "",

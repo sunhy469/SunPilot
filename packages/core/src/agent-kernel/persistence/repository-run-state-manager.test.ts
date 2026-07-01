@@ -53,6 +53,57 @@ describe("RepositoryRunStateManager", () => {
     ]);
   });
 
+  test("persists the dedicated cancellation timestamp", async () => {
+    const db = new InMemoryDatabaseContext();
+    const manager = new RepositoryRunStateManager(db);
+    await manager.createRun({ ...loopInput, runId: "run_cancelled" });
+    await manager.markStatus("run_cancelled", "running");
+
+    const state = await manager.markCancelled("run_cancelled", "user requested");
+    const stored = await db.runs.findById("run_cancelled");
+
+    expect(state.status).toBe("cancelled");
+    expect(state.cancelledAt).toBeTruthy();
+    expect(stored?.cancelledAt).toBeTruthy();
+  });
+
+  test("allows only one competing terminal transition to commit", async () => {
+    const db = new InMemoryDatabaseContext();
+    // Exercise the repository compare-and-set directly. The test database's
+    // snapshot transaction helper is intentionally single-transaction only
+    // and cannot model PostgreSQL's concurrent transaction isolation.
+    Object.defineProperty(db, "transaction", { value: undefined });
+    const manager = new RepositoryRunStateManager(db);
+    await manager.createRun({ ...loopInput, runId: "run_race" });
+    await manager.markStatus("run_race", "running");
+
+    const results = await Promise.allSettled([
+      manager.markStatus("run_race", "completed", "finished"),
+      manager.markCancelled("run_race", "cancelled concurrently"),
+    ]);
+    const state = await manager.getRun("run_race");
+    const history = await db.runStatusHistory.listByRunId("run_race");
+
+    expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    expect(results.filter((result) => result.status === "rejected")).toHaveLength(1);
+    expect(["completed", "cancelled"]).toContain(state?.status);
+    expect(history.filter((entry) =>
+      entry.nextStatus === "completed" || entry.nextStatus === "cancelled"
+    )).toHaveLength(1);
+  });
+
+  test("fails loudly instead of dropping a checkpoint for an unknown run", async () => {
+    const manager = new RepositoryRunStateManager(new InMemoryDatabaseContext());
+    await expect(manager.saveTaskState("missing", {
+      goal: "checkpoint",
+      completedSteps: [],
+      pendingSteps: [],
+      gatheredFacts: {},
+      openQuestions: [],
+      iteration: 0,
+    })).rejects.toMatchObject({ code: "AGENT_RUN_NOT_FOUND" });
+  });
+
   test("persists agent events with conversation sequence metadata", async () => {
     const db = new InMemoryDatabaseContext();
     const sink = new RepositoryAgentEventSink(db);

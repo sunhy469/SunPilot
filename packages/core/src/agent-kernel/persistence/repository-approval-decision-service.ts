@@ -147,5 +147,10 @@ async function requirePendingApproval(
       { code: "AGENT_APPROVAL_ALREADY_DECIDED" },
     );
   }
+  if (approval.expiresAt && Date.parse(approval.expiresAt) <= Date.now()) {
+    throw Object.assign(new Error(`Approval has expired: ${approvalId}`), {
+      code: "AGENT_APPROVAL_EXPIRED",
+    });
+  }
   return approval;
 }

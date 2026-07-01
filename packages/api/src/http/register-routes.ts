@@ -602,12 +602,22 @@ export function registerSunPilotApiRoutes(
       return agent.retryRun(request.params.id);
     },
   );
-  app.post<{ Params: { id: string }; Body: { message?: string } }>(
+  app.post<{
+    Params: { id: string };
+    Body: {
+      message?: string;
+      attachments?: import("@sunpilot/core").AttachmentRef[];
+    };
+  }>(
     "/v1/runs/:id/resume",
     async (request, reply) => {
       const agent = await getChatAgent();
       try {
-        return await agent.resumeRun(request.params.id, request.body?.message);
+        return await agent.resumeRun(
+          request.params.id,
+          request.body?.message,
+          request.body?.attachments,
+        );
       } catch (error) {
         if ((error as { code?: string }).code === "AGENT_RUN_NOT_FOUND") {
           return reply.code(404).send({ error: "not_found" });

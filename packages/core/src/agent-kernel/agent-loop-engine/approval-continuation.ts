@@ -38,7 +38,11 @@ export class ApprovalContinuationCoordinator {
     signal: AbortSignal,
   ): Promise<AgentLoopResult> {
     const run = await this.requireRun(input.runId, "waiting_approval");
-    const checkpoint = requireReactCheckpoint(run.taskState?.gatheredFacts);
+    const checkpoint = requireReactCheckpoint(
+      run.taskState?.gatheredFacts,
+      run.runId,
+      run.conversationId,
+    );
     const agentInput = buildAgentInput({
       runId: input.runId,
       conversationId: input.conversationId,
@@ -47,24 +51,25 @@ export class ApprovalContinuationCoordinator {
       mode: input.mode,
       modelId: checkpoint.modelId,
       permissionMode: checkpoint.permissionMode,
+      checkpoint,
     });
-    const context = await this.deps.contextBuilder.build(agentInput, signal);
-    const stream = this.hydrate(checkpoint);
-
-    for (const call of checkpoint.pendingToolCalls) {
-      stream.updateToolUse(call.id, { status: "failed" });
-      stream.addToolResult({
-        toolCallId: call.id,
-        skillId: call.skillId,
-        summary: input.reason ?? "用户拒绝了该操作。",
-        trust: "trusted",
-      });
-    }
-    completeWaitingStatuses(stream, checkpoint.partsSnapshot, "已拒绝，正在重新规划");
-    await this.deps.runStateManager.markStatus(input.runId, "running");
-    this.deps.traceManager?.startTrace(input.runId, input.conversationId);
-
+    let stream: AssistantMessageStream | undefined;
     try {
+      stream = this.hydrate(checkpoint);
+      const context = await this.deps.contextBuilder.build(agentInput, signal);
+      for (const call of checkpoint.pendingToolCalls) {
+        stream.updateToolUse(call.id, { status: "failed" });
+        stream.addToolResult({
+          toolCallId: call.id,
+          skillId: call.skillId,
+          summary: input.reason ?? "用户拒绝了该操作。",
+          trust: "trusted",
+        });
+      }
+      completeWaitingStatuses(stream, checkpoint.partsSnapshot, "已拒绝，正在重新规划");
+      await this.deps.runStateManager.markStatus(input.runId, "running");
+      this.emitRunStarted(input.runId, input.conversationId, "approval_rejected");
+      this.deps.traceManager?.startTrace(input.runId, input.conversationId);
       const result = await this.deps.reactLoopRunner.resumeAfterRejection(
         {
           agentInput,
@@ -88,7 +93,11 @@ export class ApprovalContinuationCoordinator {
     signal: AbortSignal,
   ): Promise<AgentLoopResult> {
     const run = await this.requireRun(approval.runId, "waiting_approval");
-    const checkpoint = requireReactCheckpoint(run.taskState?.gatheredFacts);
+    const checkpoint = requireReactCheckpoint(
+      run.taskState?.gatheredFacts,
+      run.runId,
+      run.conversationId,
+    );
     const conversationId = approval.conversationId ?? run.conversationId;
     const agentInput = buildAgentInput({
       runId: run.runId,
@@ -97,17 +106,16 @@ export class ApprovalContinuationCoordinator {
       mode: run.mode === "chat" ? "chat" : "agent",
       modelId: checkpoint.modelId,
       permissionMode: checkpoint.permissionMode,
+      checkpoint,
     });
-    const context = await this.deps.contextBuilder.build(agentInput, signal);
-    const stream = this.hydrate(checkpoint);
-    completeWaitingStatuses(stream, checkpoint.partsSnapshot, "已确认，正在执行");
-    await this.deps.runStateManager.markStatus(run.runId, "running");
-
-    if (this.deps.traceManager) {
-      this.deps.traceManager.startTrace(run.runId, conversationId);
-    }
-
+    let stream: AssistantMessageStream | undefined;
     try {
+      stream = this.hydrate(checkpoint);
+      const context = await this.deps.contextBuilder.build(agentInput, signal);
+      completeWaitingStatuses(stream, checkpoint.partsSnapshot, "已确认，正在执行");
+      await this.deps.runStateManager.markStatus(run.runId, "running");
+      this.emitRunStarted(run.runId, conversationId, "approval_approved");
+      this.deps.traceManager?.startTrace(run.runId, conversationId);
       const approvedScopes = extractApprovedToolScopes(approval).map((scope) => ({
         ...scope,
         grantedBy: approval.decidedBy ?? "user",
@@ -143,11 +151,16 @@ export class ApprovalContinuationCoordinator {
       userId?: string;
       userMessageId?: string;
       message: string;
+      attachments?: AgentLoopInput["attachments"];
     },
     signal: AbortSignal,
   ): Promise<AgentLoopResult> {
     const run = await this.requireRun(input.runId, "waiting_user");
-    const checkpoint = requireReactCheckpoint(run.taskState?.gatheredFacts);
+    const checkpoint = requireReactCheckpoint(
+      run.taskState?.gatheredFacts,
+      run.runId,
+      run.conversationId,
+    );
     const agentInput = buildAgentInput({
       runId: run.runId,
       conversationId: input.conversationId ?? run.conversationId,
@@ -157,24 +170,28 @@ export class ApprovalContinuationCoordinator {
       mode: run.mode === "chat" ? "chat" : "agent",
       modelId: checkpoint.modelId,
       permissionMode: checkpoint.permissionMode,
+      checkpoint,
+      attachments: input.attachments ?? [],
     });
-    const context = await this.deps.contextBuilder.build(agentInput, signal);
-    const stream = this.hydrate(checkpoint);
-    for (const part of checkpoint.partsSnapshot) {
-      if (
-        part.type === "status" &&
-        part.status === "running" &&
-        part.label === "等待你补充信息"
-      ) {
-        stream.updateStatus(part.id, {
-          status: "completed",
-          label: "已收到补充信息",
-        });
-      }
-    }
-    await this.deps.runStateManager.markStatus(run.runId, "running");
-    this.deps.traceManager?.startTrace(run.runId, agentInput.conversationId);
+    let stream: AssistantMessageStream | undefined;
     try {
+      stream = this.hydrate(checkpoint);
+      const context = await this.deps.contextBuilder.build(agentInput, signal);
+      for (const part of checkpoint.partsSnapshot) {
+        if (
+          part.type === "status" &&
+          part.status === "running" &&
+          part.label === "等待你补充信息"
+        ) {
+          stream.updateStatus(part.id, {
+            status: "completed",
+            label: "已收到补充信息",
+          });
+        }
+      }
+      await this.deps.runStateManager.markStatus(run.runId, "running");
+      this.emitRunStarted(run.runId, agentInput.conversationId, "user_input");
+      this.deps.traceManager?.startTrace(run.runId, agentInput.conversationId);
       const result = await this.deps.reactLoopRunner.resumeWithUserInput(
         {
           agentInput,
@@ -198,7 +215,11 @@ export class ApprovalContinuationCoordinator {
     signal: AbortSignal,
   ): Promise<AgentLoopResult> {
     const run = await this.requireRun(input.runId, "interrupted");
-    const checkpoint = requireReactCheckpoint(run.taskState?.gatheredFacts);
+    const checkpoint = requireReactCheckpoint(
+      run.taskState?.gatheredFacts,
+      run.runId,
+      run.conversationId,
+    );
     const agentInput = buildAgentInput({
       runId: run.runId,
       conversationId: run.conversationId,
@@ -207,12 +228,15 @@ export class ApprovalContinuationCoordinator {
       mode: run.mode === "chat" ? "chat" : "agent",
       modelId: checkpoint.modelId,
       permissionMode: checkpoint.permissionMode,
+      checkpoint,
     });
-    const context = await this.deps.contextBuilder.build(agentInput, signal);
-    const stream = this.hydrate(checkpoint);
-    await this.deps.runStateManager.markStatus(run.runId, "running");
-    this.deps.traceManager?.startTrace(run.runId, run.conversationId);
+    let stream: AssistantMessageStream | undefined;
     try {
+      stream = this.hydrate(checkpoint);
+      const context = await this.deps.contextBuilder.build(agentInput, signal);
+      await this.deps.runStateManager.markStatus(run.runId, "running");
+      this.emitRunStarted(run.runId, run.conversationId, "interrupted_resume");
+      this.deps.traceManager?.startTrace(run.runId, run.conversationId);
       const result = await this.deps.reactLoopRunner.resumeInterrupted(
         { agentInput, context, checkpoint, stream },
         signal,
@@ -254,7 +278,9 @@ export class ApprovalContinuationCoordinator {
         partsSnapshot: stream.getPartsSnapshot(),
         updatedAt: new Date().toISOString(),
       };
+      await stream.persistSnapshot();
       await saveCheckpoint(this.deps, checkpoint);
+      await this.deps.eventBus.flush();
       await this.deps.runStateManager.markStatus(input.runId, "waiting_user");
       this.deps.eventBus.emit(
         "agent.clarification.requested",
@@ -317,12 +343,20 @@ export class ApprovalContinuationCoordinator {
 
   private async handleFailure(
     input: AgentLoopInput,
-    stream: AssistantMessageStream,
+    stream: AssistantMessageStream | undefined,
     error: unknown,
     signal: AbortSignal,
   ): Promise<AgentLoopResult> {
     if (signal.aborted) {
+      if (stream) {
+        await stream.complete("cancelled").catch(() => undefined);
+      }
       await this.deps.runStateManager.markCancelled(input.runId, "aborted");
+      this.deps.eventBus.emit(
+        "agent.run.cancelled",
+        { runId: input.runId, reason: "aborted" },
+        { runId: input.runId, conversationId: input.conversationId },
+      );
       return {
         runId: input.runId,
         conversationId: input.conversationId,
@@ -331,12 +365,14 @@ export class ApprovalContinuationCoordinator {
         toolCalls: [],
       };
     }
-    stream.addError({
-      code: "REACT_CONTINUATION_FAILED",
-      message: error instanceof Error ? error.message : String(error),
-      recoverable: false,
-    });
-    await stream.complete().catch(() => undefined);
+    if (stream) {
+      stream.addError({
+        code: "REACT_CONTINUATION_FAILED",
+        message: error instanceof Error ? error.message : String(error),
+        recoverable: false,
+      });
+      await stream.complete("failed").catch(() => undefined);
+    }
     await this.deps.runStateManager.markFailed(input.runId, error);
     const agentError = {
       code: (error as { code?: string }).code ?? "AGENT_INTERNAL_ERROR",
@@ -347,6 +383,16 @@ export class ApprovalContinuationCoordinator {
     this.deps.eventBus.emit(
       "agent.run.failed",
       { runId: input.runId, error: agentError },
+      { runId: input.runId, conversationId: input.conversationId },
+    );
+    this.deps.eventBus.emit(
+      "agent.error",
+      {
+        runId: input.runId,
+        conversationId: input.conversationId,
+        ...agentError,
+        fatal: true,
+      },
       { runId: input.runId, conversationId: input.conversationId },
     );
     return {
@@ -373,6 +419,18 @@ export class ApprovalContinuationCoordinator {
     });
     stream.start();
     return stream;
+  }
+
+  private emitRunStarted(
+    runId: string,
+    conversationId: string,
+    continuation: string,
+  ): void {
+    this.deps.eventBus.emit(
+      "agent.run.started",
+      { runId, conversationId, continuation },
+      { runId, conversationId },
+    );
   }
 
   private async requireRun(
@@ -404,23 +462,28 @@ function buildAgentInput(input: {
   mode: "chat" | "agent";
   modelId?: "dp" | "seed";
   permissionMode: "ask" | "auto" | "full";
+  checkpoint: ReactCheckpoint;
+  attachments?: AgentLoopInput["attachments"];
 }): AgentLoopInput {
+  const snapshot = input.checkpoint.inputSnapshot;
   return {
     runId: input.runId,
     conversationId: input.conversationId,
-    userMessageId: input.userMessageId ?? input.runId,
-    userId: input.userId,
+    userMessageId: input.userMessageId ?? snapshot?.userMessageId ?? input.runId,
+    userId: input.userId ?? snapshot?.userId,
     message: input.message,
     mode: input.mode,
     modelId: input.modelId,
     permissionMode: input.permissionMode,
-    attachments: [],
-    client: { source: "api" },
+    attachments: structuredClone(input.attachments ?? snapshot?.attachments ?? []),
+    client: structuredClone(snapshot?.client ?? { source: "api" }),
   };
 }
 
 function requireReactCheckpoint(
   gatheredFacts: Record<string, unknown> | undefined,
+  runId: string,
+  conversationId: string,
 ): ReactCheckpoint {
   const checkpoint = gatheredFacts?.reactCheckpoint;
   if (!checkpoint || typeof checkpoint !== "object") {
@@ -433,6 +496,12 @@ function requireReactCheckpoint(
     throw Object.assign(new Error("Run contains an invalid ReAct checkpoint"), {
       code: "AGENT_REACT_CHECKPOINT_INVALID",
     });
+  }
+  if (candidate.runId !== runId || candidate.conversationId !== conversationId) {
+    throw Object.assign(
+      new Error("Run contains a ReAct checkpoint owned by a different run or conversation"),
+      { code: "AGENT_REACT_CHECKPOINT_OWNERSHIP_MISMATCH" },
+    );
   }
   return candidate;
 }

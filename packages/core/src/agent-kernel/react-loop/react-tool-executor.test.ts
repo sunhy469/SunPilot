@@ -74,6 +74,60 @@ describe("ReactToolExecutor", () => {
         artifactIds: [`artifact_${call.id}`],
       }))));
   });
+
+  test("synthesizes a failed result when the orchestrator omits a tool call", async () => {
+    const calls = [planned("call_present"), planned("call_missing")];
+    const eventBus = new InMemoryAgentEventBus();
+    const executor = new ReactToolExecutor({
+      async execute() {
+        return {
+          runId: "run_order",
+          toolCalls: [{
+            id: calls[0]!.id,
+            skillId: calls[0]!.skillId,
+            name: calls[0]!.name,
+            status: "completed" as const,
+            summary: "done",
+          }],
+          artifacts: [],
+          summary: "partial result",
+        };
+      },
+    }, eventBus);
+    const stream = new AssistantMessageStream({
+      runId: "run_order",
+      conversationId: "conv_order",
+      messageId: "msg_missing",
+      eventBus,
+      saveMessage: async () => undefined,
+    });
+    stream.start();
+
+    const result = await executor.execute({
+      runId: "run_order",
+      conversationId: "conv_order",
+      context,
+      calls,
+      permissionMode: "auto",
+      stream,
+    }, new AbortController().signal);
+
+    expect(result.summaries).toEqual([
+      expect.objectContaining({ id: "call_present", status: "completed" }),
+      expect.objectContaining({
+        id: "call_missing",
+        status: "failed",
+        metadata: expect.objectContaining({ missingExecutionResult: true }),
+      }),
+    ]);
+    expect(stream.getPartsSnapshot()).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        type: "tool_result",
+        toolCallId: "call_missing",
+        trust: "untrusted",
+      }),
+    ]));
+  });
 });
 
 function planned(id: string): PlannedToolCall {

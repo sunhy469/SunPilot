@@ -63,6 +63,36 @@ describe("ReactModelTurn", () => {
     expect(result.protocolError).toBe("malformed textual function call");
   });
 
+  test("reports non-success provider finish reasons as protocol errors", async () => {
+    const { turn } = createTurn([{
+      delta: "partial",
+      finishReason: "length",
+      raw: {},
+    }]);
+
+    const result = await turn.run(baseInput(), new AbortController().signal);
+
+    expect(result.protocolError).toBe("model stopped with finish_reason 'length'");
+  });
+
+  test("parses textual function markers split across chunks without leaking them", async () => {
+    const { turn } = createTurn([
+      { delta: "Looking it up <FunctionCall", raw: {} },
+      { delta: "Begin>[{\"name\":\"search\",\"parameters\":{\"query\":\"shirt\"}}]", raw: {} },
+      { delta: "<FunctionCallEnd> trailing", raw: {} },
+    ]);
+
+    const result = await turn.run(baseInput(), new AbortController().signal);
+
+    expect(result.text).toBe("Looking it up  trailing");
+    expect(result.toolCalls).toEqual([
+      expect.objectContaining({
+        function: { name: "search", arguments: '{"query":"shirt"}' },
+      }),
+    ]);
+    expect(result.protocolError).toBeUndefined();
+  });
+
   test("deduplicates malformed native tool_call ids before building the transcript", async () => {
     const { turn } = createTurn([{
       delta: "",

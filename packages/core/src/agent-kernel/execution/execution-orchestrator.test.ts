@@ -249,6 +249,35 @@ describe("ExecutionOrchestrator", () => {
     expect(events).not.toContain("agent.tool.completed");
     expect(events).not.toContain("agent.artifact.created");
   });
+
+  test("turns output-schema violations into failed observations", async () => {
+    const eventBus = new InMemoryAgentEventBus();
+    const events: string[] = [];
+    eventBus.subscribe((event) => events.push(event.type));
+    const execute = vi.fn(async () => ({
+      status: "completed" as const,
+      summary: "returned malformed data",
+      rawOutput: { items: "not-an-array" },
+      artifacts: [],
+    }));
+    const orchestrator = createSafeOrchestrator(eventBus, execute);
+
+    const result = await executeCall(orchestrator, {
+      outputSchema: {
+        type: "object",
+        required: ["items"],
+        properties: { items: { type: "array" } },
+      },
+    });
+
+    expect(result.toolCalls[0]).toMatchObject({
+      status: "failed",
+      summary: expect.stringContaining("Tool output validation failed"),
+    });
+    expect(events).toContain("agent.tool_output.validation_failed");
+    expect(events).toContain("agent.tool.failed");
+    expect(events).not.toContain("agent.tool.completed");
+  });
 });
 
 function createSafeOrchestrator(

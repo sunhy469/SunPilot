@@ -303,7 +303,7 @@ export async function createDaemon(options: DaemonOptions = {}) {
 
   const eventBus = options.eventBus ?? new InMemoryAgentEventBus();
 
-  const approvalExpiryService = new RepositoryApprovalExpiryService(database);
+  const approvalExpiryService = new RepositoryApprovalExpiryService(database, eventBus);
   await approvalExpiryService.expireStale();
   await recoverAgentRuntimeRuns(database);
 
@@ -680,6 +680,7 @@ export async function createDaemon(options: DaemonOptions = {}) {
   // §F5: periodic idempotency key cleanup — removes expired in-flight
   // reservations so they don't block retries indefinitely.
   let idempotencyCleanupTimer: ReturnType<typeof setInterval> | null = null;
+  let approvalExpiryTimer: ReturnType<typeof setInterval> | null = null;
   let stopSkillWatcher: (() => void) | undefined;
 
   return {
@@ -711,6 +712,24 @@ export async function createDaemon(options: DaemonOptions = {}) {
       // Start background workers
       staleDetectionWorker.start();
       pruningWorker.start();
+      approvalExpiryTimer = setInterval(async () => {
+        try {
+          const expired = await approvalExpiryService.expireStale();
+          if (expired.length > 0) {
+            const agent = await getChatAgent();
+            for (const result of expired) {
+              if (result.runCancelled) {
+                (agent as AgentService & { disposeRun?: (runId: string) => void })
+                  .disposeRun?.(result.runId);
+              }
+            }
+            app.log.info({ count: expired.length }, "Expired stale approvals");
+          }
+        } catch (err) {
+          app.log.warn({ err }, "Approval expiry scan failed");
+        }
+      }, 60_000);
+      approvalExpiryTimer.unref?.();
       if (runtimeConfig.skills.autoReload) {
         stopSkillWatcher = watchSkillDirectories(
           skillDirectories,
@@ -758,6 +777,10 @@ export async function createDaemon(options: DaemonOptions = {}) {
       if (idempotencyCleanupTimer) {
         clearInterval(idempotencyCleanupTimer);
         idempotencyCleanupTimer = null;
+      }
+      if (approvalExpiryTimer) {
+        clearInterval(approvalExpiryTimer);
+        approvalExpiryTimer = null;
       }
       rateLimiter.dispose();
 

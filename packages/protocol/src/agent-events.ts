@@ -36,6 +36,7 @@ export const AGENT_EVENT_TYPES = [
   "agent.tool.failed",
   "agent.tool_argument.generated",
   "agent.tool_argument.validation_failed",
+  "agent.tool_output.validation_failed",
   // Approval
   "agent.approval.required",
   "agent.approval.approved",
