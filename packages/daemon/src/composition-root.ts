@@ -67,6 +67,8 @@ export function createAgentLoopService(deps: {
   updateMemory: (id: string, input: { content?: string; title?: string; summary?: string; confidence?: number; importance?: number }) => Promise<{ id: string } | null>;
   skillEmbeddingCache: SkillEmbeddingCache;
   embeddingService: LlmEmbeddingService;
+  /** Stop persistence-layer background timers. */
+  stopPersistence: () => void;
 } {
   const env = parseEnv(process.env);
 
@@ -268,5 +270,6 @@ export function createAgentLoopService(deps: {
     skillEmbeddingCache,
     /** Expose for cache invalidation on skill registry reload. */
     embeddingService,
+    stopPersistence: () => persistence.stop(),
   };
 }

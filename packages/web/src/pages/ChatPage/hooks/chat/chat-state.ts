@@ -8,6 +8,7 @@ import type {
   AssistantMessagePart,
   ChatMessage,
 } from "../../../../features/conversations/types";
+import type { AgentEventType } from "@sunpilot/protocol";
 
 export type ChatSocketPayload = ChatSocketEvent | ChatSocketErrorResponse;
 
@@ -65,44 +66,13 @@ export function parseSocketPayload(
     return { error: { message: payload.error.message } };
   }
   if ("method" in payload) {
-    switch (payload.method) {
-      case "agent.run.created":
-      case "agent.run.started":
-      case "agent.context.started":
-      case "agent.context.completed":
-      case "agent.intent.detected":
-      case "agent.plan.created":
-      case "agent.clarification.requested":
-      case "agent.model.started":
-      case "agent.model.delta":
-      case "agent.model.completed":
-      case "agent.model.failed":
-      case "agent.run.completed":
-      case "agent.run.failed":
-      case "agent.run.cancelled":
-      case "agent.error":
-      case "agent.tool.selected":
-      case "agent.tool.started":
-      case "agent.tool.delta":
-      case "agent.tool.completed":
-      case "agent.tool.failed":
-      case "agent.approval.required":
-      case "agent.approval.approved":
-      case "agent.approval.rejected":
-      case "agent.approval.expired":
-      case "agent.artifact.created":
-      case "agent.memory.written":
-      case "agent.run.interrupted":
-      case "agent.message.started":
-      case "agent.message.part.started":
-      case "agent.message.part.delta":
-      case "agent.message.part.updated":
-      case "agent.message.completed":
-      case "pong":
-        return normalizeSocketEvent(payload as ChatSocketEvent);
-      default:
-        return undefined;
+    if (
+      typeof payload.method === "string" &&
+      payload.method in AGENT_EVENT_VISIBILITY
+    ) {
+      return normalizeSocketEvent(payload as ChatSocketEvent);
     }
+    return undefined;
   }
   return undefined;
 }
@@ -167,7 +137,7 @@ export const LOCAL_PENDING_STATUS_PART: AssistantMessagePart = {
   status: "running",
   runId: "",
   createdAt: "",
-  metadata: { phase: "local_pending" },
+  metadata: { phase: "queued" },
 };
 
 export function assistantMessageReducer(
@@ -568,7 +538,9 @@ export function upsertTextPartDelta(
  * When new events are added to the protocol, they MUST be added here
  * to avoid silent no-ops.
  */
-export const AGENT_EVENT_VISIBILITY: Record<string, "visible" | "status" | "debug" | "ignored"> = {
+type AgentEventVisibility = "visible" | "status" | "debug" | "ignored";
+
+const CANONICAL_AGENT_EVENT_VISIBILITY = {
   // ── User-visible activities ──────────────────────────────────────
   "agent.tool.started": "visible",
   "agent.tool.delta": "visible",
@@ -600,16 +572,32 @@ export const AGENT_EVENT_VISIBILITY: Record<string, "visible" | "status" | "debu
   "agent.context.completed": "debug",
   "agent.intent.detected": "debug",
   "agent.plan.created": "debug",
+  "agent.plan.warnings": "debug",
+  "agent.plan.validated": "debug",
+  "agent.plan.revised": "debug",
   "agent.tool.selected": "debug",
+  "agent.tool_argument.generated": "debug",
+  "agent.tool_argument.validation_failed": "debug",
+  "agent.tool_output.validation_failed": "debug",
   "agent.model.started": "debug",
   "agent.model.delta": "debug",
   "agent.model.completed": "debug",
   "agent.model.failed": "debug",
   "agent.clarification.requested": "debug",
+  "agent.react.turn.completed": "debug",
+
+  // ── Safety events (user-visible) ─────────────────────────────────
+  "agent.safety.injection_detected": "visible",
+  "agent.safety.sandbox_denied": "visible",
+  "agent.safety.scope_reauth_required": "visible",
 
   // ── Ignored ──────────────────────────────────────────────────────
   "pong": "ignored",
-};
+} satisfies Record<AgentEventType | "pong", AgentEventVisibility>;
+
+export const AGENT_EVENT_VISIBILITY: Readonly<
+  Record<string, AgentEventVisibility>
+> = CANONICAL_AGENT_EVENT_VISIBILITY;
 
 /**
  * Map agent events to user-visible activities.

@@ -3,12 +3,14 @@ import {
   AGENT_EVENT_VISIBILITY,
   assistantMessageReducer,
   lastDeltaIndexByPartId,
+  parseSocketPayload,
 } from "./chat/chat-state";
 import type {
   ChatMessage,
   AssistantMessagePart,
 } from "../../../features/conversations/types";
 import { mergeMessagesById } from "./conversation-message-merge";
+import { AGENT_EVENT_TYPES } from "@sunpilot/protocol";
 
 // ── Helper to create test messages ──
 
@@ -649,26 +651,29 @@ describe("mergeMessagesById", () => {
 // ── §P1-4: AGENT_EVENT_VISIBILITY classification tests ──────────────
 
 describe("AGENT_EVENT_VISIBILITY", () => {
+  test("parses newly added canonical events through the visibility map", () => {
+    const parsed = parseSocketPayload(JSON.stringify({
+      jsonrpc: "2.0",
+      method: "agent.react.turn.completed",
+      params: {
+        eventId: "evt_turn",
+        sequence: 7,
+        runId: "run_1",
+        conversationId: "conv_1",
+        createdAt: "2026-07-01T00:00:00.000Z",
+        payload: { runId: "run_1", iteration: 1 },
+      },
+    }));
+
+    expect(parsed).toMatchObject({
+      method: "agent.react.turn.completed",
+      id: "evt_turn",
+      conversationId: "conv_1",
+    });
+  });
+
   test("all known events are classified", () => {
-    const knownEvents = [
-      "agent.run.created", "agent.run.started", "agent.run.completed",
-      "agent.run.failed", "agent.run.cancelled", "agent.run.interrupted",
-      "agent.context.started", "agent.context.completed",
-      "agent.intent.detected", "agent.plan.created",
-      "agent.clarification.requested",
-      "agent.model.started", "agent.model.delta", "agent.model.completed",
-      "agent.model.failed",
-      "agent.tool.selected", "agent.tool.started", "agent.tool.delta",
-      "agent.tool.completed", "agent.tool.failed",
-      "agent.approval.required", "agent.approval.approved",
-      "agent.approval.rejected", "agent.approval.expired",
-      "agent.artifact.created", "agent.memory.written",
-      "agent.message.started", "agent.message.part.started",
-      "agent.message.part.delta", "agent.message.part.updated",
-      "agent.message.completed",
-      "agent.error",
-      "pong",
-    ];
+    const knownEvents = [...AGENT_EVENT_TYPES, "pong"];
 
     for (const event of knownEvents) {
       expect(
@@ -689,6 +694,9 @@ describe("AGENT_EVENT_VISIBILITY", () => {
       "agent.tool.completed",
       "agent.tool.failed",
       "agent.error",
+      "agent.safety.injection_detected",
+      "agent.safety.sandbox_denied",
+      "agent.safety.scope_reauth_required",
     ]);
   });
 
@@ -917,7 +925,7 @@ describe("assistantMessageReducer — approval status part updates", () => {
             status: "running",
             runId: "",
             createdAt: "",
-            metadata: { phase: "local_pending" },
+            metadata: { phase: "queued" },
           },
         ],
       }),
@@ -965,7 +973,7 @@ describe("assistantMessageReducer — approval status part updates", () => {
             status: "running",
             runId: "",
             createdAt: "",
-            metadata: { phase: "local_pending" },
+            metadata: { phase: "queued" },
           },
         ],
       }),

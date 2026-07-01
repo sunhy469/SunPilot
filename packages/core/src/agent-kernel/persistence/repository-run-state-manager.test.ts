@@ -15,6 +15,46 @@ const loopInput: AgentLoopInput = {
 };
 
 describe("RepositoryRunStateManager", () => {
+  test("persists and exposes the complete versioned retry input snapshot", async () => {
+    const db = new InMemoryDatabaseContext();
+    const manager = new RepositoryRunStateManager(db);
+    const input: AgentLoopInput = {
+      ...loopInput,
+      permissionMode: "ask",
+      modelId: "seed",
+      attachments: [
+        { id: "file_1", name: "brief.pdf", type: "application/pdf" },
+      ],
+    };
+
+    const state = await manager.createRun(input);
+
+    expect(state.input).toEqual({
+      version: 1,
+      message: input.message,
+      attachments: input.attachments,
+      client: input.client,
+      permissionMode: "ask",
+      modelId: "seed",
+      mode: "agent",
+      userMessageId: input.userMessageId,
+    });
+  });
+
+  test("does not acquire execution after a concurrent cancellation", async () => {
+    const db = new InMemoryDatabaseContext();
+    const manager = new RepositoryRunStateManager(db);
+    await manager.createRun({ ...loopInput, runId: "run_cancel_before_start" });
+    await manager.markCancelled("run_cancel_before_start");
+
+    const result = await manager.acquireExecution("run_cancel_before_start", [
+      "created",
+    ]);
+
+    expect(result.acquired).toBe(false);
+    expect(result.state.status).toBe("cancelled");
+  });
+
   test("persists agent run state transitions to storage", async () => {
     const db = new InMemoryDatabaseContext();
     const manager = new RepositoryRunStateManager(db);

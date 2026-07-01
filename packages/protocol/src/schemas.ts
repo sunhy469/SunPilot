@@ -9,6 +9,18 @@ export const approvalDecisionSchema = z.object({
 });
 
 const skillRiskSchema = z.enum(["low", "medium", "high", "critical"]);
+const skillTimeoutPolicySchema = z
+  .object({
+    defaultMs: z.number().int().positive(),
+    maxMs: z.number().int().positive(),
+    retryable: z.boolean(),
+    maxRetries: z.number().int().min(0),
+    backoffMs: z.number().int().min(0),
+  })
+  .refine((policy) => policy.defaultMs <= policy.maxMs, {
+    message: "timeoutPolicy.defaultMs must not exceed maxMs",
+    path: ["defaultMs"],
+  });
 
 const permissionDeclarationSchema = z.object({
   filesystem: z
@@ -44,7 +56,12 @@ export const skillManifestSchema = z.object({
         inputSchema: z.union([z.string(), z.record(z.unknown())]),
         outputSchema: z.union([z.string(), z.record(z.unknown())]),
         risk: skillRiskSchema,
-        permissions: z.array(z.string()).default([])
+        permissions: z.array(z.string()).default([]),
+        idempotent: z.boolean().optional(),
+        sideEffects: z
+          .enum(["none", "readonly", "mutation", "network", "destructive"])
+          .optional(),
+        timeoutPolicy: skillTimeoutPolicySchema.optional(),
       }),
     )
     .min(1),

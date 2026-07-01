@@ -293,6 +293,16 @@ export interface SkillManifestCapability {
   outputSchema: string | Record<string, unknown>;
   risk: SkillRisk;
   permissions: string[];
+  /** Explicit execution semantics used by the retry boundary. */
+  idempotent?: boolean;
+  sideEffects?: "none" | "readonly" | "mutation" | "network" | "destructive";
+  timeoutPolicy?: {
+    defaultMs: number;
+    maxMs: number;
+    retryable: boolean;
+    maxRetries: number;
+    backoffMs: number;
+  };
 }
 
 export interface SkillManifest {

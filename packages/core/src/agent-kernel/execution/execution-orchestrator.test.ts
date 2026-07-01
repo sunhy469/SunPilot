@@ -26,6 +26,100 @@ const context: AgentContext = {
 };
 
 describe("ExecutionOrchestrator", () => {
+  test("checks persisted execution ownership before invoking a tool", async () => {
+    const eventBus = new InMemoryAgentEventBus();
+    const execute = vi.fn();
+    const toolCalls = { create: vi.fn(), updateStatus: vi.fn() };
+    const orchestrator = createSafeOrchestrator(
+      eventBus,
+      execute,
+      "moderate",
+      vi.fn().mockResolvedValue(false),
+      toolCalls,
+    );
+
+    const result = await executeCall(orchestrator, {});
+
+    expect(execute).not.toHaveBeenCalled();
+    expect(toolCalls.create).not.toHaveBeenCalled();
+    expect(result.toolCalls[0]).toMatchObject({ status: "cancelled" });
+  });
+
+  test("marks an existing tool-call record cancelled when ownership is lost at the final gate", async () => {
+    const eventBus = new InMemoryAgentEventBus();
+    const execute = vi.fn();
+    const canExecuteRun = vi
+      .fn()
+      .mockResolvedValueOnce(true)
+      .mockResolvedValueOnce(false);
+    const toolCalls = {
+      create: vi.fn().mockResolvedValue(undefined),
+      updateStatus: vi.fn().mockResolvedValue(undefined),
+    };
+    const orchestrator = createSafeOrchestrator(
+      eventBus,
+      execute,
+      "moderate",
+      canExecuteRun,
+      toolCalls,
+    );
+
+    const result = await executeCall(orchestrator, {});
+
+    expect(execute).not.toHaveBeenCalled();
+    expect(toolCalls.create).toHaveBeenCalledOnce();
+    expect(toolCalls.updateStatus).toHaveBeenCalledWith(
+      "tool_safety",
+      "cancelled",
+      expect.objectContaining({
+        error: expect.objectContaining({ code: "AGENT_RUN_NOT_EXECUTABLE" }),
+      }),
+    );
+    expect(result.toolCalls[0]).toMatchObject({ status: "cancelled" });
+  });
+
+  test("never retries a non-idempotent mutation even when policy requests retries", async () => {
+    const eventBus = new InMemoryAgentEventBus();
+    const execute = vi.fn().mockRejectedValue(
+      Object.assign(new Error("timed out"), { code: "TIMEOUT" }),
+    );
+    const orchestrator = createSafeOrchestrator(eventBus, execute);
+
+    await executeCall(orchestrator, {
+      idempotent: false,
+      sideEffects: "mutation",
+      timeoutPolicy: {
+        retryable: true,
+        maxRetries: 3,
+        backoffMs: 0,
+      },
+    });
+
+    expect(execute).toHaveBeenCalledTimes(1);
+  });
+
+  test("honors maxRetries as retries after the first idempotent attempt", async () => {
+    const eventBus = new InMemoryAgentEventBus();
+    const execute = vi.fn().mockRejectedValue(
+      Object.assign(new Error("service unavailable"), {
+        code: "SERVICE_UNAVAILABLE",
+      }),
+    );
+    const orchestrator = createSafeOrchestrator(eventBus, execute);
+
+    await executeCall(orchestrator, {
+      idempotent: true,
+      sideEffects: "readonly",
+      timeoutPolicy: {
+        retryable: true,
+        maxRetries: 2,
+        backoffMs: 0,
+      },
+    });
+
+    expect(execute).toHaveBeenCalledTimes(3);
+  });
+
   test("emits artifact.created events for tool artifacts", async () => {
     const eventBus = new InMemoryAgentEventBus();
     const events: string[] = [];
@@ -58,6 +152,8 @@ describe("ExecutionOrchestrator", () => {
             riskLevel: "low",
             requiresApproval: false,
             timeoutMs: 1_000,
+            idempotent: true,
+            sideEffects: "mutation",
           },
         ],
       },
@@ -284,6 +380,11 @@ function createSafeOrchestrator(
   eventBus: InMemoryAgentEventBus,
   execute: ReturnType<typeof vi.fn>,
   sandboxMode: "strict" | "moderate" | "permissive" = "moderate",
+  canExecuteRun?: (runId: string) => Promise<boolean>,
+  toolCalls?: {
+    create: ReturnType<typeof vi.fn>;
+    updateStatus: ReturnType<typeof vi.fn>;
+  },
 ): ExecutionOrchestrator {
   return new ExecutionOrchestrator({
     eventBus,
@@ -294,6 +395,8 @@ function createSafeOrchestrator(
       permissionManager: new TaskScopedPermissionManager(),
       injectionDetector: new PromptInjectionDetector(),
     }),
+    canExecuteRun,
+    toolCalls: toolCalls as never,
   });
 }
 
@@ -318,6 +421,8 @@ function executeCall(
     riskLevel: "low",
     requiresApproval: false,
     timeoutMs: 1_000,
+    idempotent: true,
+    sideEffects: "readonly",
     ...overrides,
   };
   return orchestrator.execute(

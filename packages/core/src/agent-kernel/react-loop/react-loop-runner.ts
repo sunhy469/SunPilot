@@ -147,7 +147,10 @@ export class ReactLoopRunner {
         stream: input.stream,
         continuation: {
           transcript,
-          candidateToolIds: input.checkpoint.candidateToolIds,
+          // Rejection changes the planning intent. Re-run retrieval so tools
+          // outside the old frozen catalog can become visible; the transcript
+          // still retains the rejected action signature for duplicate guards.
+          candidateToolIds: undefined,
           artifacts: input.checkpoint.artifacts,
           toolCalls: [...input.checkpoint.toolCallSummaries, ...summaries],
           iteration: input.checkpoint.iteration + 1,

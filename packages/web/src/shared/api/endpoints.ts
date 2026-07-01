@@ -2,6 +2,7 @@ export const endpoints = {
   conversations: "/v1/conversations",
   conversationById: (id: string) => `/v1/conversations/${id}`,
   conversationMessages: (id: string) => `/v1/conversations/${id}/messages`,
+  conversationActiveRun: (id: string) => `/v1/conversations/${id}/active-run`,
 
   digitalWorld: "/v1/digital-world",
   digitalBeings: "/v1/digital-beings",

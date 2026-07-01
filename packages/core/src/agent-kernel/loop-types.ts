@@ -147,6 +147,10 @@ export interface AgentLoopResult {
   runId: string;
   conversationId: string;
   assistantMessageId?: string;
+  /** Final merged assistant content (mergeContent result) for synchronous
+   *  callers like REST /v1/chat. Undefined on paths that don't complete the
+   *  stream (e.g. hard failure before stream.start). */
+  assistantContent?: string;
   status: AgentLoopStatus;
   artifacts: ArtifactRef[];
   toolCalls: ToolCallSummary[];
@@ -309,6 +313,16 @@ export interface PlannedToolCall {
   riskLevel: "low" | "medium" | "high" | "critical";
   requiresApproval: boolean;
   timeoutMs: number;
+  /** Whether the tool is safe to retry (no duplicate side-effects). */
+  idempotent: boolean;
+  /** Side-effect classification from the skill manifest. */
+  sideEffects?: "none" | "readonly" | "mutation" | "network" | "destructive";
+  /** Per-tool retry policy from the skill manifest. */
+  timeoutPolicy?: {
+    retryable: boolean;
+    maxRetries: number;
+    backoffMs: number;
+  };
   /** Capability-level risk hints from the skill manifest. */
   riskHints?: {
     defaultRisk?: RiskLevel;

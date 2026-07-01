@@ -33,6 +33,8 @@ export interface ExecutionOrchestratorDeps {
   toolCalls?: ToolCallRepository;
   /** Single pre/post tool security boundary. */
   safetyBoundary: ToolSafetyBoundary;
+  /** Persisted execution gate checked immediately before each tool attempt. */
+  canExecuteRun?: (runId: string) => Promise<boolean>;
 }
 
 /**
@@ -284,6 +286,13 @@ export class ExecutionOrchestrator implements ExecutionOrchestratorInterface {
     }
     currentArgs = safety.arguments;
 
+    // Do not create a running audit record unless this run still owns
+    // execution. This closes the cancel window between the safety check and
+    // durable tool-call creation.
+    if (!(await this.isRunExecutable(runId, signal))) {
+      return this.cancelledToolResult(call);
+    }
+
     // Create tool call record with audit metadata
     const now = new Date().toISOString();
     await this.deps.toolCalls?.create({
@@ -307,11 +316,47 @@ export class ExecutionOrchestrator implements ExecutionOrchestratorInterface {
 
     let lastError: Error | undefined;
 
+    // §P1-04: Determine per-call retry policy based on idempotency and
+    // side-effects. Non-idempotent mutation/network/destructive tools default
+    // to 0 retries (1 total attempt) unless their timeoutPolicy explicitly
+    // allows more. Idempotent/readonly tools keep the original MAX_RETRIES.
+    const isReadonlyLike =
+      call.idempotent ||
+      call.sideEffects === "none" ||
+      call.sideEffects === "readonly";
+    const maxAttempts = !isReadonlyLike
+      ? 1
+      : call.timeoutPolicy
+        ? call.timeoutPolicy.retryable
+          ? 1 + call.timeoutPolicy.maxRetries
+          : 1
+        : MAX_RETRIES;
+
     // §B15: `<=` would execute MAX_RETRIES+1 total attempts (off-by-one);
-    // use `<` so the loop runs exactly MAX_RETRIES times.
-    for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+    // use `<` so the loop runs exactly maxAttempts times.
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
       try {
-        // Emit tool.started event for each attempt
+        // Apply backoff delay for retries
+        if (attempt > 0) {
+          const delay = call.timeoutPolicy
+            ? call.timeoutPolicy.backoffMs
+            : RETRY_BACKOFF[attempt] ?? RETRY_BACKOFF[MAX_RETRIES] ?? 0;
+          await abortableDelay(delay, signal);
+        }
+
+        // Re-check both process-local cancellation and persisted run state
+        // after backoff, immediately before every irreversible attempt.
+        if (!(await this.isRunExecutable(runId, signal))) {
+          await this.deps.toolCalls?.updateStatus(call.id, "cancelled", {
+            error: {
+              code: "AGENT_RUN_NOT_EXECUTABLE",
+              message: "Run lost execution ownership before tool execution",
+            },
+          });
+          return this.cancelledToolResult(call);
+        }
+
+        // Emit tool.started only after the final execution gate succeeds.
         this.deps.eventBus.emit(
           "agent.tool.started",
           {
@@ -322,12 +367,6 @@ export class ExecutionOrchestrator implements ExecutionOrchestratorInterface {
           },
           { runId },
         );
-
-        // Apply backoff delay for retries
-        if (attempt > 0) {
-          const delay = RETRY_BACKOFF[attempt] ?? RETRY_BACKOFF[MAX_RETRIES] ?? 0;
-          await abortableDelay(delay, signal);
-        }
 
         // Execute via tool executor
         let rawResult = await this.deps.toolExecutor.execute({
@@ -497,6 +536,32 @@ export class ExecutionOrchestrator implements ExecutionOrchestratorInterface {
         status: "failed",
         summary: errorMsg,
         structured: undefined,
+      },
+      artifacts: [],
+    };
+  }
+
+  private async isRunExecutable(
+    runId: string,
+    signal: AbortSignal,
+  ): Promise<boolean> {
+    if (signal.aborted) return false;
+    return this.deps.canExecuteRun
+      ? this.deps.canExecuteRun(runId)
+      : true;
+  }
+
+  private cancelledToolResult(call: PlannedToolCall): {
+    summary: ToolCallSummary;
+    artifacts: ArtifactRef[];
+  } {
+    return {
+      summary: {
+        id: call.id,
+        skillId: call.skillId,
+        name: call.name,
+        status: "cancelled",
+        summary: "Run was cancelled before tool execution",
       },
       artifacts: [],
     };

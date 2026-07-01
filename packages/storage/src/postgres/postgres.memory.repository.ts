@@ -140,13 +140,27 @@ export class PostgresMemoryRepository implements MemoryRepository {
 
   async list(input: ListMemoryInput = {}): Promise<MemoryRecord[]> {
     const { where, values } = buildMemoryWhere(input);
+    const params: unknown[] = [...values];
+    const clauses: string[] = [];
+    if (where) clauses.push(where.replace(/^WHERE\s/i, "").trim());
+    if (input.afterCursor) {
+      const createdAtIdx = params.length + 1;
+      const idIdx = params.length + 2;
+      clauses.push(
+        `(created_at < $${createdAtIdx} OR (created_at = $${createdAtIdx} AND id < $${idIdx}))`,
+      );
+      params.push(input.afterCursor.createdAt, input.afterCursor.id);
+    }
+    const whereClause = clauses.length > 0 ? `WHERE ${clauses.join(" AND ")}` : "";
+    const limitIdx = params.length + 1;
+    params.push(Number(input.limit ?? 100));
     const result = await this.pool.query(
       `SELECT ${MEMORY_COLUMNS}
        FROM memory_metadata
-       ${where}
-       ORDER BY created_at DESC
-       LIMIT $${values.length + 1}`,
-      [...values, Number(input.limit ?? 100)],
+       ${whereClause}
+       ORDER BY created_at DESC, id DESC
+       LIMIT $${limitIdx}`,
+      params,
     );
     return result.rows.map(mapMemory);
   }

@@ -6,6 +6,10 @@ export function formatZodIssues(error: ZodError): string {
 }
 
 /** Encode pagination cursor as base64url. */
-export function paginationCursor(input: { updatedAt: string; id: string }): string {
-  return Buffer.from(JSON.stringify({ updatedAt: input.updatedAt, id: input.id })).toString("base64url");
+export function paginationCursor(input: {
+  pinned?: boolean;
+  updatedAt: string;
+  id: string;
+}): string {
+  return Buffer.from(JSON.stringify(input)).toString("base64url");
 }

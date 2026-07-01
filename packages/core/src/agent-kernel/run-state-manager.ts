@@ -16,6 +16,17 @@ export interface RunState {
   previousStatus?: AgentLoopStatus;
   mode: string;
   goal?: string;
+  /** Versioned immutable input snapshot used by retry/new-attempt. */
+  input?: {
+    version: 1;
+    message: string;
+    attachments: AgentLoopInput["attachments"];
+    client: AgentLoopInput["client"];
+    permissionMode: NonNullable<AgentLoopInput["permissionMode"]>;
+    modelId?: AgentLoopInput["modelId"];
+    mode: AgentLoopInput["mode"];
+    userMessageId: string;
+  };
   error?: {
     code: string;
     message: string;
@@ -44,6 +55,18 @@ export interface RunStateManager {
   markCompleted(runId: string, result: AgentLoopResult): Promise<RunState>;
   markCancelled(runId: string, reason?: string): Promise<RunState>;
   getRun(runId: string): Promise<RunState | undefined>;
+  /**
+   * Atomically acquire execution ownership by transitioning to "running" only
+   * if the current status is in expectedStatuses. Unlike markStatus, this does
+   * NOT silently ignore terminal states — it returns {acquired: false} so the
+   * caller can short-circuit instead of proceeding with model/tool execution.
+   * This is the execution-lease gate that prevents cancelled runs from
+   * continuing to execute.
+   */
+  acquireExecution(
+    runId: string,
+    expectedStatuses: AgentLoopStatus[],
+  ): Promise<{ acquired: boolean; state: RunState }>;
   /** Persist task state for multi-turn resume/retry. */
   saveTaskState(
     runId: string,
@@ -74,6 +97,7 @@ export class InMemoryRunStateManager implements RunStateManager {
       status: 'created',
       mode: input.mode,
       goal: input.message,
+      input: inputSnapshot(input),
       createdAt: now,
       updatedAt: now,
     };
@@ -187,7 +211,33 @@ export class InMemoryRunStateManager implements RunStateManager {
   }
 
   async markCancelled(runId: string, reason?: string): Promise<RunState> {
-    return this.markStatus(runId, 'cancelled', reason ?? 'user cancelled');
+    return this.markStatus(runId, "cancelled", reason ?? "user cancelled");
+  }
+
+  async acquireExecution(
+    runId: string,
+    expectedStatuses: AgentLoopStatus[],
+  ): Promise<{ acquired: boolean; state: RunState }> {
+    const current = this.runs.get(runId);
+    if (!current) {
+      throw Object.assign(new Error(`Unknown run: ${runId}`), {
+        code: "AGENT_RUN_NOT_FOUND",
+      });
+    }
+    if (!expectedStatuses.includes(current.status as AgentLoopStatus)) {
+      return { acquired: false, state: current };
+    }
+    const now = new Date().toISOString();
+    const previousStatus = current.status;
+    const updated: RunState = {
+      ...current,
+      status: "running",
+      previousStatus,
+      updatedAt: now,
+    };
+    this.runs.set(runId, updated);
+    this.recordHistory(runId, previousStatus, "running", "acquireExecution");
+    return { acquired: true, state: updated };
   }
 
   async getRun(runId: string): Promise<RunState | undefined> {
@@ -241,4 +291,17 @@ export class InMemoryRunStateManager implements RunStateManager {
   }> {
     return this.history.filter((h) => h.runId === runId);
   }
+}
+
+function inputSnapshot(input: AgentLoopInput): NonNullable<RunState["input"]> {
+  return {
+    version: 1,
+    message: input.message,
+    attachments: input.attachments ?? [],
+    client: input.client,
+    permissionMode: input.permissionMode ?? "auto",
+    modelId: input.modelId,
+    mode: input.mode,
+    userMessageId: input.userMessageId,
+  };
 }

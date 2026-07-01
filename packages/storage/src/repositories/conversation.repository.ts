@@ -27,6 +27,8 @@ export interface ListConversationsInput {
 export interface ConversationRepository {
   create(input?: CreateConversationInput): Promise<ConversationRecord>;
   findById(id: string): Promise<ConversationRecord | null>;
+  /** Lock the conversation row for the duration of the current transaction. */
+  findByIdForUpdate(id: string): Promise<ConversationRecord | null>;
   list(input?: ListConversationsInput): Promise<ConversationRecord[]>;
   touch(id: string): Promise<void>;
   update(id: string, patch: UpdateConversationPatch): Promise<ConversationRecord | null>;

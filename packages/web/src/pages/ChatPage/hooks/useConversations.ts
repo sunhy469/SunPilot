@@ -19,6 +19,8 @@ export function useConversations(request: Request, enabled: boolean) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   /** True while messages are being fetched for the current conversation. */
   const [loadingMessages, setLoadingMessages] = useState(false);
+  const conversationsRef = useRef<Conversation[]>(conversations);
+  conversationsRef.current = conversations;
   const newChatRequestedRef = useRef(false);
   /** Track whether this is the initial load (no conversation has been selected yet) */
   const initialLoadRef = useRef(true);
@@ -119,19 +121,16 @@ export function useConversations(request: Request, enabled: boolean) {
         throw error;
       }
 
-      // W1: use the functional update form to compute remaining from the latest
-      // state (avoids stale `conversations` closure). The next active id is
-      // captured from the fresh list inside the updater.
-      let nextId = "";
-      setConversations((items) => {
-        const remaining = items.filter((item) => item.id !== id);
-        if (activeConversationId === id) {
-          nextId = remaining[0]?.id ?? "";
-        }
-        return remaining;
-      });
+      // Compute remaining from the ref mirror to avoid relying on React
+      // updater timing. Reading nextId from inside a setConversations updater
+      // is unsafe under concurrent rendering (the updater may be deferred).
+      const remaining = conversationsRef.current.filter(
+        (item) => item.id !== id,
+      );
+      setConversations(remaining);
 
       if (activeConversationId === id) {
+        const nextId = remaining[0]?.id ?? "";
         if (nextId) {
           // messages will be loaded by the activeConversationId useEffect
           setActiveConversationId(nextId);

@@ -1,4 +1,5 @@
 import type { ConversationRecord, MessageRecord } from "@sunpilot/storage";
+import type { RunStatus } from "@sunpilot/protocol";
 
 // ── 会话列表 ──────────────────────────────────────────────────────────
 
@@ -28,6 +29,14 @@ export interface HistoryMessageDto {
 export interface ListMessagesResult {
   conversationId: string;
   items: HistoryMessageDto[];
+}
+
+// ── 活跃 Run 查询（页面刷新恢复） ─────────────────────────────────────
+
+export interface ActiveRunResult {
+  runId: string;
+  status: RunStatus;
+  continuationKind: "approval" | "user_input" | "interrupted" | null;
 }
 
 // ── 更新 ──────────────────────────────────────────────────────────────

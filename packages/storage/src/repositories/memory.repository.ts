@@ -5,7 +5,11 @@ import type {
   RetrievedMemoryRecord,
 } from "@sunpilot/protocol";
 
-export type ListMemoryInput = MemorySearchInput;
+export type ListMemoryInput = MemorySearchInput & {
+  /** Cursor for keyset pagination. list() returns items strictly after this
+   *  cursor in the created_at DESC, id DESC sort order. */
+  afterCursor?: { createdAt: string; id: string };
+};
 export type UpdateMemoryInput = Partial<
   Pick<
     MemoryRecord,

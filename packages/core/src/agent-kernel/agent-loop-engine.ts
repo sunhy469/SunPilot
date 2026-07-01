@@ -80,8 +80,21 @@ export class AgentLoopEngine {
         { code: "AGENT_STREAM_SAVE_MESSAGE_REQUIRED" },
       );
     }
-    this.deps.traceManager?.startTrace(input.runId, input.conversationId);
+    const execution = await this.deps.runStateManager.acquireExecution(
+      input.runId,
+      ["created"],
+    );
+    if (!execution.acquired) {
+      return {
+        runId: input.runId,
+        conversationId: input.conversationId,
+        status: execution.state.status,
+        artifacts: [],
+        toolCalls: [],
+      };
+    }
 
+    this.deps.traceManager?.startTrace(input.runId, input.conversationId);
     const stream = new AssistantMessageStream({
       runId: input.runId,
       conversationId: input.conversationId,
@@ -90,19 +103,18 @@ export class AgentLoopEngine {
       saveMessage: this.deps.saveMessage,
       skipStartedEvents: true,
     });
-    this.deps.eventBus.emit(
-      "agent.message.started",
-      { runId: input.runId, conversationId: input.conversationId, messageId },
-      { runId: input.runId, conversationId: input.conversationId },
-    );
-    stream.start();
-    const preparingStatus = stream.startStatus({
-      label: "正在分析需求…",
-      metadata: { phase: "running" },
-    });
 
     try {
-      await this.deps.runStateManager.markStatus(input.runId, "running");
+      this.deps.eventBus.emit(
+        "agent.message.started",
+        { runId: input.runId, conversationId: input.conversationId, messageId },
+        { runId: input.runId, conversationId: input.conversationId },
+      );
+      stream.start();
+      const preparingStatus = stream.startStatus({
+        label: "正在分析需求…",
+        metadata: { phase: "running" },
+      });
       this.deps.eventBus.emit(
         "agent.run.started",
         { runId: input.runId, conversationId: input.conversationId },
@@ -208,6 +220,7 @@ export class AgentLoopEngine {
         runId: input.runId,
         conversationId: input.conversationId,
         assistantMessageId: completed.messageId,
+        assistantContent: completed.content,
         status: "completed",
         artifacts: result.artifacts,
         toolCalls: result.toolCalls,

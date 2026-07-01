@@ -73,8 +73,28 @@ export const MAX_RETRIES = 2;
 /** Max repair attempts for argument validation failures. */
 export const MAX_REPAIR_ATTEMPTS = 2;
 
-/** Transient error patterns that can be retried. */
+/** Structured error codes that are safe to retry for idempotent/readonly tools. */
+export const RETRYABLE_ERROR_CODES = new Set([
+  "TIMEOUT",
+  "ETIMEDOUT",
+  "ECONNREFUSED",
+  "ENOTFOUND",
+  "TRANSIENT",
+  "DEADLOCK",
+  "SERIALIZATION_FAILURE",
+  "RATE_LIMITED",
+  "SERVICE_UNAVAILABLE",
+  "503",
+  "502",
+]);
+
+/**
+ * Determines if an error is retryable. Prefers structured error codes;
+ * falls back to message regex for errors without a `code` property.
+ */
 export function isRetryable(error: unknown): boolean {
+  const code = (error as { code?: string })?.code;
+  if (code && RETRYABLE_ERROR_CODES.has(code)) return true;
   const message =
     error instanceof Error ? error.message : String(error);
   return (

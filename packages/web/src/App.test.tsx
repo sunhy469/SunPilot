@@ -3,6 +3,12 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { App } from "./app/App";
 
+let activeRunResponse: {
+  runId: string;
+  status: string;
+  continuationKind: "approval" | "user_input" | "interrupted" | null;
+} | null = null;
+
 class FakeWebSocket extends EventTarget {
   static OPEN = 1;
   static CONNECTING = 0;
@@ -262,6 +268,7 @@ describe("Web ChatPage", () => {
     FakeWebSocket.holdCompletion = false;
     FakeWebSocket.askForInput = false;
     FakeWebSocket.closeBeforeOpen = false;
+    activeRunResponse = null;
     vi.stubGlobal("WebSocket", FakeWebSocket);
     vi.stubGlobal(
       "fetch",
@@ -281,6 +288,18 @@ describe("Web ChatPage", () => {
         }
         if (path === "/v1/conversations/conv_1/messages") {
           return Response.json({ conversationId: "conv_1", items: [] });
+        }
+        if (path === "/v1/conversations/conv_1") {
+          return Response.json({
+            id: "conv_1",
+            title: "Existing Chat",
+            status: "active",
+            createdAt: "2026-06-05T00:00:00.000Z",
+            updatedAt: "2026-06-05T00:00:00.000Z",
+          });
+        }
+        if (path === "/v1/conversations/conv_1/active-run") {
+          return Response.json(activeRunResponse);
         }
         return Response.json({ ok: true });
       }),
@@ -376,6 +395,40 @@ describe("Web ChatPage", () => {
           params: expect.objectContaining({
             runId: "run_1",
             message: "补充路径 /tmp/report.md",
+          }),
+        }),
+      ]),
+    );
+  });
+
+  test("restores a waiting-user run after selecting its conversation", async () => {
+    activeRunResponse = {
+      runId: "run_waiting",
+      status: "waiting_user",
+      continuationKind: "user_input",
+    };
+    render(<App />);
+
+    const conversationItems = await screen.findAllByText("Existing Chat");
+    await userEvent.click(conversationItems[0]!);
+    await waitFor(() =>
+      expect(fetch).toHaveBeenCalledWith(
+        "/v1/conversations/conv_1/active-run",
+        expect.anything(),
+      ),
+    );
+
+    const textbox = await screen.findByRole("textbox", { name: "Message" });
+    await userEvent.type(textbox, "继续处理");
+    await userEvent.click(screen.getByRole("button", { name: "发送" }));
+
+    expect(FakeWebSocket.instances[0]?.sent).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          method: "run.resume",
+          params: expect.objectContaining({
+            runId: "run_waiting",
+            message: "继续处理",
           }),
         }),
       ]),

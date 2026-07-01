@@ -721,7 +721,9 @@ export class AgentServiceImplementation {
   }> {
     const run = await this.loopConfig.runStateManager.getRun(runId);
     if (run?.status === "waiting_user") {
-      if (!userMessage?.trim()) {
+      // §P1-02: Allow attachment-only resume — message may be empty when
+      // at least one attachment is present (mirrors chatSendSchema).
+      if (!userMessage?.trim() && !(attachments && attachments.length > 0)) {
         throw Object.assign(
           new Error(`Run ${runId} is waiting for user input`),
           {
@@ -734,7 +736,7 @@ export class AgentServiceImplementation {
       const releaseResume = this.acquireResume(runId);
       try {
         const signal = this.loopConfig.abortRegistry.create(runId);
-        const message = userMessage.trim();
+        const message = userMessage?.trim() ?? "";
         assertUsableImageAttachments({ message, attachments });
         const userMessageId = `msg_${crypto.randomUUID()}`;
         await this.loopConfig.conversations?.createMessage({
@@ -944,7 +946,7 @@ export class AgentServiceImplementation {
     approvalId: string,
     decidedBy?: string,
     reason?: string,
-    rejectionStrategy: "cancel" | "interrupt" | "continue_without_tool" = "continue_without_tool",
+    rejectionStrategy: "cancel" | "interrupt" | "continue_without_tool" = "interrupt",
   ): Promise<{ rejected: boolean; runId: string; strategy: string }> {
     const approval = this.loopConfig.approvalDecisionService
       ? await this.loopConfig.approvalDecisionService.reject(
@@ -1197,10 +1199,21 @@ export class AgentServiceImplementation {
 
     // §5.3: Preserve original attachments on retry/resume so image search
     // tools have access to previously uploaded image references. The source
-    // run stores { message, attachments, client } in its input field.
-    // RunRecord has `.input`, RunState does not — only extract when available.
+    // run stores { message, attachments, client, permissionMode, modelId, mode }
+    // in its input field. RunRecord has `.input`, RunState does not — only
+    // extract when available.
+    // §P1-03: Also inherit permissionMode and modelId so retry/resume
+    // preserves the original model and approval semantics.
     const sourceInput = (sourceRun as { input?: unknown }).input;
     const sourceAttachments = extractAttachments(sourceInput);
+    const sourceInputRecord = (sourceInput ?? {}) as {
+      permissionMode?: "ask" | "auto" | "full";
+      modelId?: "dp" | "seed";
+      client?: {
+        source: "web" | "cli" | "api";
+        connectionId?: string;
+      };
+    };
 
     const result = await this.handleChatCommand(
       {
@@ -1208,8 +1221,10 @@ export class AgentServiceImplementation {
         message,
         mode,
         attachments: sourceAttachments,
+        permissionMode: sourceInputRecord.permissionMode,
+        modelId: sourceInputRecord.modelId,
       },
-      { source: "api" },
+      sourceInputRecord.client ?? { source: "api" },
     );
 
     await this.recordAttemptLink({

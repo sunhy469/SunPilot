@@ -36,6 +36,23 @@ describe("createPersistenceLayer", () => {
     expect(seen.length).toBe(1);
     // Persisted events gain a DB sequence number
     expect(seen[0]?.sequence).not.toBeUndefined();
+    await expect(db.events.listOutbox?.()).resolves.toEqual([]);
+  });
+
+  test("replays a durable outbox event after persistence-layer restart", async () => {
+    const db = new InMemoryDatabaseContext();
+    const event = makeEvent({ type: "agent.run.completed" });
+    await db.events.enqueueOutbox?.(event);
+
+    const layer = createPersistenceLayer({ database: db });
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+
+    await expect(db.events.listByRunId("run_test")).resolves.toEqual([
+      expect.objectContaining({ id: event.id, sequence: expect.any(Number) }),
+    ]);
+    await expect(db.events.listOutbox?.()).resolves.toEqual([]);
+    layer.stop();
   });
 
   test("forwards already-persisted events directly without re-persisting", async () => {

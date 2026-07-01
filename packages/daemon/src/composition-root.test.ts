@@ -560,7 +560,7 @@ describe("createAgentLoopService", () => {
     );
     expect(result.status).toBe("waiting_approval");
     const [approval] = await db.approvals.list();
-    await service.reject(approval!.id, "tester", "not now");
+    await service.reject(approval!.id, "tester", "not now", "continue_without_tool");
     await new Promise((resolve) => setTimeout(resolve, 50));
     await waitFor(async () =>
       (await db.runs.findById(result.runId))?.status === "completed",

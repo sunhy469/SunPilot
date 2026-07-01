@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
-import { createRequest } from "./client";
+import { createRawRequest, createRequest } from "./client";
 
 describe("createRequest", () => {
   afterEach(() => {
@@ -49,5 +49,20 @@ describe("createRequest", () => {
     const headers = new Headers(fetchMock.mock.calls[0]?.[1]?.headers);
     expect(headers.get("Authorization")).toBe(`Bearer ${token}`);
     expect(window.location.hash).toBe("");
+  });
+
+  test("adds the local bearer token to raw artifact content requests", async () => {
+    const token = "c".repeat(64);
+    window.sessionStorage.setItem("sunpilot.localToken", token);
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(new Response("artifact body"));
+
+    await expect(
+      createRawRequest()("/v1/artifacts/artifact_1/content"),
+    ).resolves.toBe("artifact body");
+
+    const headers = new Headers(fetchMock.mock.calls[0]?.[1]?.headers);
+    expect(headers.get("Authorization")).toBe(`Bearer ${token}`);
   });
 });

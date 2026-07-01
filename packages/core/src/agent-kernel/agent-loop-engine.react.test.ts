@@ -33,6 +33,61 @@ const context: AgentContext = {
 };
 
 describe("AgentLoopEngine ReAct integration", () => {
+  test("does not enter the model loop when start loses execution ownership to cancel", async () => {
+    const runState = new InMemoryRunStateManager();
+    const reactLoopRunner = { run: vi.fn() };
+    const saved: unknown[] = [];
+    const engine = createEngine(runState, reactLoopRunner, saved);
+    await runState.createRun(input);
+    await runState.markCancelled(input.runId);
+
+    const result = await engine.run(input, new AbortController().signal);
+
+    expect(result.status).toBe("cancelled");
+    expect(reactLoopRunner.run).not.toHaveBeenCalled();
+    expect(saved).toEqual([]);
+  });
+
+  test("does not resume a waiting_user run cancelled before execution acquisition", async () => {
+    const runState = new InMemoryRunStateManager();
+    const existing = checkpoint("msg_existing");
+    await runState.createRun(input);
+    await runState.markStatus(input.runId, "running");
+    await runState.saveTaskState(input.runId, {
+      goal: "waiting for user",
+      completedSteps: [],
+      pendingSteps: [],
+      gatheredFacts: { reactCheckpoint: existing },
+      openQuestions: [],
+      iteration: 0,
+    });
+    await runState.markStatus(input.runId, "waiting_user");
+    const acquireExecution = runState.acquireExecution.bind(runState);
+    vi.spyOn(runState, "acquireExecution").mockImplementationOnce(
+      async (runId, expectedStatuses) => {
+        await runState.markCancelled(runId);
+        return acquireExecution(runId, expectedStatuses);
+      },
+    );
+    const reactLoopRunner = {
+      run: vi.fn(),
+      resumeWithUserInput: vi.fn(),
+    };
+    const buildContext = vi.fn(async () => context);
+    const engine = createEngine(runState, reactLoopRunner, [], [], {
+      contextBuilder: { build: buildContext },
+    });
+
+    const result = await engine.resumeWithUserInput(
+      { runId: input.runId, message: "answer" },
+      new AbortController().signal,
+    );
+
+    expect(result.status).toBe("cancelled");
+    expect(buildContext).not.toHaveBeenCalled();
+    expect(reactLoopRunner.resumeWithUserInput).not.toHaveBeenCalled();
+  });
+
   test("routes every request through ReactLoopRunner and completes one stream", async () => {
     const runState = new InMemoryRunStateManager();
     const saved: Array<{ id: string; content: string; metadata?: Record<string, unknown> }> = [];
@@ -372,6 +427,8 @@ function plannedCall(): PlannedToolCall {
     riskLevel: "high",
     requiresApproval: true,
     timeoutMs: 1_000,
+    idempotent: false,
+    sideEffects: "destructive",
   };
 }
 

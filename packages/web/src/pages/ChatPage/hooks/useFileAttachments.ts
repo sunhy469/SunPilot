@@ -169,6 +169,10 @@ export function useFileAttachments() {
     setFiles([]);
   }, []);
 
+  const restoreFiles = useCallback((snapshot: UploadFile[]) => {
+    setFiles(snapshot);
+  }, []);
+
   // ── Convert for sending ──────────────────────────────────────────
 
   const toAttachmentRefs = useCallback((): AttachmentRef[] => {
@@ -185,6 +189,7 @@ export function useFileAttachments() {
     addFilesFromPaste,
     removeFile,
     clearFiles,
+    restoreFiles,
     toAttachmentRefs,
   };
 }

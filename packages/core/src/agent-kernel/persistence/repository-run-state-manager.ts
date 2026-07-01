@@ -36,9 +36,14 @@ export class RepositoryRunStateManager implements RunStateManager {
       createdAt: now,
       updatedAt: now,
       input: {
+        version: 1,
         message: input.message,
         attachments: input.attachments ?? [],
         client: input.client,
+        permissionMode: input.permissionMode ?? "auto",
+        modelId: input.modelId,
+        mode: input.mode,
+        userMessageId: input.userMessageId,
       },
       context: {
         agentStatus: "created",
@@ -229,6 +234,83 @@ export class RepositoryRunStateManager implements RunStateManager {
     return this.markStatus(runId, "cancelled", reason ?? "user cancelled");
   }
 
+  async acquireExecution(
+    runId: string,
+    expectedStatuses: AgentLoopStatus[],
+  ): Promise<{ acquired: boolean; state: RunState }> {
+    const run = await this.requireRun(runId);
+    const currentStatus = run.status as AgentLoopStatus;
+
+    if (!expectedStatuses.includes(currentStatus)) {
+      return { acquired: false, state: mapRunToState(run) };
+    }
+
+    const now = new Date().toISOString();
+    const statusHistory = truncateStatusHistory([
+      ...statusHistoryFrom(run),
+      {
+        previousStatus: currentStatus,
+        nextStatus: "running",
+        reason: "acquireExecution",
+        actor: AuditActor.System,
+        createdAt: now,
+      },
+    ]);
+
+    const writeAll = async (db: DatabaseContext): Promise<boolean> => {
+      if (db.runs.updateStatusIfInSet) {
+        const acquired = await db.runs.updateStatusIfInSet(
+          runId,
+          expectedStatuses,
+          { status: "running", updatedAt: now },
+        );
+        if (!acquired) return false;
+      } else {
+        let acquired = false;
+        for (const expected of expectedStatuses) {
+          if (db.runs.updateStatusIfCurrent) {
+            acquired = await db.runs.updateStatusIfCurrent(
+              runId,
+              expected,
+              { status: "running", updatedAt: now },
+            );
+            if (acquired) break;
+          }
+        }
+        if (!acquired) {
+          const fresh = await db.runs.findById(runId);
+          if (!fresh) throw unknownRun(runId);
+          return false;
+        }
+      }
+      const contextPatch = {
+        agentStatus: "running",
+        statusHistory,
+      };
+      if (db.runs.patchContext) await db.runs.patchContext(runId, contextPatch);
+      else await db.runs.updateContext(runId, { ...run.context, ...contextPatch });
+      await db.runStatusHistory.append({
+        runId,
+        previousStatus: currentStatus,
+        nextStatus: "running",
+        reason: "acquireExecution",
+        actor: AuditActor.System,
+        createdAt: now,
+      });
+      return true;
+    };
+
+    let acquired: boolean;
+    if (this.db.transaction) {
+      acquired = await this.db.transaction(writeAll);
+    } else {
+      acquired = await writeAll(this.db);
+    }
+
+    const freshRun = await this.requireRun(runId);
+    return { acquired, state: mapRunToState(freshRun) };
+  }
+
   async getRun(runId: string): Promise<RunState | undefined> {
     const run = await this.db.runs.findById(runId);
     return run ? mapRunToState(run) : undefined;
@@ -286,12 +368,35 @@ function mapRunToState(run: RunRecord): RunState {
     previousStatus: lastTransition?.previousStatus as AgentLoopStatus | undefined,
     mode: run.mode,
     goal: run.goal,
+    input: normalizeInputSnapshot(run.input),
     error: normalizeError(run.error),
     taskState,
     createdAt: run.createdAt,
     updatedAt: run.updatedAt,
     completedAt: run.completedAt,
     cancelledAt: run.cancelledAt,
+  };
+}
+
+function normalizeInputSnapshot(input: unknown): RunState["input"] {
+  if (!input || typeof input !== "object") return undefined;
+  const value = input as Partial<NonNullable<RunState["input"]>>;
+  if (
+    typeof value.message !== "string" ||
+    !value.client ||
+    (value.mode !== "chat" && value.mode !== "agent")
+  ) {
+    return undefined;
+  }
+  return {
+    version: 1,
+    message: value.message,
+    attachments: Array.isArray(value.attachments) ? value.attachments : [],
+    client: value.client,
+    permissionMode: value.permissionMode ?? "auto",
+    modelId: value.modelId,
+    mode: value.mode,
+    userMessageId: value.userMessageId ?? "",
   };
 }
 
