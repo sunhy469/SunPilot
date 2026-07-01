@@ -111,7 +111,19 @@ describe("AgentLoopEngine ReAct integration", () => {
     const result = await engine.run(input, new AbortController().signal);
 
     expect(result.status).toBe("waiting_user");
-    expect(saved).toHaveLength(0);
+    expect(saved).toEqual([
+      expect.objectContaining({
+        metadata: expect.objectContaining({
+          parts: expect.arrayContaining([
+            expect.objectContaining({
+              type: "status",
+              status: "running",
+              label: "等待你补充信息",
+            }),
+          ]),
+        }),
+      }),
+    ]);
     await expect(runState.getRun(input.runId)).resolves.toEqual(
       expect.objectContaining({ status: "waiting_user" }),
     );
@@ -215,6 +227,47 @@ describe("AgentLoopEngine ReAct integration", () => {
     expect(result.status).toBe("waiting_user");
     expect(clearSafetyState).not.toHaveBeenCalled();
   });
+
+  test("fails the run when continuation context preparation fails", async () => {
+    const runState = new InMemoryRunStateManager();
+    const existing = checkpoint("msg_existing");
+    await runState.createRun(input);
+    await runState.markStatus(input.runId, "running");
+    await runState.saveTaskState(input.runId, {
+      goal: "waiting for user",
+      completedSteps: [],
+      pendingSteps: [],
+      gatheredFacts: { reactCheckpoint: existing },
+      openQuestions: [],
+      iteration: 0,
+    });
+    await runState.markStatus(input.runId, "waiting_user");
+    const engine = createEngine(runState, {
+      run: vi.fn(),
+      resumeWithUserInput: vi.fn(),
+    }, [], [], {
+      contextBuilder: {
+        async build() {
+          throw Object.assign(new Error("context unavailable"), {
+            code: "AGENT_CONTEXT_FAILED",
+          });
+        },
+      },
+    });
+
+    const result = await engine.resumeWithUserInput(
+      { runId: input.runId, message: "answer" },
+      new AbortController().signal,
+    );
+
+    expect(result.status).toBe("failed");
+    await expect(runState.getRun(input.runId)).resolves.toEqual(
+      expect.objectContaining({
+        status: "failed",
+        error: expect.objectContaining({ code: "AGENT_CONTEXT_FAILED" }),
+      }),
+    );
+  });
 });
 
 function createEngine(
@@ -230,10 +283,13 @@ function createEngine(
       writeFromTurn: ReturnType<typeof vi.fn>;
     };
     clearSafetyState?: ReturnType<typeof vi.fn>;
+    contextBuilder?: {
+      build: () => Promise<AgentContext>;
+    };
   },
 ) {
   return new AgentLoopEngine({
-    contextBuilder: { async build() { return context; } },
+    contextBuilder: options?.contextBuilder ?? { async build() { return context; } },
     reactLoopRunner: reactLoopRunner as never,
     executionOrchestrator: {
       async execute() { throw new Error("execution must be owned by the runner"); },

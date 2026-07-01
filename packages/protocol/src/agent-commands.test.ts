@@ -6,6 +6,7 @@ import {
   approvalDecideSchema,
   approvalRejectSchema,
   runCancelSchema,
+  runResumeSchema,
 } from "./agent-commands.js";
 import { skillManifestSchema } from "./schemas.js";
 
@@ -140,6 +141,38 @@ describe("runCancelSchema", () => {
     expect(runCancelSchema.safeParse({}).success).toBe(false);
     expect(runCancelSchema.safeParse({ runId: "" }).success).toBe(false);
     expect(runCancelSchema.parse({ runId: "run_1" }).runId).toBe("run_1");
+  });
+});
+
+describe("runResumeSchema", () => {
+  test("accepts checkpoint input with attachments", () => {
+    const result = runResumeSchema.parse({
+      runId: "run_1",
+      message: "  补充图片  ",
+      attachments: [{
+        id: "image_1",
+        name: "sample.png",
+        type: "image/png",
+        url: "https://example.com/sample.png",
+      }],
+    });
+    expect(result.message).toBe("补充图片");
+    expect(result.attachments).toHaveLength(1);
+  });
+
+  test("rejects blank input and oversized inline attachment data", () => {
+    expect(runResumeSchema.safeParse({ runId: "run_1", message: "   " }).success)
+      .toBe(false);
+    expect(runResumeSchema.safeParse({
+      runId: "run_1",
+      message: "image",
+      attachments: [{
+        id: "image_1",
+        name: "sample.png",
+        type: "image/png",
+        dataUrl: "x".repeat(4 * 1024 * 1024 + 1),
+      }],
+    }).success).toBe(false);
   });
 });
 

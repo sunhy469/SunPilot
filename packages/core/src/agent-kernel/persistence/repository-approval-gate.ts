@@ -68,6 +68,13 @@ export class RepositoryApprovalGate implements ApprovalGateInterface {
     messageId?: string;
   }> {
     const approval = await this.requirePendingApproval(approvalId);
+    const requestedAction = normalizeRequestedAction(approval.requestedAction);
+    if (!requestedAction) {
+      throw Object.assign(
+        new Error(`Approval ${approvalId} does not include a resumable action`),
+        { code: "AGENT_APPROVAL_NOT_RESUMABLE" },
+      );
+    }
     // §B3: `decide` enforces `WHERE status='pending'` atomically; if it returns
     // null the approval was decided concurrently between our findById check
     // and this UPDATE — surface that as ALREADY_DECIDED instead of silently
@@ -94,7 +101,6 @@ export class RepositoryApprovalGate implements ApprovalGateInterface {
         requestedAction: approval.requestedAction,
       },
     });
-    const requestedAction = normalizeRequestedAction(approval.requestedAction);
     return {
       approvalId,
       runId: decided?.runId ?? approval.runId,
@@ -159,6 +165,11 @@ export class RepositoryApprovalGate implements ApprovalGateInterface {
         new Error(`Approval is already ${approval.status}: ${approvalId}`),
         { code: "AGENT_APPROVAL_ALREADY_DECIDED" },
       );
+    }
+    if (approval.expiresAt && Date.parse(approval.expiresAt) <= Date.now()) {
+      throw Object.assign(new Error(`Approval has expired: ${approvalId}`), {
+        code: "AGENT_APPROVAL_EXPIRED",
+      });
     }
     return approval;
   }

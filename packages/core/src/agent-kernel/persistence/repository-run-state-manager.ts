@@ -108,16 +108,22 @@ export class RepositoryRunStateManager implements RunStateManager {
     // sequential path when the underlying database does not expose a
     // transaction helper.
     const writeAll = async (db: DatabaseContext): Promise<void> => {
-      await db.runs.updateStatus(runId, {
+      const statusUpdate = {
         status: nextStatus,
         updatedAt: now,
         ...(isTerminal(nextStatus) ? { completedAt: now } : {}),
-      });
-      await db.runs.updateContext(runId, {
-        ...run.context,
+        ...(nextStatus === "cancelled" ? { cancelledAt: now } : {}),
+      };
+      const updated = db.runs.updateStatusIfCurrent
+        ? await db.runs.updateStatusIfCurrent(runId, currentStatus, statusUpdate)
+        : (await db.runs.updateStatus(runId, statusUpdate), true);
+      if (!updated) throw stateConflict(runId, currentStatus, nextStatus);
+      const contextPatch = {
         agentStatus: nextStatus,
         statusHistory,
-      });
+      };
+      if (db.runs.patchContext) await db.runs.patchContext(runId, contextPatch);
+      else await db.runs.updateContext(runId, { ...run.context, ...contextPatch });
       await db.runStatusHistory.append({
         runId,
         previousStatus: currentStatus,
@@ -179,17 +185,22 @@ export class RepositoryRunStateManager implements RunStateManager {
     ]);
 
     const writeAll = async (db: DatabaseContext): Promise<void> => {
-      await db.runs.updateStatus(runId, {
+      const statusUpdate = {
         status: "failed",
         updatedAt: now,
         completedAt: now,
         error: agentError,
-      });
-      await db.runs.updateContext(runId, {
-        ...run.context,
+      } as const;
+      const updated = db.runs.updateStatusIfCurrent
+        ? await db.runs.updateStatusIfCurrent(runId, currentStatus, statusUpdate)
+        : (await db.runs.updateStatus(runId, statusUpdate), true);
+      if (!updated) throw stateConflict(runId, currentStatus, "failed");
+      const contextPatch = {
         agentStatus: "failed",
         statusHistory,
-      });
+      };
+      if (db.runs.patchContext) await db.runs.patchContext(runId, contextPatch);
+      else await db.runs.updateContext(runId, { ...run.context, ...contextPatch });
       await db.runStatusHistory.append({
         runId,
         previousStatus: currentStatus,
@@ -228,11 +239,12 @@ export class RepositoryRunStateManager implements RunStateManager {
     taskState: NonNullable<RunState["taskState"]>,
   ): Promise<void> {
     const run = await this.db.runs.findById(runId);
-    if (!run) return;
-    await this.db.runs.updateContext(runId, {
-      ...run.context,
-      taskState,
-    });
+    if (!run) throw unknownRun(runId);
+    if (this.db.runs.patchContext) {
+      await this.db.runs.patchContext(runId, { taskState });
+    } else {
+      await this.db.runs.updateContext(runId, { ...run.context, taskState });
+    }
   }
 
   private async requireRun(runId: string): Promise<RunRecord> {
@@ -244,6 +256,23 @@ export class RepositoryRunStateManager implements RunStateManager {
     }
     return run;
   }
+}
+
+function unknownRun(runId: string): Error {
+  return Object.assign(new Error(`Unknown run: ${runId}`), {
+    code: "AGENT_RUN_NOT_FOUND",
+  });
+}
+
+function stateConflict(
+  runId: string,
+  expected: AgentLoopStatus,
+  next: AgentLoopStatus,
+): Error {
+  return Object.assign(
+    new Error(`Concurrent state transition conflict: expected ${expected} before ${next} for run ${runId}`),
+    { code: "AGENT_RUN_STATE_CONFLICT" },
+  );
 }
 
 function mapRunToState(run: RunRecord): RunState {

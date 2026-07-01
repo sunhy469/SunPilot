@@ -82,6 +82,10 @@ export class PostgresApprovalRepository implements ApprovalRepository {
       values.push(input.runId);
       conditions.push(`run_id = $${values.length}`);
     }
+    if (input.expiresBefore) {
+      values.push(input.expiresBefore);
+      conditions.push(`expires_at IS NOT NULL AND expires_at <= $${values.length}`);
+    }
     values.push(limit);
     const result = await this.pool.query(
       `SELECT id, run_id, step_id, status, risk, title, reason, requested_action,

@@ -93,6 +93,8 @@ export interface AssistantErrorPart {
 
 export interface ChatMessage {
   id: string;
+  /** Agent run that owns this assistant message (set by message.started). */
+  runId?: string;
   conversationId: string;
   role: "system" | "user" | "assistant";
   content: string;

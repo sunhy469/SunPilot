@@ -28,6 +28,10 @@ describe("ToolCallGuard", () => {
     ["unknown tool", call("unknown", "missing", '{}')],
     ["malformed JSON", call("bad_json", "test_search", "{")],
     ["schema failure", call("bad_schema", "test_search", '{}')],
+    [
+      "unsafe object key",
+      call("unsafe_key", "test_search", '{"query":"x","__proto__":{}}'),
+    ],
   ])("returns an Observation for %s", async (_name, toolCall) => {
     const { guard, permission } = createGuard();
     const result = await check(guard, [toolCall]);

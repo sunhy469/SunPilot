@@ -267,6 +267,7 @@ export class ContextAssemblyPipeline {
                 message: "对话历史加载失败，回答可能缺少上下文。",
                 category: "internal",
                 retryable: true,
+                fatal: false,
               },
               { runId: input.runId, conversationId: input.conversationId },
             );
@@ -863,6 +864,7 @@ export class ContextAssemblyPipeline {
               message: `Memory search failed: ${err instanceof Error ? err.message : String(err)}`,
               category: "context",
               retryable: true,
+              fatal: false,
             } as any, {} as any);
           }
         }
@@ -1043,6 +1045,7 @@ export class ContextAssemblyPipeline {
           message: `Context building failed: ${err instanceof Error ? err.message : String(err)}`,
           category: "context",
           retryable: true,
+          fatal: false,
         } as any, {} as any);
       }
     }

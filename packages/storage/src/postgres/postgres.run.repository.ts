@@ -122,6 +122,43 @@ export class PostgresRunRepository implements RunRepository {
     );
   }
 
+  async updateStatusIfCurrent(
+    id: string,
+    expectedStatus: RunStatus,
+    input: {
+      status: RunStatus;
+      updatedAt?: string;
+      completedAt?: string;
+      cancelledAt?: string;
+      error?: unknown;
+    },
+  ): Promise<boolean> {
+    const sets = [
+      "status = $1",
+      "updated_at = COALESCE($2, NOW())",
+      "completed_at = COALESCE($3, completed_at)",
+      "cancelled_at = COALESCE($4, cancelled_at)",
+    ];
+    const values: unknown[] = [
+      input.status,
+      input.updatedAt ?? null,
+      input.completedAt ?? null,
+      input.cancelledAt ?? null,
+    ];
+    if (input.error !== undefined) {
+      sets.push(`error = $${values.length + 1}::jsonb`);
+      values.push(JSON.stringify(input.error));
+    }
+    values.push(id, expectedStatus);
+    const result = await this.pool.query(
+      `UPDATE runs SET ${sets.join(", ")}
+       WHERE id = $${values.length - 1} AND status = $${values.length}
+       RETURNING id`,
+      values,
+    );
+    return result.rows.length === 1;
+  }
+
   async updateContext(
     id: string,
     context: Record<string, unknown>,
@@ -129,6 +166,13 @@ export class PostgresRunRepository implements RunRepository {
     await this.pool.query(
       "UPDATE runs SET context = $1::jsonb, updated_at = NOW() WHERE id = $2",
       [JSON.stringify(context), id],
+    );
+  }
+
+  async patchContext(id: string, patch: Record<string, unknown>): Promise<void> {
+    await this.pool.query(
+      "UPDATE runs SET context = context || $1::jsonb, updated_at = NOW() WHERE id = $2",
+      [JSON.stringify(patch), id],
     );
   }
 }

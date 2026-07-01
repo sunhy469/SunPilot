@@ -35,6 +35,8 @@ interface OpenAIChatStreamChunk {
   }>;
 }
 
+const MAX_SSE_EVENT_BUFFER_CHARS = 2 * 1024 * 1024;
+
 /**
  * OpenAI 兼容 Chat Provider — 通过 OpenAI-compatible API 提供 LLM 流式调用。
  *
@@ -125,13 +127,27 @@ export class OpenAICompatibleChatProvider implements LlmProvider {
       );
     }
 
+    let terminalSeen = false;
     for await (const data of parseOpenAIStream(response.body)) {
-      if (data === "[DONE]") return;
+      if (data === "[DONE]") {
+        terminalSeen = true;
+        break;
+      }
       let raw: unknown;
       try {
         raw = JSON.parse(data);
-      } catch {
-        continue; // Skip corrupted SSE events
+      } catch (error) {
+        throw new Error(
+          `LLM stream contained malformed JSON: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      }
+      if (raw && typeof raw === "object" && "error" in raw) {
+        const providerError = (raw as { error?: unknown }).error;
+        throw new Error(
+          `LLM stream returned an error payload: ${JSON.stringify(providerError)}`,
+        );
       }
       const chunk = raw as OpenAIChatStreamChunk;
       for (const choice of chunk.choices ?? []) {
@@ -141,8 +157,13 @@ export class OpenAICompatibleChatProvider implements LlmProvider {
         // Build delta: include text if present, tool_calls if present
         const delta: ChatCompletionDelta = {
           delta: typeof textDelta === "string" ? textDelta : "",
+          finishReason:
+            typeof choice.finish_reason === "string"
+              ? choice.finish_reason
+              : undefined,
           raw,
         };
+        if (delta.finishReason) terminalSeen = true;
 
         if (toolCallsDelta && toolCallsDelta.length > 0) {
           delta.toolCalls = toolCallsDelta.map((tc) => ({
@@ -154,10 +175,15 @@ export class OpenAICompatibleChatProvider implements LlmProvider {
         }
 
         // Yield if there's text content or tool calls
-        if (delta.delta.length > 0 || delta.toolCalls) {
+        if (delta.delta.length > 0 || delta.toolCalls || delta.finishReason) {
           yield delta;
         }
       }
+    }
+    if (!terminalSeen) {
+      throw new Error(
+        "LLM streaming response ended without [DONE] or a terminal finish_reason.",
+      );
     }
   }
 }
@@ -174,6 +200,9 @@ async function* parseOpenAIStream(
       const { done, value } = await reader.read();
       if (done) break;
       buffer += decoder.decode(value, { stream: true });
+      if (buffer.length > MAX_SSE_EVENT_BUFFER_CHARS) {
+        throw new Error("LLM SSE event exceeded the runtime buffer limit.");
+      }
       const events = buffer.split(/\r?\n\r?\n/);
       buffer = events.pop() ?? "";
       for (const event of events) {

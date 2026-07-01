@@ -55,6 +55,7 @@ export class RunOutcomeCoordinator {
         message: agentError.message,
         category: agentError.category,
         retryable: agentError.retryable,
+        fatal: true,
       },
       { runId, conversationId },
     );
@@ -114,6 +115,7 @@ export class RunOutcomeCoordinator {
           message: err.message,
           category: "memory",
           retryable: true,
+          fatal: false,
         },
         {
           runId: input.input.runId,

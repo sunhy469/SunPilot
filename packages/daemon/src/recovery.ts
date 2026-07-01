@@ -1,5 +1,9 @@
 import type { RunRecord, RunStatus } from "@sunpilot/protocol";
 import type { DatabaseContext } from "@sunpilot/storage";
+import {
+  parseReactCheckpoint,
+  RepositoryRunStateManager,
+} from "@sunpilot/core";
 
 const AGENT_RECOVERY_INTERRUPT_STATUSES: readonly RunStatus[] = [
   "running",
@@ -27,18 +31,34 @@ export async function recoverAgentRuntimeRuns(
   const failedRuns: string[] = [];
   const snapshottedApprovals: string[] = [];
 
+  for (const run of await listAllRuns(database, "created")) {
+    await failRecoveredRun(
+      database,
+      run,
+      Object.assign(
+        new Error("Daemon restarted before the run entered execution."),
+        { code: "AGENT_RECOVERY_NOT_STARTED" },
+      ),
+      now,
+    );
+    recoveredRuns.push(run.id);
+    failedRuns.push(run.id);
+  }
+
   for (const status of AGENT_RECOVERY_INTERRUPT_STATUSES) {
-    for (const run of await database.runs.list({ status, limit: 200 })) {
-      await interruptRecoveredRun(database, run, now);
+    for (const run of await listAllRuns(database, status)) {
+      try {
+        await interruptRecoveredRun(database, run, now);
+        interruptedRuns.push(run.id);
+      } catch (error) {
+        await failRecoveredRun(database, run, error, now);
+        failedRuns.push(run.id);
+      }
       recoveredRuns.push(run.id);
-      interruptedRuns.push(run.id);
     }
   }
 
-  for (const run of await database.runs.list({
-    status: "waiting_approval",
-    limit: 200,
-  })) {
+  for (const run of await listAllRuns(database, "waiting_approval")) {
     const approvals = await database.approvals.list({
       runId: run.id,
       status: "pending",
@@ -61,7 +81,39 @@ export async function recoverAgentRuntimeRuns(
       });
       snapshottedApprovals.push(approval.id);
     }
-    if (approvals.length > 0) recoveredRuns.push(run.id);
+    if (approvals.length > 0) {
+      recoveredRuns.push(run.id);
+    } else {
+      await failRecoveredRun(
+        database,
+        run,
+        Object.assign(
+          new Error("Waiting approval run has no pending approval record."),
+          { code: "AGENT_RECOVERY_APPROVAL_MISSING" },
+        ),
+        now,
+      );
+      recoveredRuns.push(run.id);
+      failedRuns.push(run.id);
+    }
+  }
+
+  for (const run of await listAllRuns(database, "waiting_user")) {
+    if (hasReactCheckpoint(run)) {
+      recoveredRuns.push(run.id);
+      continue;
+    }
+    await failRecoveredRun(
+      database,
+      run,
+      Object.assign(
+        new Error("Waiting user run has no resumable ReAct checkpoint."),
+        { code: "AGENT_RECOVERY_CHECKPOINT_MISSING" },
+      ),
+      now,
+    );
+    recoveredRuns.push(run.id);
+    failedRuns.push(run.id);
   }
 
   if (
@@ -99,28 +151,97 @@ async function interruptRecoveredRun(
     category: "run_state",
     retryable: true,
   };
-  await database.runs.updateStatus(run.id, { status: "interrupted", updatedAt: now, error });
-  await database.runStatusHistory.append({
-    runId: run.id,
-    previousStatus: run.status,
-    nextStatus: "interrupted",
-    reason: "daemon restarted while run was unfinished",
-    actor: "daemon",
-    createdAt: now,
-  });
-  for (const step of await database.steps.listByRunId(run.id)) {
-    if (["pending", "running", "waiting_approval"].includes(step.status)) {
-      await database.steps.updateStatus(step.id, "interrupted", undefined, {
-        reason: "daemon restarted while run was unfinished",
-      });
+  const work = async (db: DatabaseContext): Promise<void> => {
+    const states = new RepositoryRunStateManager(db);
+    await states.markStatus(
+      run.id,
+      "interrupted",
+      "daemon restarted while run was unfinished",
+    );
+    // Preserve a structured retryable error alongside the legal state change.
+    await db.runs.updateStatus(run.id, { status: "interrupted", updatedAt: now, error });
+    for (const step of await db.steps.listByRunId(run.id)) {
+      if (["pending", "running", "waiting_approval"].includes(step.status)) {
+        await db.steps.updateStatus(step.id, "interrupted", undefined, {
+          reason: "daemon restarted while run was unfinished",
+        });
+      }
     }
-  }
+    await db.events.append({
+      id: `evt_${crypto.randomUUID()}`,
+      runId: run.id,
+      conversationId: run.conversationId,
+      type: "agent.run.interrupted",
+      payload: { runId: run.id, error },
+      createdAt: now,
+    });
+  };
+  if (database.transaction) await database.transaction(work);
+  else await work(database);
+}
+
+async function failRecoveredRun(
+  database: DatabaseContext,
+  run: RunRecord,
+  cause: unknown,
+  now: string,
+): Promise<void> {
+  const code = (cause as { code?: string } | undefined)?.code ?? "AGENT_RECOVERY_FAILED";
+  const error = Object.assign(
+    new Error(
+      `Daemon could not safely interrupt unfinished run: ${
+        cause instanceof Error ? cause.message : String(cause)
+      }`,
+    ),
+    { code, category: "run_state", retryable: true },
+  );
+  const states = new RepositoryRunStateManager(database);
+  await states.markFailed(run.id, error);
   await database.events.append({
     id: `evt_${crypto.randomUUID()}`,
     runId: run.id,
     conversationId: run.conversationId,
-    type: "agent.run.interrupted",
-    payload: { runId: run.id, error },
+    type: "agent.run.failed",
+    payload: {
+      runId: run.id,
+      error: {
+        code,
+        message: error.message,
+        category: "run_state",
+        retryable: true,
+      },
+    },
     createdAt: now,
   });
+}
+
+async function listAllRuns(
+  database: DatabaseContext,
+  status: RunStatus,
+): Promise<RunRecord[]> {
+  const runs: RunRecord[] = [];
+  let cursor: string | undefined;
+  do {
+    const page = await database.runs.list({ status, limit: 200, cursor });
+    runs.push(...page);
+    const last = page.at(-1);
+    cursor = page.length === 200 && last
+      ? Buffer.from(JSON.stringify({ updatedAt: last.updatedAt, id: last.id })).toString("base64url")
+      : undefined;
+  } while (cursor);
+  return runs;
+}
+
+function hasReactCheckpoint(run: RunRecord): boolean {
+  const taskState = run.context.taskState;
+  if (!taskState || typeof taskState !== "object" || Array.isArray(taskState)) {
+    return false;
+  }
+  const gatheredFacts = (taskState as { gatheredFacts?: unknown }).gatheredFacts;
+  if (!gatheredFacts || typeof gatheredFacts !== "object" || Array.isArray(gatheredFacts)) {
+    return false;
+  }
+  return !!parseReactCheckpoint(
+    (gatheredFacts as { reactCheckpoint?: unknown }).reactCheckpoint,
+  );
 }

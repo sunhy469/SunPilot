@@ -1,4 +1,4 @@
-import type { ChatSendParams, ChatStopParams } from "./types";
+import type { ChatSendParams, ChatStopParams, RunResumeParams } from "./types";
 import { withLocalTokenQuery } from "../../shared/auth/local-token";
 
 export function createChatSocket(): WebSocket {
@@ -51,6 +51,23 @@ export function sendChatStop(socket: WebSocket, params: ChatStopParams) {
       params: { runId: params.runId },
     }),
   );
+}
+
+/** Continue the same checkpointed run after agent_request_input. */
+export function sendRunResume(
+  socket: WebSocket,
+  params: RunResumeParams,
+): string {
+  const id = crypto.randomUUID();
+  socket.send(
+    JSON.stringify({
+      jsonrpc: "2.0",
+      id,
+      method: "run.resume",
+      params,
+    }),
+  );
+  return id;
 }
 
 /**

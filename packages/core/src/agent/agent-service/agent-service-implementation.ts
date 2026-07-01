@@ -35,6 +35,7 @@ import type {
   RepositoryApprovalDecisionService,
 } from "../../agent-kernel/persistence/repository-approval-decision-service.js";
 import type { RepositoryAgentRunInitializer } from "../../agent-kernel/persistence/repository-agent-run-initializer.js";
+import { isTerminal } from "../../agent-kernel/state/run-state-machine.js";
 
 export type AgentStreamDelta = {
   type: "agent.message.part.delta";
@@ -346,6 +347,7 @@ export class AgentServiceImplementation {
               message: error instanceof Error ? error.message : String(error),
               category: "internal",
               retryable: false,
+              fatal: true,
             },
             { runId, conversationId },
           );
@@ -630,6 +632,7 @@ export class AgentServiceImplementation {
           message: error instanceof Error ? error.message : String(error),
           category: "internal",
           retryable: false,
+          fatal: true,
         },
         { runId, conversationId },
       );
@@ -648,6 +651,11 @@ export class AgentServiceImplementation {
     return { stopped, runId };
   }
 
+  /** Release run-scoped execution grants after external lifecycle cleanup. */
+  disposeRun(runId: string): void {
+    this.loopConfig.loopEngine.disposeRun?.(runId);
+  }
+
   /**
    * 取消一个 Agent Run。
    *
@@ -660,10 +668,31 @@ export class AgentServiceImplementation {
     runId: string,
     reason = "cancelled by user",
   ): Promise<{ cancelled: true; runId: string; stopped: boolean }> {
+    const before = await this.loopConfig.runStateManager.getRun(runId);
+    if (!before) {
+      throw Object.assign(new Error(`Unknown run: ${runId}`), {
+        code: "AGENT_RUN_NOT_FOUND",
+      });
+    }
+    if (before.status === "cancelled") {
+      return { cancelled: true, runId, stopped: false };
+    }
+    if (isTerminal(before.status)) {
+      throw Object.assign(
+        new Error(`Cannot cancel terminal run ${runId} in status ${before.status}`),
+        { code: "AGENT_RUN_STATE_CONFLICT", category: "run_state" },
+      );
+    }
     const stopped = this.loopConfig.abortRegistry.abort(runId);
     await this.loopConfig.runStateManager.markCancelled(runId, reason);
     this.loopConfig.loopEngine.disposeRun?.(runId);
     const run = await this.loopConfig.runStateManager.getRun(runId);
+    if (run?.status !== "cancelled") {
+      throw Object.assign(
+        new Error(`Run ${runId} reached ${run?.status ?? "unknown"} before cancellation committed`),
+        { code: "AGENT_RUN_STATE_CONFLICT", category: "run_state" },
+      );
+    }
     this.loopConfig.eventBus.emit(
       "agent.run.cancelled",
       { runId, reason },
@@ -677,12 +706,17 @@ export class AgentServiceImplementation {
    * 恢复一个被中断/暂停的 Run。waiting_user 和带 ReAct checkpoint
    * 的 interrupted Run 都在原 run/message/transcript 上继续。
    */
-  async resumeRun(runId: string, userMessage?: string): Promise<{
+  async resumeRun(
+    runId: string,
+    userMessage?: string,
+    attachments?: AgentLoopInput["attachments"],
+  ): Promise<{
     resumed: true;
     originalRunId: string;
     runId: string;
     conversationId: string;
     messageId: string;
+    userMessageId?: string;
     status: AgentLoopResult["status"];
   }> {
     const run = await this.loopConfig.runStateManager.getRun(runId);
@@ -701,12 +735,14 @@ export class AgentServiceImplementation {
       try {
         const signal = this.loopConfig.abortRegistry.create(runId);
         const message = userMessage.trim();
+        assertUsableImageAttachments({ message, attachments });
         const userMessageId = `msg_${crypto.randomUUID()}`;
         await this.loopConfig.conversations?.createMessage({
           id: userMessageId,
           conversationId: run.conversationId,
           role: "user",
           content: message,
+          attachments,
         });
         const result = await this.loopConfig.loopEngine.resumeWithUserInput(
           {
@@ -714,6 +750,7 @@ export class AgentServiceImplementation {
             conversationId: run.conversationId,
             userMessageId,
             message,
+            attachments,
           },
           signal,
         );
@@ -723,8 +760,12 @@ export class AgentServiceImplementation {
           runId,
           conversationId: result.conversationId,
           messageId: result.assistantMessageId ?? runId,
+          userMessageId,
           status: result.status,
         };
+      } catch (error) {
+        await this.failUnresumableContinuation(runId, run.conversationId, error);
+        throw error;
       } finally {
         this.loopConfig.abortRegistry.remove(runId);
         releaseResume();
@@ -746,6 +787,9 @@ export class AgentServiceImplementation {
           messageId: result.assistantMessageId ?? runId,
           status: result.status,
         };
+      } catch (error) {
+        await this.failUnresumableContinuation(runId, run.conversationId, error);
+        throw error;
       } finally {
         this.loopConfig.abortRegistry.remove(runId);
         releaseResume();
@@ -765,6 +809,34 @@ export class AgentServiceImplementation {
     return () => {
       this.activeResumes.delete(runId);
     };
+  }
+
+  private async failUnresumableContinuation(
+    runId: string,
+    conversationId: string | undefined,
+    error: unknown,
+  ): Promise<void> {
+    const state = await this.loopConfig.runStateManager.getRun(runId);
+    if (!state || !["waiting_approval", "waiting_user", "interrupted"].includes(state.status)) {
+      return;
+    }
+    await this.loopConfig.runStateManager.markFailed(runId, error);
+    const agentError = {
+      code: (error as { code?: string }).code ?? "AGENT_CONTINUATION_FAILED",
+      message: error instanceof Error ? error.message : String(error),
+      category: (error as { category?: string }).category ?? "run_state",
+      retryable: false,
+    };
+    this.loopConfig.eventBus.emit(
+      "agent.run.failed",
+      { runId, error: agentError },
+      { runId, conversationId },
+    );
+    this.loopConfig.eventBus.emit(
+      "agent.error",
+      { runId, conversationId, ...agentError, fatal: true },
+      { runId, conversationId },
+    );
   }
 
   /**
@@ -845,6 +917,13 @@ export class AgentServiceImplementation {
         },
         signal,
       );
+    } catch (error) {
+      await this.failUnresumableContinuation(
+        approval.runId,
+        run?.conversationId,
+        error,
+      );
+      throw error;
     } finally {
       this.loopConfig.abortRegistry.remove(approval.runId);
     }
@@ -889,8 +968,25 @@ export class AgentServiceImplementation {
     const approvalMessageId = gatheredFacts?.approvalMessageId as string | undefined;
 
     // Helper to update "等待确认" status parts with a given status/label
-    const updateApprovalStatusParts = (patch: { status: string; label: string }) => {
+    const updateApprovalStatusParts = async (
+      patch: { status: string; label: string },
+      terminal = false,
+    ) => {
       if (approvalMessageId && partsSnapshot) {
+        const updatedParts = partsSnapshot.map((part) => {
+          if (
+            part.type === "status" &&
+            part.status === "running" &&
+            part.label?.startsWith(RUN_PHASE_LABELS.waiting_approval)
+          ) {
+            return { ...part, ...patch, completedAt: new Date().toISOString() };
+          }
+          if (terminal && part.type === "tool_use" &&
+            (part.status === "pending" || part.status === "running")) {
+            return { ...part, status: "interrupted" };
+          }
+          return part;
+        });
         for (const part of partsSnapshot) {
           if (part.type === "status" && part.status === "running" && part.label?.startsWith(RUN_PHASE_LABELS.waiting_approval)) {
             this.loopConfig.eventBus.emit(
@@ -906,6 +1002,21 @@ export class AgentServiceImplementation {
             );
           }
         }
+        if (this.loopConfig.database && conversationId) {
+          const messages = await this.loopConfig.database.messages.listByConversationId(
+            conversationId,
+          );
+          const existing = messages.find((message) => message.id === approvalMessageId);
+          if (existing) {
+            await this.loopConfig.database.messages.create({
+              id: existing.id,
+              conversationId,
+              role: "assistant",
+              content: existing.content,
+              metadata: { ...existing.metadata, parts: updatedParts },
+            });
+          }
+        }
       }
     };
 
@@ -913,10 +1024,10 @@ export class AgentServiceImplementation {
     switch (rejectionStrategy) {
       case "cancel":
         // §P0-3: Mark status parts as failed before terminal event
-        updateApprovalStatusParts({
+        await updateApprovalStatusParts({
           status: "failed",
           label: `已拒绝: ${RUN_PHASE_LABELS.waiting_approval}`,
-        });
+        }, true);
         await this.loopConfig.runStateManager.markCancelled(
           approval.runId,
           reason ?? "approval rejected — cancelled by user",
@@ -932,7 +1043,7 @@ export class AgentServiceImplementation {
         break;
       case "continue_without_tool":
         // §P0-3: Mark status parts as completed (run continues)
-        updateApprovalStatusParts({
+        await updateApprovalStatusParts({
           status: "completed",
           label: `已拒绝，正在继续处理`,
         });
@@ -970,6 +1081,7 @@ export class AgentServiceImplementation {
                   message: error instanceof Error ? error.message : String(error),
                   category: "run_state",
                   retryable: true,
+                  fatal: true,
                 },
                 { runId: approval.runId, conversationId },
               );
@@ -982,10 +1094,10 @@ export class AgentServiceImplementation {
       case "interrupt":
       default:
         // §P0-3: Mark status parts as failed before terminal event
-        updateApprovalStatusParts({
+        await updateApprovalStatusParts({
           status: "failed",
           label: `已拒绝`,
-        });
+        }, true);
         await this.loopConfig.runStateManager.markStatus(
           approval.runId,
           "interrupted",
@@ -1104,7 +1216,6 @@ export class AgentServiceImplementation {
       action,
       originalRunId: runId,
       newRunId: result.runId,
-      conversationId,
       status,
     });
 
@@ -1122,7 +1233,6 @@ export class AgentServiceImplementation {
     action: "resume" | "retry";
     originalRunId: string;
     newRunId: string;
-    conversationId: string;
     status: string;
   }): Promise<void> {
     const db = this.loopConfig.database;
@@ -1150,18 +1260,6 @@ export class AgentServiceImplementation {
         originalRunId: input.originalRunId,
         newRunId: input.newRunId,
         originalStatus: input.status,
-      },
-      createdAt: now,
-    });
-    await db.events.append({
-      id: `evt_${crypto.randomUUID()}`,
-      runId: input.newRunId,
-      conversationId: input.conversationId,
-      type: "agent.run.started",
-      payload: {
-        runId: input.newRunId,
-        originalRunId: input.originalRunId,
-        attemptAction: input.action,
       },
       createdAt: now,
     });

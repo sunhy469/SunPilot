@@ -101,6 +101,7 @@ export class MemoryRetryWrapper implements MemoryWriter {
         message: `Memory write failed after ${this.config.maxRetries + 1} attempts: ${errorMessage}`,
         category: "memory",
         retryable: false,
+        fatal: false,
       },
       { runId, conversationId },
     );

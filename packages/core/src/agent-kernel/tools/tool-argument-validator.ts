@@ -3,6 +3,13 @@ export function validateToolArguments(
   value: Record<string, unknown>,
   schema?: Record<string, unknown>,
 ): string[] {
+  return validateJsonSchemaValue(value, schema);
+}
+
+export function validateJsonSchemaValue(
+  value: unknown,
+  schema?: Record<string, unknown>,
+): string[] {
   if (!schema) return [];
   return validateNode(value, schema, "$", true);
 }

@@ -5,30 +5,32 @@
 
 import { z } from 'zod';
 
+const MAX_MESSAGE_CHARS = 100_000;
+const MAX_INLINE_ATTACHMENT_CHARS = 4 * 1024 * 1024;
+const attachmentSchema = z.object({
+  id: z.string().trim().min(1).max(256),
+  name: z.string().trim().min(1).max(512),
+  type: z.string().trim().min(1).max(128),
+  sizeBytes: z.number().int().nonnegative().optional(),
+  url: z.string().max(4096).optional(),
+  dataUrl: z.string().max(MAX_INLINE_ATTACHMENT_CHARS).optional(),
+  storageKey: z.string().max(2048).optional(),
+  provider: z.enum(["aliyun-oss", "s3", "minio", "local"]).optional(),
+  checksum: z.string().max(256).optional(),
+});
+
 // ── Zod schemas ──────────────────────────────────────────────────────
 
 export const chatSendSchema = z.object({
-  clientRequestId: z.string().optional(),
-  conversationId: z.string().optional(),
-  message: z.string().default(''),
+  clientRequestId: z.string().max(256).optional(),
+  conversationId: z.string().min(1).max(256).optional(),
+  message: z.string().max(MAX_MESSAGE_CHARS).default(''),
   mode: z.enum(['chat', 'agent']).default('agent'),
   permissionMode: z.enum(['ask', 'auto', 'full']).default('auto'),
   modelId: z.enum(['dp', 'seed']).optional(),
   attachments: z
-    .array(
-      z.object({
-        id: z.string(),
-        name: z.string(),
-        type: z.string(),
-        sizeBytes: z.number().optional(),
-        url: z.string().optional(),
-        /** Base64-encoded data URL as fallback when no public URL is available. */
-        dataUrl: z.string().optional(),
-        storageKey: z.string().optional(),
-        provider: z.enum(["aliyun-oss", "s3", "minio", "local"]).optional(),
-        checksum: z.string().optional(),
-      }),
-    )
+    .array(attachmentSchema)
+    .max(20)
     .default([]),
 }).superRefine((val, ctx) => {
   // Allow attachment-only messages: message may be empty IF at least one
@@ -72,7 +74,8 @@ export const runCancelSchema = z.object({
 
 export const runResumeSchema = z.object({
   runId: z.string().min(1),
-  message: z.string().min(1).optional(),
+  message: z.string().trim().min(1).optional(),
+  attachments: z.array(attachmentSchema).max(20).optional(),
 });
 
 export const runRetrySchema = z.object({

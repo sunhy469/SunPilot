@@ -76,4 +76,55 @@ describe("OpenAICompatibleChatProvider", () => {
       "https://ark.cn-beijing.volces.com/api/v3/chat/completions",
     );
   });
+
+  test("rejects malformed SSE JSON instead of silently dropping output", async () => {
+    const provider = new OpenAICompatibleChatProvider(
+      { apiKey: "test-key" },
+      async () => new Response("data: {not-json}\n\n", { status: 200 }),
+    );
+
+    await expect(async () => {
+      for await (const _chunk of provider.streamChat({
+        messages: [{ role: "user", content: "hello" }],
+      })) {
+        // Drain the stream.
+      }
+    }).rejects.toThrow("malformed JSON");
+  });
+
+  test("rejects a truncated stream without a terminal marker", async () => {
+    const provider = new OpenAICompatibleChatProvider(
+      { apiKey: "test-key" },
+      async () => new Response(
+        'data: {"choices":[{"delta":{"content":"partial"}}]}\n\n',
+        { status: 200 },
+      ),
+    );
+
+    await expect(async () => {
+      for await (const _chunk of provider.streamChat({
+        messages: [{ role: "user", content: "hello" }],
+      })) {
+        // Drain the stream.
+      }
+    }).rejects.toThrow("without [DONE] or a terminal finish_reason");
+  });
+
+  test("surfaces terminal finish reasons", async () => {
+    const provider = new OpenAICompatibleChatProvider(
+      { apiKey: "test-key" },
+      async () => new Response(
+        'data: {"choices":[{"delta":{},"finish_reason":"length"}]}\n\n',
+        { status: 200 },
+      ),
+    );
+
+    const chunks = [];
+    for await (const chunk of provider.streamChat({
+      messages: [{ role: "user", content: "hello" }],
+    })) chunks.push(chunk);
+    expect(chunks).toEqual([
+      expect.objectContaining({ delta: "", finishReason: "length" }),
+    ]);
+  });
 });

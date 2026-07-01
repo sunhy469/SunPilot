@@ -74,6 +74,9 @@ export class ToolCallGuard {
           throw new Error("arguments must be a JSON object");
         }
         args = parsed as Record<string, unknown>;
+        if (containsUnsafeObjectKey(args)) {
+          throw new Error("arguments contain an unsafe object key");
+        }
       } catch (error) {
         observations.push(
           this.observations.validationFailure({
@@ -150,6 +153,7 @@ export class ToolCallGuard {
         timeoutMs: Math.min(skill.defaultTimeoutMs, skill.maxTimeoutMs),
         riskHints: skill.riskHints,
         inputSchema: skill.inputSchema,
+        outputSchema: skill.outputSchema,
         projectionHints: skill.projectionHints,
         argumentSources: Object.keys(args).map((arg) => ({
           arg,
@@ -217,4 +221,16 @@ function stableStringify(value: unknown): string {
       .join(",")}}`;
   }
   return JSON.stringify(value);
+}
+
+function containsUnsafeObjectKey(value: unknown): boolean {
+  if (Array.isArray(value)) return value.some(containsUnsafeObjectKey);
+  if (!value || typeof value !== "object") return false;
+  for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+    if (key === "__proto__" || key === "prototype" || key === "constructor") {
+      return true;
+    }
+    if (containsUnsafeObjectKey(child)) return true;
+  }
+  return false;
 }

@@ -79,9 +79,34 @@ export class ReactToolExecutor {
     const summariesById = new Map(
       observation.toolCalls.map((summary) => [summary.id, summary]),
     );
-    const orderedSummaries = input.calls.flatMap((call) => {
+    const orderedSummaries = input.calls.map((call) => {
       const summary = summariesById.get(call.id);
-      return summary ? [summary] : [];
+      if (summary) return summary;
+      this.eventBus.emit(
+        "agent.tool.failed",
+        {
+          runId: input.runId,
+          toolCallId: call.id,
+          skillId: call.skillId,
+          name: call.name,
+          error: {
+            code: "AGENT_TOOL_RESULT_MISSING",
+            message: "The tool executor returned no durable result for this call.",
+          },
+        },
+        { runId: input.runId, conversationId: input.conversationId },
+      );
+      return {
+        id: call.id,
+        skillId: call.skillId,
+        name: call.name,
+        status: "failed" as const,
+        summary: "The tool executor returned no durable result for this call.",
+        metadata: {
+          ...call.metadata,
+          missingExecutionResult: true,
+        },
+      };
     });
 
     for (const summary of orderedSummaries) {

@@ -3,6 +3,8 @@ export type ChatViewState =
   | "loadingConversation"
   | "ready"
   | "streaming"
+  | "waitingApproval"
+  | "waitingUser"
   | "offline"
   | "error";
 
@@ -20,5 +22,7 @@ export type LocalSendState =
   | "accepted"
   | "running"
   | "streaming"
+  | "waiting_approval"
+  | "waiting_user"
   | "completed"
   | "failed";

@@ -49,14 +49,28 @@ export function createPersistenceLayer(
   // Lifecycle events (message.started, part.started) and streaming deltas
   // (part.delta) are forwarded synchronously to liveEventBus to guarantee
   // ordering — the frontend must receive message.started before any part
-  // events for that message. These are NOT persisted (transient).
+  // events for that message. Lifecycle starts are also persisted in the same
+  // serialized queue for reconnect replay; high-volume deltas stay transient.
   const SYNC_FORWARD_TYPES = new Set([
     "agent.message.started",
     "agent.message.part.started",
     "agent.message.part.delta",
   ]);
 
-  rawEventBus.subscribe(async (event) => {
+  let persistenceQueue = Promise.resolve();
+  const persistInOrder = (
+    event: Parameters<AgentEventBus["publish"]>[0],
+    forward: boolean,
+  ): Promise<void> => {
+    const task = persistenceQueue.then(async () => {
+      const persisted = await eventSink.persist(event);
+      if (forward && persisted) liveEventBus.publish(persisted);
+    });
+    persistenceQueue = task.catch(() => undefined);
+    return task;
+  };
+
+  rawEventBus.subscribe((event) => {
     if (event.sequence !== undefined) {
       // Already persisted (e.g. atomically created with DB sequence) —
       // forward directly to liveEventBus without re-persisting.
@@ -65,14 +79,16 @@ export function createPersistenceLayer(
     }
     if (SYNC_FORWARD_TYPES.has(event.type)) {
       liveEventBus.publish(event);
-      return;
+      // Deltas are intentionally transient. Lifecycle starts are persisted for
+      // replay, but are not forwarded a second time after persistence.
+      if (event.type === "agent.message.part.delta") return;
+      return persistInOrder(event, false).catch((err) => {
+        console.error("[eventBus] Failed to persist event:", (err as Error).message);
+      });
     }
-    try {
-      const persisted = await eventSink.persist(event);
-      if (persisted) liveEventBus.publish(persisted);
-    } catch (err) {
+    return persistInOrder(event, true).catch((err) => {
       console.error("[eventBus] Failed to persist event:", (err as Error).message);
-    }
+    });
   });
 
   return {

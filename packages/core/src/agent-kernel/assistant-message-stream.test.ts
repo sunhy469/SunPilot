@@ -312,6 +312,41 @@ describe("AssistantMessageStream", () => {
     );
   });
 
+  it("failed completion marks open statuses failed", async () => {
+    const status = stream.startStatus({ label: "正在调用工具" });
+    const toolUse = stream.addToolUse({
+      toolCallId: "tc-failed",
+      skillId: "search",
+      name: "搜索",
+    });
+
+    const result = await stream.complete("failed");
+
+    expect(result.parts.find((part) => part.id === status.id)).toMatchObject({
+      type: "status",
+      status: "failed",
+    });
+    expect(result.parts.find((part) => part.id === toolUse.id)).toMatchObject({
+      type: "tool_use",
+      status: "interrupted",
+    });
+  });
+
+  it("persists a resumable snapshot without completing open parts", async () => {
+    const status = stream.startStatus({ label: "等待你补充信息" });
+
+    await stream.persistSnapshot();
+
+    expect(stream.getPartsSnapshot()).toEqual([
+      expect.objectContaining({ id: status.id, status: "running" }),
+    ]);
+    expect(eventBus.emit).not.toHaveBeenCalledWith(
+      "agent.message.completed",
+      expect.anything(),
+      expect.anything(),
+    );
+  });
+
   it("complete saves message with parts in metadata", async () => {
     const text = stream.startTextPart();
     stream.appendText(text.id, "Response text");

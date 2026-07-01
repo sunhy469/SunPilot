@@ -76,6 +76,8 @@ export interface ChatCompletionDelta {
   delta: string;
   /** Tool call deltas from a streaming function-calling response. Undefined for text-only chunks. */
   toolCalls?: ToolCallDelta[];
+  /** Provider terminal reason (for example stop, tool_calls, length). */
+  finishReason?: string;
   raw: unknown;
 }
 
